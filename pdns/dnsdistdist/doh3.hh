@@ -22,21 +22,33 @@
 #pragma once
 
 #include <memory>
+#include <string>
+#include <unordered_map>
 
 #include "config.h"
+#include "noinitvector.hh"
+
+#ifdef HAVE_DNS_OVER_HTTP3
 #include "channel.hh"
+#include "dolog.hh"
 #include "iputils.hh"
 #include "libssl.hh"
-#include "noinitvector.hh"
 #include "stat_t.hh"
-#include "dnsdist-idstate.hh"
 
 struct DOH3ServerConfig;
 struct DownstreamState;
+#endif
+
+namespace dnsdist::doh3
+{
+using h3_headers_t = std::unordered_map<std::string, std::string>;
+}
 
 #ifdef HAVE_DNS_OVER_HTTP3
 
+#include "dnsdist-idstate.hh"
 #include "doq-common.hh"
+#include "dnsdist-doh-common.hh"
 
 struct DOH3Frontend
 {
@@ -49,7 +61,13 @@ struct DOH3Frontend
 
   void setup();
   void reloadCertificates();
+  const Logr::Logger& getLogger()
+  {
+    return *d_logger;
+  }
 
+  std::shared_ptr<const Logr::Logger> d_logger{nullptr};
+  std::shared_ptr<std::vector<std::shared_ptr<DOHResponseMapEntry>>> d_responsesMap;
   std::unique_ptr<DOH3ServerConfig> d_server_config;
   ComboAddress d_local;
 
@@ -78,11 +96,21 @@ struct DOH3Unit
   DOH3Unit(const DOH3Unit&) = delete;
   DOH3Unit& operator=(const DOH3Unit&) = delete;
 
+  [[nodiscard]] std::string getHTTPPath() const;
+  [[nodiscard]] std::string getHTTPQueryString() const;
+  [[nodiscard]] std::string getHTTPHost() const;
+  [[nodiscard]] std::string getHTTPScheme() const;
+  [[nodiscard]] const dnsdist::doh3::h3_headers_t& getHTTPHeaders() const;
+  void setHTTPResponse(uint16_t statusCode, PacketBuffer&& body, const std::string& contentType = "");
+
   InternalQueryState ids;
   PacketBuffer query;
   PacketBuffer response;
   PacketBuffer serverConnID;
+  dnsdist::doh3::h3_headers_t headers;
   std::shared_ptr<DownstreamState> downstream{nullptr};
+  std::shared_ptr<const std::string> sni{nullptr};
+  std::string d_contentTypeOut;
   DOH3ServerConfig* dsc{nullptr};
   uint64_t streamID{0};
   size_t proxyProtocolPayloadSize{0};
@@ -104,13 +132,17 @@ void doh3Thread(ClientState* clientState);
 
 struct DOH3Unit
 {
+  [[nodiscard]] std::string getHTTPPath() const;
+  [[nodiscard]] std::string getHTTPQueryString() const;
+  [[nodiscard]] std::string getHTTPHost() const;
+  [[nodiscard]] std::string getHTTPScheme() const;
+  [[nodiscard]] const dnsdist::doh3::h3_headers_t& getHTTPHeaders() const;
+  void setHTTPResponse(uint16_t, PacketBuffer&&, const std::string&);
 };
 
 struct DOH3Frontend
 {
-  DOH3Frontend()
-  {
-  }
+  DOH3Frontend() = default;
   void setup()
   {
   }

@@ -40,7 +40,7 @@ public:
 class RecordTextReader
 {
 public:
-  RecordTextReader(string  str, DNSName  zone=DNSName(""));
+  RecordTextReader(string  str, ZoneName  zone=ZoneName(""));
   void xfrNodeOrLocatorID(NodeOrLocatorID& val);
   void xfr64BitInt(uint64_t& val);
   void xfr48BitInt(uint64_t& val);
@@ -55,7 +55,7 @@ public:
   void xfrCAPort(ComboAddress &val);
   void xfrTime(uint32_t& val);
 
-  void xfrName(DNSName& val, bool compress=false, bool noDot=false);
+  void xfrName(DNSName& val, bool compress=false);
   void xfrText(string& val, bool multi=false, bool lenField=true);
   void xfrUnquotedText(string& val, bool lenField=true);
   void xfrHexBlob(string& val, bool keepReading=false);
@@ -68,16 +68,25 @@ public:
   void xfrRFC1035CharString(string &val);
   void xfrSVCBValueList(vector<string> &val);
 
-  const string getRemaining() const {
+  std::string getRemaining() const {
     return d_string.substr(d_pos);
   }
 
+  bool eof() const;
 
-  bool eof();
+#if defined(PDNS_AUTH) // [
+  /* This method is only there for parity with DNSParser::consumeRemaining(),
+     see the comment there to know why it is needed.
+  */
+  void consumeRemaining() const
+  {
+  }
+#endif // ]
+
 private:
   string d_string;
-  DNSName d_zone;
-  string::size_type d_pos;
+  ZoneName d_zone;
+  string::size_type d_pos{0};
   string::size_type d_end;
   void skipSpaces();
 };
@@ -99,20 +108,29 @@ public:
   void xfrBase32HexBlob(const string& val);
 
   void xfrType(const uint16_t& val);
-  void xfrName(const DNSName& val, bool compress=false, bool noDot=false);
+  void xfrName(const DNSName& val, bool compress=false);
   void xfrText(const string& val, bool multi=false, bool lenField=true);
   void xfrUnquotedText(const string& val, bool lenField=true);
   void xfrBlobNoSpaces(const string& val, int len=-1);
   void xfrBlob(const string& val, int len=-1);
   void xfrHexBlob(const string& val, bool keepReading=false);
   void xfrSvcParamKeyVals(const set<SvcParam>& val);
-  bool eof() { return true; };
-
   void xfrSVCBValueList(const vector<string> &val);
 
-  const string getRemaining() const {
+  bool eof() const { return true; };
+
+  std::string getRemaining() const {
      return "";
   }
+
+  #if defined(PDNS_AUTH) // [
+  /* This method is only there for parity with DNSParser::consumeRemaining(),
+     see the comment there to know why it is needed.
+  */
+  void consumeRemaining() const
+  {
+  }
+#endif // ]
 private:
   string& d_string;
   bool d_nodot;

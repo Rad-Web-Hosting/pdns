@@ -20,8 +20,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #pragma once
-#include <string>
-#include <string.h>
+
 #include <vector>
 #include <boost/logic/tribool.hpp>
 #include <boost/multi_index_container.hpp>
@@ -34,35 +33,13 @@
 #include "dnspacket.hh"
 #include "ueberbackend.hh"
 #include "lock.hh"
+#include "dnssec.hh"
 
 using namespace ::boost::multi_index;
 
-class DNSSECKeeper : public boost::noncopyable
+class DNSSECKeeper : public DNSSEC
 {
 public:
-  enum keytype_t { KSK, ZSK, CSK };
-  enum keyalgorithm_t : uint8_t {
-    RSAMD5=1,
-    DH=2,
-    DSA=3,
-    RSASHA1=5,
-    DSANSEC3SHA1=6,
-    RSASHA1NSEC3SHA1=7,
-    RSASHA256=8,
-    RSASHA512=10,
-    ECCGOST=12,
-    ECDSA256=13,
-    ECDSA384=14,
-    ED25519=15,
-    ED448=16
-  };
-
-  enum dsdigestalgorithm_t : uint8_t {
-    DIGEST_SHA1=1,
-    DIGEST_SHA256=2,
-    DIGEST_GOST=3,
-    DIGEST_SHA384=4
-  };
 
   struct KeyMetaData
   {
@@ -76,106 +53,18 @@ public:
   typedef std::pair<DNSSECPrivateKey, KeyMetaData> keymeta_t;
   typedef std::vector<keymeta_t > keyset_t;
 
-  static string keyTypeToString(const keytype_t &keyType)
-  {
-    switch(keyType) {
-      case DNSSECKeeper::KSK:
-        return("KSK");
-      case DNSSECKeeper::ZSK:
-        return("ZSK");
-      case DNSSECKeeper::CSK:
-        return("CSK");
-      default:
-        return("UNKNOWN");
-    }
-  }
-
-  /*
-   * Returns the algorithm number based on the mnemonic (or old PowerDNS value of) a string.
-   * See https://www.iana.org/assignments/dns-sec-alg-numbers/dns-sec-alg-numbers.xhtml for the mapping
-   */
-  static int shorthand2algorithm(const string &algorithm)
-  {
-    if (pdns_iequals(algorithm, "rsamd5")) return RSAMD5;
-    if (pdns_iequals(algorithm, "dh")) return DH;
-    if (pdns_iequals(algorithm, "dsa")) return DSA;
-    if (pdns_iequals(algorithm, "rsasha1")) return RSASHA1;
-    if (pdns_iequals(algorithm, "dsa-nsec3-sha1")) return DSANSEC3SHA1;
-    if (pdns_iequals(algorithm, "rsasha1-nsec3-sha1")) return RSASHA1NSEC3SHA1;
-    if (pdns_iequals(algorithm, "rsasha256")) return RSASHA256;
-    if (pdns_iequals(algorithm, "rsasha512")) return RSASHA512;
-    if (pdns_iequals(algorithm, "ecc-gost")) return ECCGOST;
-    if (pdns_iequals(algorithm, "gost")) return ECCGOST;
-    if (pdns_iequals(algorithm, "ecdsa256")) return ECDSA256;
-    if (pdns_iequals(algorithm, "ecdsap256sha256")) return ECDSA256;
-    if (pdns_iequals(algorithm, "ecdsa384")) return ECDSA384;
-    if (pdns_iequals(algorithm, "ecdsap384sha384")) return ECDSA384;
-    if (pdns_iequals(algorithm, "ed25519")) return ED25519;
-    if (pdns_iequals(algorithm, "ed448")) return ED448;
-    if (pdns_iequals(algorithm, "indirect")) return 252;
-    if (pdns_iequals(algorithm, "privatedns")) return 253;
-    if (pdns_iequals(algorithm, "privateoid")) return 254;
-    return -1;
-  }
-
-  /*
-   * Returns the mnemonic from https://www.iana.org/assignments/dns-sec-alg-numbers/dns-sec-alg-numbers.xhtml
-   */
-  static string algorithm2name(uint8_t algo) {
-    switch(algo) {
-      case 0:
-      case 4:
-      case 9:
-      case 11:
-        return "Reserved";
-      case RSAMD5:
-        return "RSAMD5";
-      case DH:
-        return "DH";
-      case DSA:
-        return "DSA";
-      case RSASHA1:
-        return "RSASHA1";
-      case DSANSEC3SHA1:
-        return "DSA-NSEC3-SHA1";
-      case RSASHA1NSEC3SHA1:
-        return "RSASHA1-NSEC3-SHA1";
-      case RSASHA256:
-        return "RSASHA256";
-      case RSASHA512:
-        return "RSASHA512";
-      case ECCGOST:
-        return "ECC-GOST";
-      case ECDSA256:
-        return "ECDSAP256SHA256";
-      case ECDSA384:
-        return "ECDSAP384SHA384";
-      case ED25519:
-        return "ED25519";
-      case ED448:
-        return "ED448";
-      case 252:
-        return "INDIRECT";
-      case 253:
-        return "PRIVATEDNS";
-      case 254:
-        return "PRIVATEOID";
-      default:
-        return "Unallocated/Reserved";
-    }
-  }
-
 private:
+  Logr::log_t d_slog;
   UeberBackend* d_keymetadb;
   bool d_ourDB;
 
 public:
-  DNSSECKeeper() : d_keymetadb( new UeberBackend("key-only")), d_ourDB(true)
+  DNSSECKeeper(Logr::log_t slog) : d_slog(slog), d_keymetadb( new UeberBackend("key-only")), d_ourDB(true)
   {
 
   }
 
-  DNSSECKeeper(UeberBackend* db) : d_keymetadb(db), d_ourDB(false)
+  DNSSECKeeper(Logr::log_t slog, UeberBackend* db) : d_slog(slog), d_keymetadb(db), d_ourDB(false)
   {
   }
 
@@ -185,47 +74,51 @@ public:
       delete d_keymetadb;
   }
 
+  DNSSECKeeper(const DNSSECKeeper&) = delete;
+  DNSSECKeeper operator=(const DNSSECKeeper&) = delete;
+
   static uint64_t dbdnssecCacheSizes(const std::string& str);
   static void clearAllCaches();
-  static bool clearKeyCache(const DNSName& name);
-  static bool clearMetaCache(const DNSName& name);
-  static void clearCaches(const DNSName& name);
+  static bool clearKeyCache(const ZoneName& name);
+  static bool clearMetaCache(const ZoneName& name);
+  static void clearCaches(const ZoneName& name);
 
   bool doesDNSSEC();
-  bool isSecuredZone(const DNSName& zone, bool useCache=true);
-  keyset_t getEntryPoints(const DNSName& zname);
-  keyset_t getKeys(const DNSName& zone, bool useCache = true);
-  DNSSECPrivateKey getKeyById(const DNSName& zone, unsigned int id);
-  bool addKey(const DNSName& zname, bool setSEPBit, int algorithm, int64_t& id, int bits=0, bool active=true, bool published=true);
-  bool addKey(const DNSName& zname, const DNSSECPrivateKey& dpk, int64_t& id, bool active=true, bool published=true);
-  bool removeKey(const DNSName& zname, unsigned int id);
-  bool activateKey(const DNSName& zname, unsigned int id);
-  bool deactivateKey(const DNSName& zname, unsigned int id);
-  bool publishKey(const DNSName& zname, unsigned int id);
-  bool unpublishKey(const DNSName& zname, unsigned int id);
-  bool checkKeys(const DNSName& zname, std::optional<std::reference_wrapper<std::vector<std::string>>> errorMessages);
+  bool isSecuredZone(const ZoneName& zone, bool useCache=true);
+  keyset_t getEntryPoints(const ZoneName& zname);
+  keyset_t getKeys(const ZoneName& zone, bool useCache = true);
+  DNSSECPrivateKey getKeyById(const ZoneName& zname, unsigned int keyId);
+  bool addKey(const ZoneName& zname, bool setSEPBit, int algorithm, int64_t& keyId, int bits=0, bool active=true, bool published=true);
+  bool addKey(const ZoneName& zname, const DNSSECPrivateKey& dpk, int64_t& keyId, bool active=true, bool published=true);
+  bool removeKey(const ZoneName& zname, unsigned int keyId);
+  bool activateKey(const ZoneName& zname, unsigned int keyId);
+  bool deactivateKey(const ZoneName& zname, unsigned int keyId);
+  bool publishKey(const ZoneName& zname, unsigned int keyId);
+  bool unpublishKey(const ZoneName& zname, unsigned int keyId);
+  bool checkKeys(const ZoneName& zone, std::optional<std::reference_wrapper<std::vector<std::string>>> errorMessages);
 
-  bool getNSEC3PARAM(const DNSName& zname, NSEC3PARAMRecordContent* n3p=nullptr, bool* narrow=nullptr, bool useCache=true);
+  bool getNSEC3PARAM(const ZoneName& zname, NSEC3PARAMRecordContent* ns3p=nullptr, bool* narrow=nullptr, bool useCache=true);
   bool checkNSEC3PARAM(const NSEC3PARAMRecordContent& ns3p, string& msg);
-  bool setNSEC3PARAM(const DNSName& zname, const NSEC3PARAMRecordContent& n3p, const bool& narrow=false);
-  bool unsetNSEC3PARAM(const DNSName& zname);
+  bool setNSEC3PARAM(const ZoneName& zname, const NSEC3PARAMRecordContent& ns3p, const bool& narrow=false);
+  bool unsetNSEC3PARAM(const ZoneName& zname);
   void getPreRRSIGs(UeberBackend& db, vector<DNSZoneRecord>& rrs, uint32_t signTTL, DNSPacket* p=nullptr);
-  bool isPresigned(const DNSName& zname, bool useCache=true);
-  bool setPresigned(const DNSName& zname);
-  bool unsetPresigned(const DNSName& zname);
-  bool setPublishCDNSKEY(const DNSName& zname, bool deleteAlg);
-  void getPublishCDNSKEY(const DNSName& zname, std::string& value);
-  bool unsetPublishCDNSKEY(const DNSName& zname);
-  bool setPublishCDS(const DNSName& zname, const string& digestAlgos);
-  void getPublishCDS(const DNSName& zname, std::string& value);
-  bool unsetPublishCDS(const DNSName& zname);
+  bool isPresigned(const ZoneName& zname, bool useCache=true);
+  bool setPresigned(const ZoneName& zname);
+  bool unsetPresigned(const ZoneName& zname);
+  bool isSignalingZone(const ZoneName& zname, bool useCache=true);
+  bool setPublishCDNSKEY(const ZoneName& zname, bool deleteAlg);
+  void getPublishCDNSKEY(const ZoneName& zname, std::string& value);
+  bool unsetPublishCDNSKEY(const ZoneName& zname);
+  bool setPublishCDS(const ZoneName& zname, const string& digestAlgos);
+  void getPublishCDS(const ZoneName& zname, std::string& value);
+  bool unsetPublishCDS(const ZoneName& zname);
 
-  bool TSIGGrantsAccess(const DNSName& zone, const DNSName& keyname);
-  bool getTSIGForAccess(const DNSName& zone, const ComboAddress& primary, DNSName* keyname);
+  bool TSIGGrantsAccess(const ZoneName& zone, const DNSName& keyname);
+  bool getTSIGForAccess(const ZoneName& zone, const ComboAddress& primary, DNSName* keyname);
 
-  void startTransaction(const DNSName& zone, int zone_id)
+  void startTransaction(const ZoneName& zone)
   {
-    (*d_keymetadb->backends.begin())->startTransaction(zone, zone_id);
+    (*d_keymetadb->backends.begin())->startDomainModificationTransaction(zone);
   }
 
   void commitTransaction()
@@ -233,19 +126,21 @@ public:
     (*d_keymetadb->backends.begin())->commitTransaction();
   }
 
-  void getFromMetaOrDefault(const DNSName& zname, const std::string& key, std::string& value, const std::string& defaultvalue);
-  bool getFromMeta(const DNSName& zname, const std::string& key, std::string& value);
-  void getSoaEdit(const DNSName& zname, std::string& value, bool useCache=true);
-  bool unSecureZone(const DNSName& zone, std::string& error);
-  bool rectifyZone(const DNSName& zone, std::string& error, std::string& info, bool doTransaction);
+  void getFromMetaOrDefault(const ZoneName& zname, const std::string& key, std::string& value, const std::string& defaultvalue);
+  bool getFromMeta(const ZoneName& zname, const std::string& key, std::string& value);
+  void getSoaEdit(const ZoneName& zname, std::string& value, bool useCache=true);
+  bool unSecureZone(const ZoneName& zone, std::string& error);
+  bool rectifyZone(const ZoneName& zone, std::string& error, std::string& info, bool doTransaction);
 
   static void setMaxEntries(size_t maxEntries);
 
-  typedef std::map<std::string, std::vector<std::string> > METAValues;
-private:
-  bool getFromMetaNoCache(const DNSName& name, const std::string& kind, std::string& value);
+  bool isMetadataOne(const ZoneName& zname, const std::string& metaname, bool useCache);
 
   int64_t d_metaCacheCleanAction{0};
+  typedef std::map<std::string, std::vector<std::string> > METAValues;
+private:
+  bool getFromMetaNoCache(const ZoneName& name, const std::string& kind, std::string& value);
+
   bool d_metaUpdate{false};
 
   struct KeyCacheEntry
@@ -257,7 +152,7 @@ private:
       return d_ttd < now;
     }
 
-    DNSName d_domain;
+    ZoneName d_domain;
     mutable keys_t d_keys;
     unsigned int d_ttd;
   };
@@ -269,7 +164,7 @@ private:
       return d_ttd < now;
     }
 
-    DNSName d_domain;
+    ZoneName d_domain;
     mutable METAValues d_value;
     time_t d_ttd;
   };
@@ -281,7 +176,7 @@ private:
   typedef multi_index_container<
     KeyCacheEntry,
     indexed_by<
-      hashed_unique<tag<KeyCacheTag>,member<KeyCacheEntry, DNSName, &KeyCacheEntry::d_domain> >,
+      hashed_unique<tag<KeyCacheTag>,member<KeyCacheEntry, ZoneName, &KeyCacheEntry::d_domain> >,
       sequenced<tag<SequencedTag>>
     >
   > keycache_t;
@@ -289,7 +184,7 @@ private:
   typedef multi_index_container<
     METACacheEntry,
     indexed_by<
-      ordered_unique<member<METACacheEntry, DNSName, &METACacheEntry::d_domain> >,
+      ordered_unique<member<METACacheEntry, ZoneName, &METACacheEntry::d_domain> >,
       sequenced<tag<SequencedTag>>
     >
   > metacache_t;
@@ -306,9 +201,9 @@ private:
 
 uint32_t localtime_format_YYYYMMDDSS(time_t t, uint32_t seq);
 // for SOA-EDIT
-uint32_t calculateEditSOA(uint32_t old_serial, DNSSECKeeper& dk, const DNSName& zonename);
-uint32_t calculateEditSOA(uint32_t old_serial, const string& kind, const DNSName& zonename);
+uint32_t calculateEditSOA(uint32_t old_serial, DNSSECKeeper& dsk, const ZoneName& zonename, Logr::log_t slog);
+uint32_t calculateEditSOA(uint32_t old_serial, const string& kind, const ZoneName& zonename, Logr::log_t slog);
 // for SOA-EDIT-DNSUPDATE/API
-bool increaseSOARecord(DNSResourceRecord& dr, const string& increaseKind, const string& editKind);
-bool makeIncreasedSOARecord(SOAData& sd, const string& increaseKind, const string& editKind, DNSResourceRecord& rrout);
-DNSZoneRecord makeEditedDNSZRFromSOAData(DNSSECKeeper& dk, const SOAData& sd, DNSResourceRecord::Place place=DNSResourceRecord::ANSWER);
+bool increaseSOARecord(DNSResourceRecord& rr, const string& increaseKind, const string& editKind, const ZoneName& zonename, Logr::log_t slog);
+bool makeIncreasedSOARecord(SOAData& sd, const string& increaseKind, const string& editKind, DNSResourceRecord& rrout, Logr::log_t slog);
+DNSZoneRecord makeEditedDNSZRFromSOAData(DNSSECKeeper& dk, const SOAData& sd, DNSResourceRecord::Place place, Logr::log_t slog);

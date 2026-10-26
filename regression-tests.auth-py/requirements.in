@@ -1,0 +1,12 @@
+# To generate requirements.txt, install pip-tools and run:
+#  pip-compile --allow-unsafe --generate-hashes -U requirements.in
+
+wheel==0.46.3
+dnspython
+pytest
+Twisted>0.15.0
+requests>=2.18.4
+https://github.com/PowerDNS/xfrserver/archive/refs/tags/0.3.zip
+setuptools<82
+protobuf>=3.0
+siphash==0.0.1

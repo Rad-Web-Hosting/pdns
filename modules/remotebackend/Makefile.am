@@ -1,5 +1,6 @@
 AM_CPPFLAGS += \
 	-I$(top_srcdir)/ext/json11 \
+	-I$(top_srcdir)/ext/protozero/include \
 	$(YAHTTP_CFLAGS) \
 	$(LIBCRYPTO_CFLAGS) \
 	$(LIBCRYPTO_INCLUDES) \
@@ -21,6 +22,7 @@ ARC4RANDOM_LIBS = $(top_builddir)/ext/arc4random/libarc4random.la
 EXTRA_DIST = \
 	OBJECTFILES \
 	OBJECTLIBS \
+	meson.build \
 	testrunner.sh \
 	unittest_http.py \
 	unittest_json.py \
@@ -53,7 +55,11 @@ libremotebackend_la_SOURCES = \
 	unixconnector.cc \
 	zmqconnector.cc
 
+if REMOTEBACKEND_DYNMODULE
 libremotebackend_la_LDFLAGS = -module -avoid-version
+else
+libremotebackend_la_LDFLAGS = -static -avoid-version
+endif
 
 libremotebackend_la_LIBADD = $(YAHTTP_LIBS) $(JSON11_LIBS)
 
@@ -126,7 +132,8 @@ libtestremotebackend_la_SOURCES = \
 	../../pdns/gss_context.cc ../../pdns/gss_context.hh \
 	../../pdns/iputils.cc \
 	../../pdns/json.hh ../../pdns/json.cc \
-	../../pdns/logger.cc \
+	../../pdns/logger.cc ../../pdns/logger.hh \
+	../../pdns/logging.cc ../../pdns/logging.hh \
 	../../pdns/misc.cc \
 	../../pdns/nameserver.cc \
 	../../pdns/nsecrecords.cc \

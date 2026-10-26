@@ -20,10 +20,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #pragma once
-#include <atomic>
+
 #include <mutex>
 #include <thread>
-#include <boost/filesystem.hpp>
+#include <filesystem>
+
 #include "dnsname.hh"
 #include "lock.hh"
 #include "stable-bloom.hh"
@@ -64,7 +65,7 @@ public:
   }
 
 private:
-  void remove_tmp_files(const boost::filesystem::path&, std::lock_guard<std::mutex>&);
+  void remove_tmp_files(const std::filesystem::path&, std::scoped_lock<std::mutex>&);
 
   LockGuarded<bf::stableBF> d_sbf; // Stable Bloom Filter
   std::string d_cachedir;

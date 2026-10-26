@@ -45,8 +45,15 @@ bool parseEtcHostsLine(std::vector<std::string>& parts, std::string& line);
 void makePartialIPZone(SyncRes::domainmap_t& newMap,
                        std::initializer_list<const char*> labels,
                        Logr::log_t log);
+void makePartialIP6Zone(SyncRes::domainmap_t& newMap,
+                        const std::string& name,
+                        Logr::log_t log);
 
 void addForwardAndReverseLookupEntries(SyncRes::domainmap_t& newMap,
                                        const std::string& searchSuffix,
                                        const std::vector<std::string>& parts,
                                        Logr::log_t log);
+
+void makeEmptyZone(SyncRes::domainmap_t& newMap,
+                   const std::string zoneName,
+                   Logr::log_t log);

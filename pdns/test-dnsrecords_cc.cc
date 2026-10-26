@@ -47,12 +47,6 @@ BOOST_AUTO_TEST_CASE(test_record_types) {
   // tuple contains <type, user value, zone representation, line value, broken>
   typedef boost::tuple<QType::typeenum, std::string, std::string, std::string, broken_marker> case_t;
   typedef std::list<case_t> cases_t;
-  MRRecordContent::report();
-  IPSECKEYRecordContent::report();
-  KXRecordContent::report();
-  DHCIDRecordContent::report();
-  TSIGRecordContent::report();
-  TKEYRecordContent::report();
 
 // NB!!! WHEN ADDING A TEST MAKE SURE YOU PUT IT NEXT TO ITS KIND
 // TO MAKE SURE TEST NUMBERING DOES NOT BREAK
@@ -61,6 +55,7 @@ BOOST_AUTO_TEST_CASE(test_record_types) {
 
   const cases_t cases = boost::assign::list_of
      (CASE_S(QType::A, "127.0.0.1", "\x7F\x00\x00\x01"))
+     (CASE_L(QType::A, "\\# 4 7f000001", "127.0.0.1", "\x7F\x00\x00\x01"))
 // local nameserver
      (CASE_S(QType::NS, "ns.rec.test.", "\x02ns\xc0\x11"))
 // non-local nameserver
@@ -90,9 +85,9 @@ BOOST_AUTO_TEST_CASE(test_record_types) {
 // non-local name
      (CASE_S(QType::PTR, "ptr.example.com.", "\x03ptr\x07""example\x03""com\x00"))
      (CASE_S(QType::HINFO, "\"i686\" \"Linux\"", "\x04i686\x05Linux"))
-     (BROKEN_CASE_L(QType::HINFO, "i686 \"Linux\"", "\"i686\" \"Linux\"", "\x04i686\x05Linux"))
+     (CASE_L(QType::HINFO, "i686 \"Linux\"", "\"i686\" \"Linux\"", "\x04i686\x05Linux"))
      (CASE_L(QType::HINFO, "\"i686\" Linux", "\"i686\" \"Linux\"", "\x04i686\x05Linux"))
-     (BROKEN_CASE_L(QType::HINFO, "i686 Linux", "\"i686\" \"Linux\"", "\x04i686\x05Linux"))
+     (CASE_L(QType::HINFO, "i686 Linux", "\"i686\" \"Linux\"", "\x04i686\x05Linux"))
 // local name
      (CASE_S(QType::MX, "10 mx.rec.test.", "\x00\x0a\x02mx\xc0\x11"))
 // non-local name
@@ -106,13 +101,13 @@ BOOST_AUTO_TEST_CASE(test_record_types) {
      (CASE_S(QType::TXT,  "\"\\195\\133LAND ISLANDS\"", "\x0e\xc3\x85LAND ISLANDS"))
      (CASE_S(QType::TXT,  "\"text with DEL in there: \\127\"", "\x19text with DEL in there: \x7f"))
      (CASE_L(QType::TXT, "\"\xc3\x85LAND ISLANDS\"", "\"\\195\\133LAND ISLANDS\"", "\x0e\xc3\x85LAND ISLANDS"))
-     (CASE_S(QType::TXT, "\"nonbreakingtxt\"", "\x0enonbreakingtxt"))
 // local name
      (CASE_S(QType::RP, "admin.rec.test. admin-info.rec.test.", "\x05""admin\x03rec\x04test\x00\x0a""admin-info\x03rec\x04test\x00"))
 // non-local name
      (CASE_S(QType::RP, "admin.example.com. admin-info.example.com.", "\x05""admin\x07""example\x03""com\x00\x0a""admin-info\x07""example\x03""com\x00"))
 // local name
      (CASE_S(QType::AFSDB, "1 afs-server.rec.test.", "\x00\x01\x0a""afs-server\x03rec\x04test\x00"))
+     (CASE_L(QType::AFSDB, "\\# 23 00010a6166732d73657276657203726563047465737400", "1 afs-server.rec.test.", "\x00\x01\x0a""afs-server\x03rec\x04test\x00"))
 // non-local name
      (CASE_S(QType::AFSDB, "1 afs-server.example.com.", "\x00\x01\x0a""afs-server\x07""example\x03""com\x00"))
      (CASE_S(QType::KEY, "0 3 3 V19hwufL6LJARVIxzHDyGdvZ7dbQE0Kyl18yPIWj/sbCcsBbz7zO6Q2qgdzmWI3OvGNne2nxflhorhefKIMsUg==", "\x00\x00\x03\x03\x57\x5f\x61\xc2\xe7\xcb\xe8\xb2\x40\x45\x52\x31\xcc\x70\xf2\x19\xdb\xd9\xed\xd6\xd0\x13\x42\xb2\x97\x5f\x32\x3c\x85\xa3\xfe\xc6\xc2\x72\xc0\x5b\xcf\xbc\xce\xe9\x0d\xaa\x81\xdc\xe6\x58\x8d\xce\xbc\x63\x67\x7b\x69\xf1\x7e\x58\x68\xae\x17\x9f\x28\x83\x2c\x52"))
@@ -123,7 +118,13 @@ BOOST_AUTO_TEST_CASE(test_record_types) {
      (CASE_L(QType::LOC, "32 7 19 S 116 2 25 E 10m", "32 7 19.000 S 116 2 25.000 E 10.00m 1.00m 10000.00m 10.00m", "\x00\x12\x16\x13\x79\x1b\x7d\x28\x98\xe6\x48\x68\x00\x98\x9a\x68"))
      (CASE_L(QType::LOC, "42 21 54 N 71 06 18 W -24m 30m", "42 21 54.000 N 71 6 18.000 W -24.00m 30.00m 10000.00m 10.00m", "\x00\x33\x16\x13\x89\x17\x2d\xd0\x70\xbe\x15\xf0\x00\x98\x8d\x20"))
      (CASE_L(QType::LOC, "42 21 43.952 N 71 5 6.344 W -24m 1m 200m", "42 21 43.952 N 71 5 6.344 W -24.00m 1.00m 200.00m 10.00m", "\x00\x12\x24\x13\x89\x17\x06\x90\x70\xbf\x2d\xd8\x00\x98\x8d\x20"))
+     (CASE_L(QType::LOC, "57 9 0.000 N 2 7 9.998 W 0.00m 0.00m 0.00m 0.00m", "57 9 0.000 N 2 7 9.998 W 0.00m 0.00m 0.00m 0.00m", "\x00\x00\x00\x00\x8c\x43\x57\xe0\x7f\x8b\x93\x52\x00\x98\x96\x80"))
+     (CASE_L(QType::LOC, "57 8 59.999 N 2 7 9.998 W 0.00m 0.00m 0.00m 0.00m", "57 8 59.999 N 2 7 9.998 W 0.00m 0.00m 0.00m 0.00m", "\x00\x00\x00\x00\x8c\x43\x57\xdf\x7f\x8b\x93\x52\x00\x98\x96\x80"))
 // local name
+     (CASE_L(QType::LOC, "51 11 60.000 N 2 12 5.080 W 0.00m 0.00m 0.00m 0.00m", "51 12 0.000 N 2 12 5.080 W 0.00m 0.00m 0.00m 0.00m", "\x00\x00\x00\x00\x8a\xfc\x80\x00\x7f\x87\x12\xa8\x00\x98\x96\x80"))
+     (CASE_L(QType::LOC, "51 11 59.999 N 2 12 5.080 W 0.00m 0.00m 0.00m 0.00m", "51 11 59.999 N 2 12 5.080 W 0.00m 0.00m 0.00m 0.00m", "\x00\x00\x00\x00\x8a\xfc\x7f\xff\x7f\x87\x12\xa8\x00\x98\x96\x80"))
+     (CASE_L(QType::LOC, "49 18 0.000 N 10 35 0.000 E 409.00m 1.00m 10000.00m 10.00m", "49 18 0.000 N 10 35 0.000 E 409.00m 1.00m 10000.00m 10.00m", "\x00\x12\x16\x13\x8a\x94\x21\x40\x82\x45\x5c\x20\x00\x99\x36\x44"))
+     (CASE_L(QType::LOC, "49 18 0.000 S 10 35 0.000 W 409.00m 1.00m 10000.00m 10.00m", "49 18 0.000 S 10 35 0.000 W 409.00m 1.00m 10000.00m 10.00m", "\x00\x12\x16\x13\x75\x6b\xde\xc0\x7d\xba\xa3\xe0\x00\x99\x36\x44"))
      (CASE_S(QType::SRV, "10 10 5060 sip.rec.test.", "\x00\x0a\x00\x0a\x13\xc4\x03sip\x03rec\x04test\x00"))
 // non-local name
      (CASE_S(QType::SRV, "10 10 5060 sip.example.com.", "\x00\x0a\x00\x0a\x13\xc4\x03sip\x07""example\x03""com\x00"))
@@ -223,11 +224,17 @@ BOOST_AUTO_TEST_CASE(test_record_types) {
      (CASE_S(QType::SVCB, "1 foo.powerdns.org. mandatory=alpn", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x00\x00\x02\x00\x01"))
      (CASE_S(QType::SVCB, "1 foo.powerdns.org. no-default-alpn", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x02\x00\x00"))
      (CASE_S(QType::SVCB, "1 foo.powerdns.org. alpn=h3,h2", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x01\x00\x06\x02h3\x02h2"))
+     (BROKEN_CASE_S(QType::SVCB, "1 foo.powerdns.org. alpn=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x01\x00\x06\x02h3\x02h2"))
      (CASE_S(QType::SVCB, "1 foo.powerdns.org. port=53", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x03\x00\x02\x00\x35"))
+     (CASE_S(QType::SVCB, "1 foo.powerdns.org. port=253", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x03\x00\x02\x00\xfd"))
      (CASE_S(QType::SVCB, "1 foo.powerdns.org. ipv4hint=192.0.2.53,192.0.2.2", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x04\x00\x08\xc0\x00\x02\x35\xc0\x00\x02\x02"))
      (CASE_S(QType::SVCB, "1 foo.powerdns.org. ech=\"aGVsbG8=\"", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x05\x00\x05hello"))
      (CASE_L(QType::SVCB, "1 foo.powerdns.org. ech=aGVsbG8=", "1 foo.powerdns.org. ech=\"aGVsbG8=\"", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x05\x00\x05hello"))
      (CASE_S(QType::SVCB, "1 foo.powerdns.org. ipv6hint=2001:db8::1,2001:db8::53:1", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x06\x00\x20\x20\x01\x0d\xb8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x20\x01\x0d\xb8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x53\x00\x01"))
+     (CASE_S(QType::SVCB, "1 foo.powerdns.org. docpath", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x0a\x00\x00"))
+     (CASE_S(QType::SVCB, "1 foo.powerdns.org. docpath=one,two", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x0a\x00\x08\x03one\x03two"))
+
+     (CASE_S(QType::SVCB, "1 foo.powerdns.org. alpn=h3,h2 pvd", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x01\x00\x06\x02h3\x02h2\x00\x0b\x00\x00"))
 
      (CASE_S(QType::SVCB, "1 foo.powerdns.org. key666=\"hello\"", "\0\x01\3foo\x08powerdns\x03org\x00\x02\x9a\x00\x005hello"))
      (CASE_L(QType::SVCB, "1 foo.powerdns.org. key666=hello\\210qoo", "1 foo.powerdns.org. key666=\"hello\\210qoo\"", "\0\x01\3foo\x08powerdns\x03org\x00\x02\x9a\x00\x009hello\xd2qoo"))
@@ -260,6 +267,17 @@ BOOST_AUTO_TEST_CASE(test_record_types) {
      (CASE_L(QType::SVCB, R"XXX(16 foo.example.org. alpn=f\\\092oo\092,bar,h2)XXX", R"XXX(16 foo.example.org. alpn=f\\\\oo\\,bar,h2)XXX", "\x00\x10\3foo\7example\3org\x00\x00\x01\x00\x0c\x08\x66\\oo,bar\x02h2"))
      // END SVCB draft test vectors
 
+     (CASE_S(QType::SVCB, "1 foo.powerdns.org. dohpath=\"path\"", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x07\0\x04path"))
+     (CASE_L(QType::SVCB, "1 foo.powerdns.org. dohpath=/q{?dns}", "1 foo.powerdns.org. dohpath=\"/q{?dns}\"", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x07\0\x08/q{?dns}"))
+     (CASE_S(QType::SVCB, "1 foo.powerdns.org. ohttp", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x08\x00\x00"))
+     (CASE_S(QType::SVCB, "1 foo.powerdns.org. tls-supported-groups=29,23", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x09\x00\x04\x00\x1d\x00\x17"))
+     (CASE_S(QType::SVCB, "1 foo.powerdns.org. port=8004 tls-supported-groups=29,23", "\0\x01\3foo\x08powerdns\x03org\x00\x00\x03\x00\x02\x1f\x44\0\x09\x00\x04\x00\x1d\x00\x17"))
+
+     (CASE_S(QType::HHIT, "1234abcd", "\xd7\x6d\xf8\x69\xb7\x1d"))
+     (CASE_L(QType::HHIT, "1234 abcd", "1234abcd", "\xd7\x6d\xf8\x69\xb7\x1d"))
+     (CASE_S(QType::BRID, "1234abcd", "\xd7\x6d\xf8\x69\xb7\x1d"))
+     (CASE_L(QType::BRID, "1234 abcd", "1234abcd", "\xd7\x6d\xf8\x69\xb7\x1d"))
+
      (CASE_S(QType::SPF, "\"v=spf1 a:mail.rec.test ~all\"", "\x1bv=spf1 a:mail.rec.test ~all"))
 
      (CASE_S(QType::NID, "15 0123:4567:89AB:CDEF", "\x00\x0F\x01\x23\x45\x67\x89\xab\xcd\xef"))
@@ -282,8 +300,12 @@ BOOST_AUTO_TEST_CASE(test_record_types) {
      (CASE_S(QType::CAA, "0 issue \"aa\"", "\x00\x05\x69\x73\x73\x75\x65\x61\x61"))
      (CASE_S(QType::CAA, "0 issue \"aaaaaaa\"", "\x00\x05\x69\x73\x73\x75\x65\x61\x61\x61\x61\x61\x61\x61"))
      (CASE_S(QType::CAA, "0 issue \"aaaaaaa.aaa\"", "\x00\x05\x69\x73\x73\x75\x65\x61\x61\x61\x61\x61\x61\x61\x2e\x61\x61\x61"))
+     (CASE_S(QType::RESINFO, "\"qnamemin exterr=15-17\"", "\x15qnamemin exterr=15-17"))
      (CASE_S(QType::DLV, "20642 8 2 04443abe7e94c3985196beae5d548c727b044dda5151e60d7cd76a9fd931d00e", "\x50\xa2\x08\x02\x04\x44\x3a\xbe\x7e\x94\xc3\x98\x51\x96\xbe\xae\x5d\x54\x8c\x72\x7b\x04\x4d\xda\x51\x51\xe6\x0d\x7c\xd7\x6a\x9f\xd9\x31\xd0\x0e"))
+     (CASE_S((QType::typeenum)65226,"\\# 0",""))
      (CASE_S((QType::typeenum)65226,"\\# 3 414243","\x41\x42\x43"))
+     (CASE_L((QType::typeenum)65226,"\\# 3   41 42    43","\\# 3 414243","\x41\x42\x43"))
+     (CASE_L((QType::typeenum)65226,"\\# 3   4142    43  ","\\# 3 414243","\x41\x42\x43"))
 
 ;
 
@@ -305,8 +327,12 @@ BOOST_AUTO_TEST_CASE(test_record_types) {
    BOOST_TEST_MESSAGE("Checking record type " << q.toString() << " test #" << n);
    try {
       std::string recData;
-      auto rec = DNSRecordContent::make(q.getCode(), 1, inval);
-      BOOST_CHECK_MESSAGE(rec != NULL, "make( " << q.getCode() << ", 1, " << inval << ") should not return NULL");
+      uint16_t qclass = QClass::IN;
+      if (q.getCode() == QType::TSIG || q.getCode() == QType::TKEY) {
+        qclass = QClass::ANY;
+      }
+      auto rec = DNSRecordContent::make(q.getCode(), qclass, inval);
+      BOOST_CHECK_MESSAGE(rec != nullptr, "make( " << q.getCode() << ", " << qclass << ", " << inval << ") should not return NULL");
       if (rec == NULL) continue;
       // now verify the record (note that this will be same as *zone* value (except for certain QTypes)
 
@@ -325,7 +351,7 @@ BOOST_AUTO_TEST_CASE(test_record_types) {
       }
       recData = rec->serialize(DNSName("rec.test"));
 
-      std::shared_ptr<DNSRecordContent> rec2 = DNSRecordContent::deserialize(DNSName("rec.test"),q.getCode(),recData);
+      auto rec2 = DNSRecordContent::deserialize(DNSName("rec.test"), q.getCode(), recData, qclass);
       BOOST_CHECK_MESSAGE(rec2 != NULL, "deserialize(rec.test, " << q.getCode() << ", recData) should not return NULL");
       if (rec2 == NULL) continue;
       // now verify the zone representation (here it can be different!)
@@ -380,6 +406,14 @@ BOOST_AUTO_TEST_CASE(test_record_types_bad_values) {
 // non-local overly large name (256), must be broken
      (ZONE_CASE(QType::CNAME, "123456789012345678901234567890123456789012345678901234567890123.123456789012345678901234567890123456789012345678901234567890123.123456789012345678901234567890123456789012345678901234567890123.12345678901234567890123456789012345678901234567890123456789012."))
      (ZONE_CASE(QType::SOA, "ns.rec.test hostmaster.test.rec 20130512010 3600 3600 604800 120")) // too long serial
+     (ZONE_CASE(QType::TXT, "\\02unlimited")) // incorrect escape
+     (ZONE_CASE(QType::TXT, "\\384excessive")) // incorrect escape
+     (ZONE_CASE(QType::HTTPS, "1 . port=443 port=8080")) // repeated SvcParamKey
+     (ZONE_CASE(QType::SVCB, "1 foo.powerdns.org. alpn=h2 alpn=h3")) // repeated SvcParamKey
+     (ZONE_CASE((QType::typeenum)65226,"\\# 3 4142")) // truncated record
+     (ZONE_CASE((QType::typeenum)65226,"\\# 3 4142  ")) // truncated record with extra whitespace
+     (ZONE_CASE((QType::typeenum)65226,"\\# 3 4142 4344")) // too much data
+     (ZONE_CASE((QType::typeenum)65226,"\\# 3 414 243")) // payload not split on even boundaries
 ;
 
   int n=0;
@@ -434,7 +468,6 @@ BOOST_AUTO_TEST_CASE(test_opt_record_in) {
 
   // test that nsid gets parsed into system
   std::string packet("\xf0\x01\x01\x00\x00\x01\x00\x01\x00\x00\x00\x01\x03www\x08powerdns\x03""com\x00\x00\x01\x00\x01\x03www\x08powerdns\x03""com\x00\x00\x01\x00\x01\x00\x00\x00\x10\x00\x04\x7f\x00\x00\x01\x00\x00\x29\x05\x00\x00\x00\x00\x00\x00\x0c\x00\x03\x00\x08powerdns",89);
-  OPTRecordContent::report();
 
   MOADNSParser mdp(true, (char*)&*packet.begin(), (unsigned int)packet.size());
 
@@ -540,6 +573,34 @@ BOOST_AUTO_TEST_CASE(test_loc_records_in) {
   BOOST_CHECK_THROW(MOADNSParser failParser(false, reinterpret_cast<const char*>(packet.data()), packet.size()-1), MOADNSException);
 }
 
+// APL wire parser reads its elements straight from the packet, so a length field
+// that runs past the record's own RDATA must be rejected instead of pulling in the
+// following bytes.
+BOOST_AUTO_TEST_CASE(test_apl_record_in) {
+  const DNSName name("powerdns.com.");
+  auto validAPL = DNSRecordContent::make(QType::APL, QClass::IN, "1:10.1.1.1/32");
+
+  vector<uint8_t> packet;
+  DNSPacketWriter writer(packet, name, QType::APL, QClass::IN, 0);
+  writer.getHeader()->qr = 1;
+  writer.startRecord(name, QType::APL, 100, QClass::IN, DNSResourceRecord::ANSWER, false);
+  validAPL->toPacket(writer);
+  writer.commit();
+
+  MOADNSParser parser(false, reinterpret_cast<const char*>(packet.data()), packet.size()); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+
+  // Location of the record's 2-byte RDLENGTH field.
+  const size_t rdLengthPos = sizeof(dnsheader) + name.wirelength() + sizeof(uint16_t) + sizeof(uint16_t) + name.wirelength() + sizeof(uint16_t) + sizeof(uint16_t) + sizeof(uint32_t);
+
+  auto invalidPacket = packet;
+  // The record physically holds one 8-byte element; claim an RDLENGTH of 5 so the
+  // element's address data extends three bytes past the record boundary.
+  invalidPacket.at(rdLengthPos) = 0;
+  invalidPacket.at(rdLengthPos + 1) = 5;
+
+  BOOST_CHECK_THROW(MOADNSParser failParser(false, reinterpret_cast<const char*>(invalidPacket.data()), invalidPacket.size()), MOADNSException); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+}
+
 // special record test, because NSEC records are odd
 BOOST_AUTO_TEST_CASE(test_nsec_records_in) {
 
@@ -587,6 +648,9 @@ BOOST_AUTO_TEST_CASE(test_nsec_records_in) {
 
     BOOST_CHECK_THROW(MOADNSParser failParser(false, reinterpret_cast<const char*>(packet.data()), packet.size()-1), MOADNSException);
   }
+
+  // Invalid length of the NSEC3 hex blob
+  BOOST_CHECK_THROW(DNSRecordContent::make(QType::NSEC3PARAM, QClass::IN, "1 0 12 abcde"), RecordTextException);
 }
 
 BOOST_AUTO_TEST_CASE(test_nsec_records_types) {
@@ -714,6 +778,29 @@ BOOST_AUTO_TEST_CASE(test_nsec3_records_types) {
     boost::to_lower(str2);
     BOOST_CHECK_EQUAL(str2, str);
   }
+}
+
+BOOST_AUTO_TEST_CASE(test_size_estimate)
+{
+  auto anA = DNSRecordContent::make(QType::A, QClass::IN, "1.2.3.4");
+  auto anAAAA = DNSRecordContent::make(QType::AAAA, QClass::IN, "1234:4578:89ab::");
+  auto aTXT = DNSRecordContent::make(QType::TXT, QClass::IN, "\"a somewhat long text\"");
+  BOOST_CHECK(anAAAA->sizeEstimate() < aTXT->sizeEstimate());
+
+  auto rrsigA = DNSRecordContent::make(QType::RRSIG, QClass::IN, "SOA 8 3 300 20130523000000 20130509000000 54216 rec.test. ecWKD/OsdAiXpbM/sgPT82KVD/WiQnnqcxoJgiH3ixHa+LOAcYU7FG7V4BRRJxLriY1e0rB2gAs3kCel9D4bzfK6wAqG4Di/eHUgHptRlaR2ycELJ4t1pjzrnuGiIzA1wM2izRmeE+Xoy1367Qu0pOz5DLzTfQITWFsB2iUzN4Y=");
+  auto rrsigB = DNSRecordContent::make(QType::RRSIG, QClass::IN, "SOA 8 3 300 20130523000000 20130509000000 54216 rec.test. fcWKD/OsdAiXpbM/sgPT82KVD/WiQnnqcxoJgiH3ixHa+LOAcYU7FG7V4BRRJxLriY1e0rB2gAs3kCel9D4bzfK6wAqG4Di/eHUgHptRlaR2ycELJ4t1pjzrnuGiIzA1wM2izRmeE+Xoy1367Qu0pOz5DLzTfQITWFsB2iUzN4YAAAA=");
+  BOOST_CHECK(rrsigA->sizeEstimate() < rrsigB->sizeEstimate());
+  BOOST_CHECK(rrsigA->sizeEstimate() > aTXT->sizeEstimate());
+
+  auto nsecA = DNSRecordContent::make(QType::NSEC, QClass::IN, "host.example.com. A MX RRSIG NSEC TYPE1234");
+  auto nsecB = DNSRecordContent::make(QType::NSEC, QClass::IN, "host1.example.com. A MX RRSIG NSEC TYPE1234");
+  BOOST_CHECK(nsecA->sizeEstimate() < nsecB->sizeEstimate());
+  BOOST_CHECK(nsecA->sizeEstimate() > aTXT->sizeEstimate());
+
+  auto nsec3A = DNSRecordContent::make(QType::NSEC3, QClass::IN, "1 1 12 aabbccdd 2vptu5timamqttgl4luu9kg21e0aor3s a mx rrsig nsec3 type1234 type65535");
+  auto nsec3B = DNSRecordContent::make(QType::NSEC3, QClass::IN, "1 1 0 - 2vptu5timamqttgl4luu9kg21e0aor3s");
+  BOOST_CHECK(nsec3A->sizeEstimate() > nsec3B->sizeEstimate());
+  BOOST_CHECK(nsec3B->sizeEstimate() > aTXT->sizeEstimate());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -121,7 +121,13 @@ public:
   {
     ComboAddress remote;
     if (getRemote(remote)) {
-      return netmaskGroup.match(remote);
+      if (netmaskGroup.match(remote)) {
+        return true;
+      }
+
+      if (remote.isMappedIPv4()) {
+        return netmaskGroup.match(remote.mapToIPv4());
+      }
     }
 
     return false;
@@ -162,7 +168,8 @@ public:
   }
 
   //! Bind the socket to a specified endpoint
-  void bind(const ComboAddress& local, bool reuseaddr = true) const
+  template <typename T>
+  void bind(const T& local, bool reuseaddr = true) const
   {
     int tmp = 1;
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -178,7 +185,7 @@ public:
   //! Connect the socket to a specified endpoint
   void connect(const ComboAddress& address, int timeout = 0) const
   {
-    SConnectWithTimeout(d_socket, address, timeval{timeout, 0});
+    SConnectWithTimeout(d_socket, false, address, timeval{timeout, 0});
   }
 
   //! For datagram sockets, receive a datagram and learn where it came from
@@ -324,33 +331,6 @@ public:
 
       ptr += static_cast<size_t>(ret); // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
       bytes -= static_cast<size_t>(ret);
-    }
-  }
-
-  //! reads one character from the socket
-  [[nodiscard]] int getChar() const
-  {
-    char character{};
-
-    ssize_t res = ::recv(d_socket, &character, 1, 0);
-    if (res == 0) {
-      return character;
-    }
-    return -1;
-  }
-
-  void getline(string& data) const
-  {
-    data.clear();
-    while (true) {
-      int character = getChar();
-      if (character == -1) {
-        break;
-      }
-      data += (char)character;
-      if (character == '\n') {
-        break;
-      }
     }
   }
 

@@ -42,8 +42,8 @@ Here is a very basic example using :func:`ifportup`::
 
      www    IN    LUA    A    "ifportup(443, {'192.0.2.1', '192.0.2.2'})"
 
-This turns the 'www' name within a zone into a special record that will
-randomly return 192.0.2.1 or 192.0.2.2, as long as both of these IP
+This turns the ``www`` name within a zone into a special record that will
+randomly return ``192.0.2.1`` or ``192.0.2.2``, as long as both of these IP
 addresses listen on port 443.
 
 If either IP address stops listening, only the other address will be
@@ -216,7 +216,8 @@ they will not function, and will in fact leak the content of the LUA records.
 .. note::
   Under NO circumstances serve LUA records from zones from untrusted sources!
   LUA records will be able to bring down your system and possible take over
-  control of it. Use TSIG on AXFR even from trusted sources!
+  control of it. Use TSIG on AXFR even from trusted sources, and only
+  enable :ref:`setting-enable-lua-record-updates` if needed!
 
 LUA records can be DNSSEC signed, but because they are dynamic, it is not
 possible to combine pre-signed DNSSEC zone and LUA records. In other words,
@@ -235,7 +236,7 @@ Shared Lua state model
 The default mode of operation for LUA records is to create a fresh Lua state for every query that hits a LUA record.
 This way, different LUA records cannot accidentally interfere with each other, by leaving around global objects, or perhaps even deleting relevant functions.
 However, creating a Lua state (and registering all our functions for it, see Reference below) takes measurable time.
-For users that are confident they can write Lua scripts that will not interfere with eachother, a mode is supported where Lua states are created on the first query, and then reused forever.
+For users that are confident they can write Lua scripts that will not interfere with each other, a mode is supported where Lua states are created on the first query, and then reused forever.
 Note that the state is per-thread (for UDP, plus one shared state for all TCP), so while data sharing between LUA invocations is possible (useful for caching and reducing the cost of ``require``), there is no single shared Lua environment.
 In non-scientific testing this has yielded up to 10x QPS increases.
 

@@ -6,18 +6,22 @@
 #include "dnswriter.hh"
 #include "ednsoptions.hh"
 #include "ednssubnet.hh"
+#include "ednscookies.hh"
 #include "ednsextendederror.hh"
 #include "misc.hh"
 #include "proxy-protocol.hh"
 #include "sstuff.hh"
 #include "statbag.hh"
 #include <boost/array.hpp>
+#include "protozero-trace.hh"
 
 #ifdef HAVE_LIBCURL
 #include "minicurl.hh"
 #endif
 
 #include "tcpiohandler.hh"
+
+bool g_slogStructured{false};
 
 StatBag S;
 
@@ -41,7 +45,9 @@ static void usage()
           "[dnssec] [ednssubnet SUBNET/MASK] [hidesoadetails] [hidettl] [recurse] [showflags] "
           "[tcp] [dot] [insecure] [fastOpen] [subjectName name] [caStore file] [tlsProvider openssl|gnutls] "
           "[proxy UDP(0)/TCP(1) SOURCE-IP-ADDRESS-AND-PORT DESTINATION-IP-ADDRESS-AND-PORT] "
-          "[dumpluaraw] [opcode OPNUM]"
+          "[cookie -/HEX] "
+          "[dumpluaraw] [opcode OPNUM] "
+          "[traceid -/HEX]"
        << endl;
 }
 
@@ -53,16 +59,19 @@ static const string nameForClass(QClass qclass, uint16_t qtype)
   return qclass.toString();
 }
 
+using OpenTelemetryData = std::optional<std::tuple<pdns::trace::TraceID, pdns::trace::SpanID, uint8_t>>;
+
 static std::unordered_set<uint16_t> s_expectedIDs;
 
 static void fillPacket(vector<uint8_t>& packet, const string& q, const string& t,
-                       bool dnssec, const boost::optional<Netmask>& ednsnm,
-                       bool recurse, QClass qclass, uint8_t opcode, uint16_t qid)
+                       bool dnssec, const std::optional<Netmask>& ednsnm,
+                       bool recurse, QClass qclass, uint8_t opcode, uint16_t qid, const std::optional<string>& cookie,
+                       OpenTelemetryData& otids)
 {
   DNSPacketWriter pw(packet, DNSName(q), DNSRecordContent::TypeToNumber(t), qclass, opcode);
 
-  if (dnssec || ednsnm || getenv("SDIGBUFSIZE")) {
-    char* sbuf = getenv("SDIGBUFSIZE");
+  if (dnssec || ednsnm || getenv("SDIGBUFSIZE") != nullptr || cookie || otids) { // NOLINT(concurrency-mt-unsafe) we're single threaded
+    char* sbuf = getenv("SDIGBUFSIZE"); // NOLINT(concurrency-mt-unsafe) we're single threaded
     int bufsize;
     if (sbuf)
       bufsize = atoi(sbuf);
@@ -71,10 +80,35 @@ static void fillPacket(vector<uint8_t>& packet, const string& q, const string& t
     DNSPacketWriter::optvect_t opts;
     if (ednsnm) {
       EDNSSubnetOpts eo;
-      eo.source = *ednsnm;
-      opts.emplace_back(EDNSOptionCode::ECS, makeEDNSSubnetOptsString(eo));
+      eo.setSource(*ednsnm);
+      opts.emplace_back(EDNSOptionCode::ECS, eo.makeOptString());
     }
-
+    if (cookie) {
+      EDNSCookiesOpt cookieOpt;
+      if (*cookie == "-") {
+        cookieOpt.makeClientCookie();
+      }
+      else {
+        string unhex = makeBytesFromHex(*cookie);
+        if (!cookieOpt.makeFromString(unhex)) {
+          cerr << "Malformed cookie in argument list, adding anyway" << endl;
+        }
+      }
+      opts.emplace_back(EDNSOptionCode::COOKIE, cookieOpt.makeOptString());
+    }
+    if (otids) {
+      const auto traceid = std::get<0>(*otids);
+      const auto spanid = std::get<1>(*otids);
+      const auto flags = std::get<2>(*otids);
+      std::array<uint8_t, pdns::trace::EDNSOTTraceRecord::fullSize> data{};
+      pdns::trace::EDNSOTTraceRecord record{data.data()};
+      record.setVersion(0);
+      record.setReserved(0);
+      record.setTraceID(traceid);
+      record.setSpanID(spanid);
+      record.setFlags(flags);
+      opts.emplace_back(EDNSOptionCode::TRACEPARENT, std::string_view(reinterpret_cast<const char*>(data.data()), data.size())); // NOLINT
+    }
     pw.addOpt(bufsize, 0, dnssec ? EDNSOpts::DNSSECOK : 0, opts);
     pw.commit();
   }
@@ -86,18 +120,36 @@ static void fillPacket(vector<uint8_t>& packet, const string& q, const string& t
   pw.getHeader()->id = htons(qid);
 }
 
-static void printReply(const string& reply, bool showflags, bool hidesoadetails, bool dumpluaraw)
+static void printReply(const string& reply, bool showflags, bool hidesoadetails, bool dumpluaraw, bool ignoreId = false)
 {
   MOADNSParser mdp(false, reply);
-  if (!s_expectedIDs.count(ntohs(mdp.d_header.id))) {
+
+  if (!ignoreId && (s_expectedIDs.count(ntohs(mdp.d_header.id)) == 0U)) {
     cout << "ID " << ntohs(mdp.d_header.id) << " was not expected, this response was not meant for us!"<<endl;
   }
   s_expectedIDs.erase(ntohs(mdp.d_header.id));
 
-  cout << "Reply to question for qname='" << mdp.d_qname.toString()
-       << "', qtype=" << DNSRecordContent::NumberToType(mdp.d_qtype) << endl;
-  cout << "Rcode: " << mdp.d_header.rcode << " ("
-       << RCode::to_s(mdp.d_header.rcode) << "), RD: " << mdp.d_header.rd
+  cout << (mdp.d_header.qr ? "Reply to question" : "Question") << " for qname='" << mdp.d_qname.toString()
+       << "', qtype=" << DNSRecordContent::NumberToType(mdp.d_qtype);
+
+  if (ignoreId) {
+    // if we did not generate the ID, the user might be interested in seeing it
+    cout << ", ID=" << ntohs(mdp.d_header.id);
+  }
+
+  cout << endl;
+  EDNSOpts edo{};
+  bool hasEDNS = getEDNSOpts(mdp, &edo);
+
+  if (hasEDNS) {
+    uint16_t ercode = edo.d_extRCode << 4 | mdp.d_header.rcode;
+    cout << "Rcode: " << ercode << " (" << ERCode::to_s(ercode);
+  }
+  else {
+    cout << "Rcode: " << mdp.d_header.rcode << " (" << RCode::to_s(mdp.d_header.rcode);
+  }
+
+  cout << "), RD: " << mdp.d_header.rd
        << ", QR: " << mdp.d_header.qr;
   cout << ", TC: " << mdp.d_header.tc << ", AA: " << mdp.d_header.aa
        << ", opcode: " << mdp.d_header.opcode << endl;
@@ -154,34 +206,43 @@ static void printReply(const string& reply, bool showflags, bool hidesoadetails,
     cout << "\t" << i->getContent()->getZoneRepresentation() << "\n";
   }
 
-  EDNSOpts edo;
-  if (getEDNSOpts(mdp, &edo)) {
-    //    cerr<<"Have "<<edo.d_options.size()<<" options!"<<endl;
-    for (vector<pair<uint16_t, string>>::const_iterator iter = edo.d_options.begin();
-         iter != edo.d_options.end(); ++iter) {
-      if (iter->first == EDNSOptionCode::ECS) { // 'EDNS subnet'
+  if (hasEDNS) {
+    for (const auto& iter : edo.d_options) {
+      if (iter.first == EDNSOptionCode::ECS) { // 'EDNS subnet'
         EDNSSubnetOpts reso;
-        if (getEDNSSubnetOptsFromString(iter->second, &reso)) {
-          cerr << "EDNS Subnet response: " << reso.source.toString()
-               << ", scope: " << reso.scope.toString()
-               << ", family = " << reso.scope.getNetwork().sin4.sin_family
+        if (EDNSSubnetOpts::getFromString(iter.second, &reso)) {
+          cerr << "EDNS Subnet response: " << reso.getSource().toString()
+               << ", scope: " << reso.getScope().toString()
+               << ", family = " << std::to_string(reso.getFamily())
                << endl;
         }
-      } else if (iter->first == EDNSOptionCode::PADDING) {
-        cerr << "EDNS Padding size: " << (iter->second.size()) << endl;
-      } else if (iter->first == EDNSOptionCode::EXTENDEDERROR) {
+      }
+      else if (iter.first == EDNSOptionCode::COOKIE) {
+        EDNSCookiesOpt cookie(iter.second);
+        auto client = cookie.getClient();
+        auto server = cookie.getServer();
+        auto dump = makeHexDump(client, "") + makeHexDump(server, "");
+        if (cookie.isWellFormed()) {
+          cerr << "EDNS Cookie response: " << dump << endl;
+        }
+        else {
+          cerr << "EDNS Cookie response malformed: " << dump << endl;
+        }
+      } else if (iter.first == EDNSOptionCode::PADDING) {
+        cerr << "EDNS Padding size: " << iter.second.size() << endl;
+      } else if (iter.first == EDNSOptionCode::EXTENDEDERROR) {
         EDNSExtendedError eee;
-        if (getEDNSExtendedErrorOptFromString(iter->second, eee)) {
+        if (getEDNSExtendedErrorOptFromString(iter.second, eee)) {
           cerr << "EDNS Extended Error response: " << eee.infoCode << "/" << eee.extraText << endl;
         }
       } else {
-        cerr << "Have unknown option " << (int)iter->first << endl;
+        cerr << "Have unknown option " << (int)iter.first << endl;
       }
     }
   }
 }
 
-int main(int argc, char** argv)
+int main(int argc, char** argv) // NOLINT(readability-function-cognitive-complexity) XXX FIXME
 try {
   /* default timeout of 10s */
   struct timeval timeout{10,0};
@@ -195,7 +256,7 @@ try {
   bool fastOpen = false;
   bool insecureDoT = false;
   bool fromstdin = false;
-  boost::optional<Netmask> ednsnm;
+  std::optional<Netmask> ednsnm;
   QClass qclass = QClass::IN;
   uint8_t opcode = 0;
   string proxyheader;
@@ -203,7 +264,10 @@ try {
   string caStore;
   string tlsProvider = "openssl";
   bool dumpluaraw = false;
+  std::optional<string> cookie;
+  OpenTelemetryData otdata;
 
+  // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic, concurrency-mt-unsafe) it's the argv API and we're single-threaded
   for (int i = 1; i < argc; i++) {
     if ((string)argv[i] == "--help") {
       usage();
@@ -295,8 +359,53 @@ try {
         ComboAddress dest(argv[++i]);
         proxyheader = makeProxyHeader(ptcp, src, dest, {});
       }
+      else if (strcmp(argv[i], "cookie") == 0) {
+        if (argc < i + 2) {
+          cerr << "cookie needs an argument"<<endl;
+          exit(EXIT_FAILURE);
+        }
+        cookie = argv[++i];
+      }
       else if (strcmp(argv[i], "dumpluaraw") == 0) {
         dumpluaraw = true;
+      }
+      else if (strcmp(argv[i], "traceid") == 0) {
+        if (argc < i + 2) {
+          cerr << "traceid needs an argument" << endl;
+          exit(EXIT_FAILURE);
+        }
+        auto traceIDArg = std::string(argv[++i]);
+        pdns::trace::TraceID traceid;
+        pdns::trace::SpanID spanid;
+        uint8_t traceflags = 0;
+        // Cannot set flags yet.
+        if (traceIDArg == "-") {
+          traceid.makeRandom();
+          spanid.makeRandom();
+        }
+        else {
+          auto traceIDStr = makeBytesFromHex(traceIDArg);
+          if (traceIDStr.size() > traceid.size() + spanid.size()) {
+            cerr << "Maximum length of traceid plus spanid is " << traceid.size() + spanid.size() << " bytes" << endl;
+            exit(EXIT_FAILURE);
+          }
+
+          std::string spanIDStr;
+          if (traceIDStr.size() > traceid.size()) {
+            spanIDStr = std::string(traceIDStr.begin() + traceid.size(), traceIDStr.end());
+          }
+          traceIDStr.resize(traceid.size());
+          pdns::trace::fill(traceid, traceIDStr);
+          if (spanIDStr.empty()) {
+            spanid.makeRandom();
+          } else if (spanIDStr.size() != spanid.size()) {
+            cerr << "spanid size must be " << spanid.size()<< " bytes, but is " << spanIDStr.size() << endl;
+            exit(EXIT_FAILURE);
+          } else {
+            pdns::trace::fill(spanid, spanIDStr);
+          }
+        }
+        otdata = std::make_tuple(traceid, spanid, traceflags);
       }
       else {
         cerr << argv[i] << ": unknown argument" << endl;
@@ -304,6 +413,7 @@ try {
       }
     }
   }
+  // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic, concurrency-mt-unsafe)
 
   if (dot) {
     tcp = true;
@@ -348,7 +458,7 @@ try {
 #ifdef HAVE_LIBCURL
     vector<uint8_t> packet;
     s_expectedIDs.insert(0);
-    fillPacket(packet, name, type, dnssec, ednsnm, recurse, qclass, opcode, 0);
+    fillPacket(packet, name, type, dnssec, ednsnm, recurse, qclass, opcode, 0, cookie, otdata);
     MiniCurl mc;
     MiniCurl::MiniCurlHeaders mch;
     mch.emplace("Content-Type", "application/dns-message");
@@ -378,7 +488,7 @@ try {
       reply = reply.substr(2);
     }
 
-    printReply(reply, showflags, hidesoadetails, dumpluaraw);
+    printReply(reply, showflags, hidesoadetails, dumpluaraw, true);
   } else if (tcp) {
     std::shared_ptr<TLSCtx> tlsCtx{nullptr};
     if (dot) {
@@ -402,7 +512,7 @@ try {
     for (const auto& it : questions) {
       vector<uint8_t> packet;
       s_expectedIDs.insert(counter);
-      fillPacket(packet, it.first, it.second, dnssec, ednsnm, recurse, qclass, opcode, counter);
+      fillPacket(packet, it.first, it.second, dnssec, ednsnm, recurse, qclass, opcode, counter, cookie, otdata);
       counter++;
 
       // Prefer to do a single write, so that fastopen can send all the data on SYN
@@ -432,12 +542,12 @@ try {
   {
     vector<uint8_t> packet;
     s_expectedIDs.insert(0);
-    fillPacket(packet, name, type, dnssec, ednsnm, recurse, qclass, opcode, 0);
+    fillPacket(packet, name, type, dnssec, ednsnm, recurse, qclass, opcode, 0, cookie, otdata);
     string question(packet.begin(), packet.end());
     Socket sock(dest.sin4.sin_family, SOCK_DGRAM);
     question = proxyheader + question;
     sock.sendTo(question, dest);
-    int result = waitForData(sock.getHandle(), timeout.tv_sec, timeout.tv_usec);
+    int result = waitForData(sock.getHandle(), timeout);
     if (result < 0)
       throw std::runtime_error("Error waiting for data: " + stringerror());
     if (!result)

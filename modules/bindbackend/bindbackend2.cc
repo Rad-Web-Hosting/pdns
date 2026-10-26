@@ -107,31 +107,37 @@ bool BB2DomainInfo::current()
   if (time(nullptr) - d_lastcheck < d_checkinterval)
     return true;
 
-  if (d_filename.empty())
-    return true;
-
-  return (getCtime() == d_ctime);
+  d_lastcheck = time(nullptr);
+  // Our data is still current if all the files it has been obtained from have
+  // their modification times unchanged since the last parse.
+  return std::all_of(d_fileinfo.cbegin(), d_fileinfo.cend(),
+                     [](const auto& fileinfo) { return getCtime(fileinfo.first) == fileinfo.second; });
 }
 
-time_t BB2DomainInfo::getCtime()
+time_t BB2DomainInfo::getCtime(const std::string& filename)
 {
   struct stat buf;
 
-  if (d_filename.empty() || stat(d_filename.c_str(), &buf) < 0)
+  if (filename.empty() || stat(filename.c_str(), &buf) < 0) {
     return 0;
-  d_lastcheck = time(nullptr);
+  }
   return buf.st_ctime;
 }
 
-void BB2DomainInfo::setCtime()
+void BB2DomainInfo::updateCtime()
 {
   struct stat buf;
-  if (stat(d_filename.c_str(), &buf) < 0)
-    return;
-  d_ctime = buf.st_ctime;
+
+  for (auto& fileinfo : d_fileinfo) {
+    if (stat(fileinfo.first.c_str(), &buf) < 0) {
+      buf.st_ctime = 0;
+    }
+    fileinfo.second = buf.st_ctime;
+  }
 }
 
-bool Bind2Backend::safeGetBBDomainInfo(int id, BB2DomainInfo* bbd)
+// NOLINTNEXTLINE(readability-identifier-length)
+bool Bind2Backend::safeGetBBDomainInfo(domainid_t id, BB2DomainInfo* bbd)
 {
   auto state = s_state.read_lock();
   state_t::const_iterator iter = state->find(id);
@@ -142,7 +148,7 @@ bool Bind2Backend::safeGetBBDomainInfo(int id, BB2DomainInfo* bbd)
   return true;
 }
 
-bool Bind2Backend::safeGetBBDomainInfo(const DNSName& name, BB2DomainInfo* bbd)
+bool Bind2Backend::safeGetBBDomainInfo(const ZoneName& name, BB2DomainInfo* bbd)
 {
   auto state = s_state.read_lock();
   const auto& nameindex = boost::multi_index::get<NameTag>(*state);
@@ -154,7 +160,7 @@ bool Bind2Backend::safeGetBBDomainInfo(const DNSName& name, BB2DomainInfo* bbd)
   return true;
 }
 
-bool Bind2Backend::safeRemoveBBDomainInfo(const DNSName& name)
+bool Bind2Backend::safeRemoveBBDomainInfo(const ZoneName& name)
 {
   auto state = s_state.write_lock();
   using nameindex_t = state_t::index<NameTag>::type;
@@ -174,124 +180,255 @@ void Bind2Backend::safePutBBDomainInfo(const BB2DomainInfo& bbd)
   replacing_insert(*state, bbd);
 }
 
-void Bind2Backend::setNotified(uint32_t id, uint32_t serial)
+// NOLINTNEXTLINE(readability-identifier-length)
+void Bind2Backend::setNotified(domainid_t id, uint32_t serial)
 {
   BB2DomainInfo bbd;
-  if (!safeGetBBDomainInfo(id, &bbd))
+  if (!safeGetBBDomainInfo(id, &bbd)) {
     return;
+  }
+  // Ignore pending domains unless we are the backend running the transaction
+  // in which they are being created. This can't be done in safeGetBBDomainInfo
+  // because it needs to be a static method.
+  if (bbd.d_pending && bbd.d_id != d_transaction_id) {
+    return;
+  }
   bbd.d_lastnotified = serial;
   safePutBBDomainInfo(bbd);
 }
 
-void Bind2Backend::setLastCheck(uint32_t domain_id, time_t lastcheck)
+// NOLINTNEXTLINE(readability-identifier-length)
+void Bind2Backend::setLastCheck(domainid_t domain_id, time_t lastcheck)
 {
   BB2DomainInfo bbd;
-  if (safeGetBBDomainInfo(domain_id, &bbd)) {
-    bbd.d_lastcheck = lastcheck;
-    safePutBBDomainInfo(bbd);
+  if (!safeGetBBDomainInfo(domain_id, &bbd)) {
+    return;
   }
+  // Ignore pending domains unless we are the backend running the transaction
+  // in which they are being created. This can't be done in safeGetBBDomainInfo
+  // because it needs to be a static method.
+  if (bbd.d_pending && bbd.d_id != d_transaction_id) {
+    return;
+  }
+  bbd.d_lastcheck = lastcheck;
+  safePutBBDomainInfo(bbd);
 }
 
-void Bind2Backend::setStale(uint32_t domain_id)
+void Bind2Backend::setStale(domainid_t domain_id)
 {
   setLastCheck(domain_id, 0);
 }
 
-void Bind2Backend::setFresh(uint32_t domain_id)
+void Bind2Backend::setFresh(domainid_t domain_id)
 {
   setLastCheck(domain_id, time(nullptr));
 }
 
-bool Bind2Backend::startTransaction(const DNSName& qname, int id)
+bool Bind2Backend::startDomainReplacementTransactionInternal(BB2DomainInfo& bbd)
 {
-  if (id < 0) {
-    d_transaction_tmpname.clear();
-    d_transaction_id = id;
-    return false;
+  d_transaction_qname = bbd.d_name;
+  d_transaction_id = bbd.d_id;
+  d_transaction_tmpname = bbd.main_filename() + "XXXXXX";
+  // NOLINTNEXTLINE(readability-identifier-length)
+  mode_t curmask = umask(S_IRWXG | S_IRWXO);
+  int fd = mkstemp(&d_transaction_tmpname.at(0));
+  umask(curmask);
+  if (fd == -1) {
+    throw DBException("Unable to create a unique temporary zonefile '" + d_transaction_tmpname + "': " + stringerror());
   }
-  if (id == 0) {
+
+  d_of = std::make_unique<ofstream>(d_transaction_tmpname);
+  if (!*d_of) {
+    unlink(d_transaction_tmpname.c_str());
+    close(fd);
+    fd = -1; // NOLINT(clang-analyzer-deadcode.DeadStores)
+    d_of.reset();
+    throw DBException("Unable to open temporary zonefile '" + d_transaction_tmpname + "': " + stringerror());
+  }
+  close(fd);
+  fd = -1; // NOLINT(clang-analyzer-deadcode.DeadStores)
+
+  *d_of << "; Written by PowerDNS, don't edit!" << endl;
+  *d_of << "; Zone '" << bbd.d_name << "' retrieved from primary " << endl
+        << "; at " << nowTime() << endl; // insert primary info here again
+
+  return true;
+}
+
+bool Bind2Backend::startDomainReplacementTransaction(const ZoneName& /* qname */, domainid_t domainId)
+{
+  d_transaction_tmpname.clear();
+  d_transaction_id = UnknownDomainID;
+
+  if (domainId == 0) {
     throw DBException("domain_id 0 is invalid for this backend.");
   }
 
-  d_transaction_id = id;
-  d_transaction_qname = qname;
   BB2DomainInfo bbd;
-  if (safeGetBBDomainInfo(id, &bbd)) {
-    d_transaction_tmpname = bbd.d_filename + "XXXXXX";
-    int fd = mkstemp(&d_transaction_tmpname.at(0));
-    if (fd == -1) {
-      throw DBException("Unable to create a unique temporary zonefile '" + d_transaction_tmpname + "': " + stringerror());
-    }
-
-    d_of = std::make_unique<ofstream>(d_transaction_tmpname);
-    if (!*d_of) {
-      unlink(d_transaction_tmpname.c_str());
-      close(fd);
-      fd = -1;
-      d_of.reset();
-      throw DBException("Unable to open temporary zonefile '" + d_transaction_tmpname + "': " + stringerror());
-    }
-    close(fd);
-    fd = -1;
-
-    *d_of << "; Written by PowerDNS, don't edit!" << endl;
-    *d_of << "; Zone '" << bbd.d_name << "' retrieved from primary " << endl
-          << "; at " << nowTime() << endl; // insert primary info here again
-
-    return true;
+  if (!safeGetBBDomainInfo(domainId, &bbd)) {
+    return false;
   }
+  // Ignore pending domains since we don't have an active transaction at this
+  // point, so we can't be the backend currently creating them.
+  if (bbd.d_pending) {
+    return false;
+  }
+  return startDomainReplacementTransactionInternal(bbd);
+}
+
+bool Bind2Backend::startDomainModificationTransaction(const ZoneName& /* qname */)
+{
+  d_transaction_tmpname.clear();
+  d_transaction_id = UnknownDomainID;
+
+  // No support for domain contents modification, except as a "delete and
+  // recreate in its entirety" operation.
   return false;
 }
 
 bool Bind2Backend::commitTransaction()
 {
-  if (d_transaction_id < 0)
+  // d_transaction_id is only set to a valid domain id if we are actually
+  // setting up a replacement zone file with the updated data.
+  if (d_transaction_id == UnknownDomainID) {
     return false;
+  }
   d_of.reset();
 
   BB2DomainInfo bbd;
   if (safeGetBBDomainInfo(d_transaction_id, &bbd)) {
-    if (rename(d_transaction_tmpname.c_str(), bbd.d_filename.c_str()) < 0)
-      throw DBException("Unable to commit (rename to: '" + bbd.d_filename + "') AXFRed zone: " + stringerror());
+    if (rename(d_transaction_tmpname.c_str(), bbd.main_filename().c_str()) < 0) {
+      throw DBException("Unable to commit (rename to: '" + bbd.main_filename() + "') AXFRed zone: " + stringerror());
+    }
+    // If that domain was part of a transaction, we can finally mark it as
+    // available to everyone.
+    if (bbd.d_pending) {
+      bbd.d_pending = false;
+      safePutBBDomainInfo(bbd);
+    }
     queueReloadAndStore(bbd.d_id);
   }
 
-  d_transaction_id = 0;
+  d_transaction_id = UnknownDomainID;
 
   return true;
 }
 
 bool Bind2Backend::abortTransaction()
 {
-  // -1 = dnssec speciality
-  // 0  = invalid transact
-  // >0 = actual transaction
-  if (d_transaction_id > 0) {
+  // d_transaction_id is only set to a valid domain id if we are actually
+  // setting up a replacement zone file with the updated data.
+  if (d_transaction_id != UnknownDomainID) {
+    BB2DomainInfo bbd;
+    if (safeGetBBDomainInfo(d_transaction_id, &bbd)) {
+      if (bbd.d_pending) {
+        safeRemoveBBDomainInfo(bbd.d_name);
+      }
+    }
     unlink(d_transaction_tmpname.c_str());
     d_of.reset();
-    d_transaction_id = 0;
+    d_transaction_id = UnknownDomainID;
   }
 
   return true;
 }
 
+/** does domain end on suffix? Is smart about "wwwds9a.nl" "ds9a.nl" not matching */
+static bool endsOn(const string& domain, const string& suffix)
+{
+  if (domain.size() <= suffix.size()) {
+    return false;
+  }
+
+  string::size_type dpos = domain.size() - suffix.size() - 1;
+  if (domain[dpos++] != '.') {
+    return false;
+  }
+  // That dot might have been escaped. So we now need to count how many '\'
+  // characters we can find in a row before it; if their number is odd, the
+  // dot is escaped and we are not a proper suffix.
+  size_t slashes{0};
+  while (dpos >= 2 + slashes && domain.at(dpos - 2 - slashes) == '\\') {
+    ++slashes;
+  }
+  if ((slashes % 2) != 0) {
+    return false;
+  }
+
+  string::size_type spos = 0;
+  for (; dpos < domain.size(); ++dpos, ++spos) {
+    if (!pdns_iequals_ch(domain[dpos], suffix[spos])) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/** strips a domain suffix from a domain */
+static void stripDomainSuffix(string* qname, const ZoneName& zonename)
+{
+  std::string domain = zonename.operator const DNSName&().toString();
+
+  if (domain.empty()) {
+    return;
+  }
+  if (pdns_iequals(*qname, domain)) {
+    *qname = "@";
+    return;
+  }
+  if (endsOn(*qname, domain)) {
+    auto prefix = qname->size() - domain.size();
+    qname->resize(prefix - 1); // also strip dot
+  }
+}
+
+// Perform adequate escaping of characters which have special meaning in
+// Bind zone files.
+// Note that the input is supposed to be a DNSName::toString() - or any of
+// its variants - so we assume \ and . have been correctly escaped by
+// DNSName::appendEscapedLabel already.
+static const std::string bindEscape(const std::string& name)
+{
+  std::string ret;
+  std::array<char, 5> ebuf{};
+
+  for (char letter : name) {
+    switch (letter) {
+    case '$':
+    case '@':
+    case '"':
+    case ';':
+    case '(':
+    case ')':
+      snprintf(ebuf.data(), ebuf.size(), "\\%03u", static_cast<unsigned char>(letter));
+      ret += ebuf.data();
+      break;
+    default:
+      ret += letter;
+      break;
+    }
+  }
+  return ret;
+}
+
 bool Bind2Backend::feedRecord(const DNSResourceRecord& rr, const DNSName& /* ordername */, bool /* ordernameIsNSEC3 */)
 {
-  if (d_transaction_id < 1) {
+  if (d_transaction_id == UnknownDomainID) {
     throw DBException("Bind2Backend::feedRecord() called outside of transaction");
   }
 
   string qname;
   if (d_transaction_qname.empty()) {
-    qname = rr.qname.toString();
+    qname = bindEscape(rr.qname.toString());
   }
   else if (rr.qname.isPartOf(d_transaction_qname)) {
-    if (rr.qname == d_transaction_qname) {
+    if (rr.qname == d_transaction_qname.operator const DNSName&()) {
       qname = "@";
     }
     else {
       DNSName relName = rr.qname.makeRelative(d_transaction_qname);
-      qname = relName.toStringNoDot();
+      qname = bindEscape(relName.toStringNoDot());
     }
   }
   else {
@@ -308,8 +445,8 @@ bool Bind2Backend::feedRecord(const DNSResourceRecord& rr, const DNSName& /* ord
   case QType::CNAME:
   case QType::DNAME:
   case QType::NS:
-    stripDomainSuffix(&content, d_transaction_qname.toString());
-    // fallthrough
+    stripDomainSuffix(&content, d_transaction_qname);
+    [[fallthrough]];
   default:
     if (d_of && *d_of) {
       *d_of << qname << "\t" << rr.ttl << "\t" << rr.qtype.toString() << "\t" << content << endl;
@@ -324,18 +461,24 @@ void Bind2Backend::getUpdatedPrimaries(vector<DomainInfo>& changedDomains, std::
   {
     auto state = s_state.read_lock();
 
-    for (const auto& i : *state) {
-      if (i.d_kind != DomainInfo::Primary && this->alsoNotify.empty() && i.d_also_notify.empty())
+    for (const auto& bbd : *state) {
+      // Ignore pending domains unless we are the backend running the
+      // transaction in which they are being created.
+      if (bbd.d_pending && bbd.d_id != d_transaction_id) {
         continue;
+      }
+      if (bbd.d_kind != DomainInfo::Primary && this->alsoNotify.empty() && bbd.d_also_notify.empty()) {
+        continue;
+      }
 
-      DomainInfo di;
-      di.id = i.d_id;
-      di.zone = i.d_name;
-      di.last_check = i.d_lastcheck;
-      di.notified_serial = i.d_lastnotified;
-      di.backend = this;
-      di.kind = DomainInfo::Primary;
-      consider.push_back(std::move(di));
+      DomainInfo info;
+      info.id = bbd.d_id;
+      info.zone = bbd.d_name;
+      info.last_check = bbd.d_lastcheck;
+      info.notified_serial = bbd.d_lastnotified;
+      info.backend = this;
+      info.kind = DomainInfo::Primary;
+      consider.push_back(std::move(info));
     }
   }
 
@@ -343,13 +486,15 @@ void Bind2Backend::getUpdatedPrimaries(vector<DomainInfo>& changedDomains, std::
   for (DomainInfo& di : consider) {
     soadata.serial = 0;
     try {
-      this->getSOA(di.zone, soadata); // we might not *have* a SOA yet, but this might trigger a load of it
+      this->getSOA(di.zone, di.id, soadata); // we might not *have* a SOA yet, but this might trigger a load of it
     }
     catch (...) {
       continue;
     }
     if (di.notified_serial != soadata.serial) {
       BB2DomainInfo bbd;
+      // Note that we don't need to filter pending domains here as the loop
+      // initializing [consider] above has already done that filtering.
       if (safeGetBBDomainInfo(di.id, &bbd)) {
         bbd.d_lastnotified = soadata.serial;
         safePutBBDomainInfo(bbd);
@@ -389,7 +534,7 @@ void Bind2Backend::getAllDomains(vector<DomainInfo>* domains, bool getSerial, bo
       if (di.backend != this)
         continue;
       try {
-        this->getSOA(di.zone, soadata);
+        this->getSOA(di.zone, di.id, soadata);
       }
       catch (...) {
         continue;
@@ -425,37 +570,42 @@ void Bind2Backend::getUnfreshSecondaryInfos(vector<DomainInfo>* unfreshDomains)
     soadata.refresh = 0;
     soadata.serial = 0;
     try {
-      getSOA(sd.zone, soadata); // we might not *have* a SOA yet
+      getSOA(sd.zone, sd.id, soadata); // we might not *have* a SOA yet
     }
     catch (...) {
     }
     sd.serial = soadata.serial;
-    // coverity[store_truncates_time_t]
-    if (sd.last_check + soadata.refresh < (unsigned int)time(nullptr))
+    if (sd.last_check + soadata.refresh < time(nullptr))
       unfreshDomains->push_back(std::move(sd));
   }
 }
 
-bool Bind2Backend::getDomainInfo(const DNSName& domain, DomainInfo& di, bool getSerial)
+bool Bind2Backend::getDomainInfo(const ZoneName& domain, DomainInfo& info, bool getSerial)
 {
   BB2DomainInfo bbd;
   if (!safeGetBBDomainInfo(domain, &bbd))
     return false;
+  // Ignore pending domains unless we are the backend running the transaction
+  // in which they are being created. This can't be done in safeGetBBDomainInfo
+  // because it needs to be a static method.
+  if (bbd.d_pending && bbd.d_id != d_transaction_id) {
+    return false;
+  }
 
-  di.id = bbd.d_id;
-  di.zone = domain;
-  di.primaries = bbd.d_primaries;
-  di.last_check = bbd.d_lastcheck;
-  di.backend = this;
-  di.kind = bbd.d_kind;
-  di.serial = 0;
+  info.id = bbd.d_id;
+  info.zone = domain;
+  info.primaries = bbd.d_primaries;
+  info.last_check = bbd.d_lastcheck;
+  info.backend = this;
+  info.kind = bbd.d_kind;
+  info.serial = 0;
   if (getSerial) {
     try {
       SOAData sd;
       sd.serial = 0;
 
-      getSOA(bbd.d_name, sd); // we might not *have* a SOA yet
-      di.serial = sd.serial;
+      getSOA(bbd.d_name, bbd.d_id, sd); // we might not *have* a SOA yet
+      info.serial = sd.serial;
     }
     catch (...) {
     }
@@ -464,7 +614,7 @@ bool Bind2Backend::getDomainInfo(const DNSName& domain, DomainInfo& di, bool get
   return true;
 }
 
-void Bind2Backend::alsoNotifies(const DNSName& domain, set<string>* ips)
+void Bind2Backend::alsoNotifies(const ZoneName& domain, set<string>* ips)
 {
   // combine global list with local list
   for (const auto& i : this->alsoNotify) {
@@ -494,16 +644,16 @@ void Bind2Backend::parseZoneFile(BB2DomainInfo* bbd)
   NSEC3PARAMRecordContent ns3pr;
   bool nsec3zone = false;
   if (d_hybrid) {
-    DNSSECKeeper dk;
+    DNSSECKeeper dk(d_slog);
     nsec3zone = dk.getNSEC3PARAM(bbd->d_name, &ns3pr);
   }
   else
     nsec3zone = getNSEC3PARAMuncached(bbd->d_name, &ns3pr);
 
   auto records = std::make_shared<recordstorage_t>();
-  ZoneParserTNG zpt(bbd->d_filename, bbd->d_name, s_binddirectory, d_upgradeContent);
-  zpt.setMaxGenerateSteps(::arg().asNum("max-generate-steps"));
-  zpt.setMaxIncludes(::arg().asNum("max-include-depth"));
+  ZoneParserTNG zpt(bbd->main_filename(), bbd->d_name, s_binddirectory, d_upgradeContent);
+  zpt.setMaxGenerateSteps(::arg().asNum<size_t>("max-generate-steps"));
+  zpt.setMaxIncludes(::arg().asNum<size_t>("max-include-depth"));
   DNSResourceRecord rr;
   string hashed;
   while (zpt.get(rr)) {
@@ -514,7 +664,7 @@ void Bind2Backend::parseZoneFile(BB2DomainInfo* bbd)
   }
   fixupOrderAndAuth(records, bbd->d_name, nsec3zone, ns3pr);
   doEmptyNonTerminals(records, bbd->d_name, nsec3zone, ns3pr);
-  bbd->setCtime();
+  bbd->d_fileinfo = zpt.getFileset();
   bbd->d_loaded = true;
   bbd->d_checknow = false;
   bbd->d_status = "parsed into memory at " + nowTime();
@@ -525,7 +675,7 @@ void Bind2Backend::parseZoneFile(BB2DomainInfo* bbd)
 
 /** THIS IS AN INTERNAL FUNCTION! It does moadnsparser prio impedance matching
     Much of the complication is due to the efforts to benefit from std::string reference counting copy on write semantics */
-void Bind2Backend::insertRecord(std::shared_ptr<recordstorage_t>& records, const DNSName& zoneName, const DNSName& qname, const QType& qtype, const string& content, int ttl, const std::string& hashed, bool* auth)
+void Bind2Backend::insertRecord(std::shared_ptr<recordstorage_t>& records, const ZoneName& zoneName, const DNSName& qname, const QType& qtype, const string& content, int ttl, const std::string& hashed, const bool* auth)
 {
   Bind2DNSRecord bdr;
   bdr.qname = qname;
@@ -537,11 +687,11 @@ void Bind2Backend::insertRecord(std::shared_ptr<recordstorage_t>& records, const
   else {
     string msg = "Trying to insert non-zone data, name='" + bdr.qname.toLogString() + "', qtype=" + qtype.toString() + ", zone='" + zoneName.toLogString() + "'";
     if (s_ignore_broken_records) {
-      g_log << Logger::Warning << msg << " ignored" << endl;
+      SLOG(g_log << Logger::Warning << msg << " ignored" << endl,
+           d_slog->info(Logr::Warning, "Non-zone data record ignored", "zone", Logging::Loggable(zoneName), "name", Logging::Loggable(bdr.qname), "qtype", Logging::Loggable(qtype)));
       return;
     }
-    else
-      throw PDNSException(msg);
+    throw PDNSException(std::move(msg));
   }
 
   //  bdr.qname.swap(bdr.qname);
@@ -563,50 +713,66 @@ void Bind2Backend::insertRecord(std::shared_ptr<recordstorage_t>& records, const
   records->insert(std::move(bdr));
 }
 
-string Bind2Backend::DLReloadNowHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string Bind2Backend::DLReloadNowHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   ostringstream ret;
 
   for (auto i = parts.begin() + 1; i < parts.end(); ++i) {
     BB2DomainInfo bbd;
-    DNSName zone(*i);
+    ZoneName zone(*i);
     if (safeGetBBDomainInfo(zone, &bbd)) {
+      if (bbd.d_pending) {
+        ret << *i << ": not committed yet\n";
+        continue;
+      }
       Bind2Backend bb2;
       bb2.queueReloadAndStore(bbd.d_id);
       if (!safeGetBBDomainInfo(zone, &bbd)) // Read the *new* domain status
         ret << *i << ": [missing]\n";
       else
         ret << *i << ": " << (bbd.d_wasRejectedLastReload ? "[rejected]" : "") << "\t" << bbd.d_status << "\n";
-      purgeAuthCaches(zone.toString() + "$");
+      purgeAuthCaches(zone.operator const DNSName&().toString() + "$");
       DNSSECKeeper::clearMetaCache(zone);
     }
     else
-      ret << *i << " no such domain\n";
+      ret << *i << ": no such domain\n";
   }
   if (ret.str().empty())
     ret << "no domains reloaded";
   return ret.str();
 }
 
-string Bind2Backend::DLDomStatusHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string Bind2Backend::DLDomStatusHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   ostringstream ret;
 
   if (parts.size() > 1) {
     for (auto i = parts.begin() + 1; i < parts.end(); ++i) {
+      ret << *i << ": ";
       BB2DomainInfo bbd;
-      if (safeGetBBDomainInfo(DNSName(*i), &bbd)) {
-        ret << *i << ": " << (bbd.d_loaded ? "" : "[rejected]") << "\t" << bbd.d_status << "\n";
+      if (safeGetBBDomainInfo(ZoneName(*i), &bbd)) {
+        if (bbd.d_pending) {
+          ret << "not committed yet\n";
+        }
+        else {
+          ret << (bbd.d_loaded ? "" : "[rejected]") << "\t" << bbd.d_status << "\n";
+        }
       }
       else {
-        ret << *i << " no such domain\n";
+        ret << "no such domain\n";
       }
     }
   }
   else {
     auto state = s_state.read_lock();
-    for (const auto& i : *state) {
-      ret << i.d_name << ": " << (i.d_loaded ? "" : "[rejected]") << "\t" << i.d_status << "\n";
+    for (const auto& bbd : *state) {
+      ret << bbd.d_name << ": ";
+      if (bbd.d_pending) {
+        ret << "not committed yet\n";
+      }
+      else {
+        ret << (bbd.d_loaded ? "" : "[rejected]") << "\t" << bbd.d_status << "\n";
+      }
     }
   }
 
@@ -621,7 +787,7 @@ static void printDomainExtendedStatus(ostringstream& ret, const BB2DomainInfo& i
   ret << info.d_name << ": " << std::endl;
   ret << "\t Status: " << info.d_status << std::endl;
   ret << "\t Internal ID: " << info.d_id << std::endl;
-  ret << "\t On-disk file: " << info.d_filename << " (" << info.d_ctime << ")" << std::endl;
+  ret << "\t On-disk file: " << info.main_filename() << " (" << info.d_fileinfo.front().second << ")" << std::endl;
   ret << "\t Kind: ";
   switch (info.d_kind) {
   case DomainInfo::Primary:
@@ -650,18 +816,22 @@ static void printDomainExtendedStatus(ostringstream& ret, const BB2DomainInfo& i
   ret << "\t Last notified: " << info.d_lastnotified << std::endl;
 }
 
-string Bind2Backend::DLDomExtendedStatusHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string Bind2Backend::DLDomExtendedStatusHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   ostringstream ret;
 
   if (parts.size() > 1) {
     for (auto i = parts.begin() + 1; i < parts.end(); ++i) {
       BB2DomainInfo bbd;
-      if (safeGetBBDomainInfo(DNSName(*i), &bbd)) {
+      if (safeGetBBDomainInfo(ZoneName(*i), &bbd)) {
+        if (bbd.d_pending) {
+          ret << *i << ": not committed yet\n";
+          continue;
+        }
         printDomainExtendedStatus(ret, bbd);
       }
       else {
-        ret << *i << " no such domain" << std::endl;
+        ret << *i << ": no such domain" << std::endl;
       }
     }
   }
@@ -679,7 +849,7 @@ string Bind2Backend::DLDomExtendedStatusHandler(const vector<string>& parts, Uti
   return ret.str();
 }
 
-string Bind2Backend::DLListRejectsHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string Bind2Backend::DLListRejectsHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   ostringstream ret;
   auto rstate = s_state.read_lock();
@@ -690,16 +860,20 @@ string Bind2Backend::DLListRejectsHandler(const vector<string>& /* parts */, Uti
   return ret.str();
 }
 
-string Bind2Backend::DLAddDomainHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string Bind2Backend::DLAddDomainHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   if (parts.size() < 3)
     return "ERROR: Domain name and zone filename are required";
 
-  DNSName domainname(parts[1]);
+  ZoneName domainname(parts[1]);
   const string& filename = parts[2];
   BB2DomainInfo bbd;
-  if (safeGetBBDomainInfo(domainname, &bbd))
+  if (safeGetBBDomainInfo(domainname, &bbd)) {
+    if (bbd.d_pending) {
+      return "Not committed yet";
+    }
     return "Already loaded";
+  }
 
   if (!boost::starts_with(filename, "/") && ::arg()["chroot"].empty())
     return "Unable to load zone " + domainname.toLogString() + " from " + filename + " as the filename is not absolute.";
@@ -709,19 +883,19 @@ string Bind2Backend::DLAddDomainHandler(const vector<string>& parts, Utility::pi
     return "Unable to load zone " + domainname.toLogString() + " from " + filename + ": " + strerror(errno);
 
   Bind2Backend bb2; // createdomainentry needs access to our configuration
-  bbd = bb2.createDomainEntry(domainname, filename);
-  bbd.d_filename = filename;
+  bbd = bb2.createDomainEntry(domainname);
+  bbd.d_fileinfo.emplace_back(std::make_pair(filename, buf.st_ctime));
   bbd.d_checknow = true;
   bbd.d_loaded = true;
   bbd.d_lastcheck = 0;
   bbd.d_status = "parsing into memory";
-  bbd.setCtime();
 
   safePutBBDomainInfo(bbd);
 
   g_zoneCache.add(domainname, bbd.d_id); // make new zone visible
 
-  g_log << Logger::Warning << "Zone " << domainname << " loaded" << endl;
+  SLOG(g_log << Logger::Warning << "Zone " << domainname << " loaded" << endl,
+       bb2.d_slog->info(Logr::Info, "Zone loaded", "zone", Logging::Loggable(domainname), "file", Logging::Loggable(filename)));
   return "Loaded zone " + domainname.toLogString() + " from " + filename;
 }
 
@@ -744,19 +918,23 @@ Bind2Backend::Bind2Backend(const string& suffix, bool loadZones)
 
   setArgPrefix("bind" + suffix);
   d_logprefix = "[bind" + suffix + "backend]";
+  if (g_slogStructured) {
+    d_slog = g_slog->withName("bind" + suffix);
+    d_handle.setSLog(d_slog);
+  }
   d_hybrid = mustDo("hybrid");
   if (d_hybrid && g_zoneCache.isEnabled()) {
     throw PDNSException("bind-hybrid and the zone cache currently interoperate badly. Please disable the zone cache or stop using bind-hybrid");
   }
 
-  d_transaction_id = 0;
+  d_transaction_id = UnknownDomainID;
   s_ignore_broken_records = mustDo("ignore-broken-records");
   d_upgradeContent = ::arg().mustDo("upgrade-unknown-types");
 
   if (!loadZones && d_hybrid)
     return;
 
-  std::lock_guard<std::mutex> l(s_startup_lock);
+  auto lock = std::scoped_lock(s_startup_lock);
 
   setupDNSSEC();
   if (s_first == 0) {
@@ -768,11 +946,11 @@ Bind2Backend::Bind2Backend(const string& suffix, bool loadZones)
     s_first = 0;
   }
 
-  DynListener::registerFunc("BIND-RELOAD-NOW", &DLReloadNowHandler, "bindbackend: reload domains", "<domains>");
-  DynListener::registerFunc("BIND-DOMAIN-STATUS", &DLDomStatusHandler, "bindbackend: list status of all domains", "[domains]");
-  DynListener::registerFunc("BIND-DOMAIN-EXTENDED-STATUS", &DLDomExtendedStatusHandler, "bindbackend: list the extended status of all domains", "[domains]");
-  DynListener::registerFunc("BIND-LIST-REJECTS", &DLListRejectsHandler, "bindbackend: list rejected domains");
   DynListener::registerFunc("BIND-ADD-ZONE", &DLAddDomainHandler, "bindbackend: add zone", "<domain> <filename>");
+  DynListener::registerFunc("BIND-DOMAIN-EXTENDED-STATUS", &DLDomExtendedStatusHandler, "bindbackend: list the extended status of all domains", "[domains]");
+  DynListener::registerFunc("BIND-DOMAIN-STATUS", &DLDomStatusHandler, "bindbackend: list status of all domains", "[domains]");
+  DynListener::registerFunc("BIND-LIST-REJECTS", &DLListRejectsHandler, "bindbackend: list rejected domains");
+  DynListener::registerFunc("BIND-RELOAD-NOW", &DLReloadNowHandler, "bindbackend: reload domains", "<domains>");
 }
 
 Bind2Backend::~Bind2Backend()
@@ -793,7 +971,7 @@ void Bind2Backend::reload()
   }
 }
 
-void Bind2Backend::fixupOrderAndAuth(std::shared_ptr<recordstorage_t>& records, const DNSName& zoneName, bool nsec3zone, const NSEC3PARAMRecordContent& ns3pr)
+void Bind2Backend::fixupOrderAndAuth(std::shared_ptr<recordstorage_t>& records, const ZoneName& zoneName, bool nsec3zone, const NSEC3PARAMRecordContent& ns3pr)
 {
   bool skip;
   DNSName shorter;
@@ -823,7 +1001,7 @@ void Bind2Backend::fixupOrderAndAuth(std::shared_ptr<recordstorage_t>& records, 
 
     if (!skip && nsec3zone && iter->qtype != QType::RRSIG && (iter->auth || (iter->qtype == QType::NS && (ns3pr.d_flags == 0u)) || (dssets.count(iter->qname) != 0u))) {
       Bind2DNSRecord bdr = *iter;
-      bdr.nsec3hash = toBase32Hex(hashQNameWithSalt(ns3pr, bdr.qname + zoneName));
+      bdr.nsec3hash = toBase32Hex(hashQNameWithSalt(ns3pr, bdr.qname + zoneName.operator const DNSName&()));
       records->replace(iter, bdr);
     }
 
@@ -831,14 +1009,14 @@ void Bind2Backend::fixupOrderAndAuth(std::shared_ptr<recordstorage_t>& records, 
   }
 }
 
-void Bind2Backend::doEmptyNonTerminals(std::shared_ptr<recordstorage_t>& records, const DNSName& zoneName, bool nsec3zone, const NSEC3PARAMRecordContent& ns3pr)
+void Bind2Backend::doEmptyNonTerminals(std::shared_ptr<recordstorage_t>& records, const ZoneName& zoneName, bool nsec3zone, const NSEC3PARAMRecordContent& ns3pr)
 {
   bool auth = false;
   DNSName shorter;
   std::unordered_set<DNSName> qnames;
   std::unordered_map<DNSName, bool> nonterm;
 
-  uint32_t maxent = ::arg().asNum("max-ent-entries");
+  auto maxent = ::arg().asNum<uint32_t>("max-ent-entries");
 
   for (const auto& bdr : *records)
     qnames.insert(bdr.qname);
@@ -854,7 +1032,8 @@ void Bind2Backend::doEmptyNonTerminals(std::shared_ptr<recordstorage_t>& records
     while (shorter.chopOff()) {
       if (qnames.count(shorter) == 0u) {
         if (!(maxent)) {
-          g_log << Logger::Error << "Zone '" << zoneName << "' has too many empty non terminals." << endl;
+          SLOG(g_log << Logger::Error << "Zone '" << zoneName << "' has too many empty non terminals." << endl,
+               d_slog->info(Logr::Error, "Zone has too many empty non terminals.", "zone", Logging::Loggable(zoneName)));
           return;
         }
 
@@ -874,7 +1053,7 @@ void Bind2Backend::doEmptyNonTerminals(std::shared_ptr<recordstorage_t>& records
   rr.ttl = 0;
   for (auto& nt : nonterm) {
     string hashed;
-    rr.qname = nt.first + zoneName;
+    rr.qname = nt.first + zoneName.operator const DNSName&();
     if (nsec3zone && nt.second)
       hashed = toBase32Hex(hashQNameWithSalt(ns3pr, rr.qname));
     insertRecord(records, zoneName, rr.qname, rr.qtype, rr.content, rr.ttl, hashed, &nt.second);
@@ -885,7 +1064,7 @@ void Bind2Backend::doEmptyNonTerminals(std::shared_ptr<recordstorage_t>& records
 
 void Bind2Backend::loadConfig(string* status) // NOLINT(readability-function-cognitive-complexity) 13379 https://github.com/PowerDNS/pdns/issues/13379 Habbie: zone2sql.cc, bindbackend2.cc: reduce complexity
 {
-  static int domain_id = 1;
+  static domainid_t domain_id = 1;
 
   if (!getArg("config").empty()) {
     BindParser BP;
@@ -893,7 +1072,8 @@ void Bind2Backend::loadConfig(string* status) // NOLINT(readability-function-cog
       BP.parse(getArg("config"));
     }
     catch (PDNSException& ae) {
-      g_log << Logger::Error << "Error parsing bind configuration: " << ae.reason << endl;
+      SLOG(g_log << Logger::Error << "Error parsing bind configuration: " << ae.reason << endl,
+           d_slog->error(Logr::Error, ae.reason, "Error parsing bind configuration"));
       throw;
     }
 
@@ -903,9 +1083,11 @@ void Bind2Backend::loadConfig(string* status) // NOLINT(readability-function-cog
     s_binddirectory = BP.getDirectory();
     //    ZP.setDirectory(d_binddirectory);
 
-    g_log << Logger::Warning << d_logprefix << " Parsing " << domains.size() << " domain(s), will report when done" << endl;
+    SLOG(g_log << Logger::Warning << d_logprefix << " Parsing " << domains.size() << " domain(s), will report when done" << endl,
+         d_slog->info(Logr::Info, "Parsing " + std::to_string(domains.size()) + " domain(s), will report when done"));
 
-    set<DNSName> oldnames, newnames;
+    set<ZoneName> oldnames;
+    set<ZoneName> newnames;
     {
       auto state = s_state.read_lock();
       for (const BB2DomainInfo& bbd : *state) {
@@ -927,16 +1109,19 @@ void Bind2Backend::loadConfig(string* status) // NOLINT(readability-function-cog
     sort(domains.begin(), domains.end()); // put stuff in inode order
     for (const auto& domain : domains) {
       if (!(domain.hadFileDirective)) {
-        g_log << Logger::Warning << d_logprefix << " Zone '" << domain.name << "' has no 'file' directive set in " << getArg("config") << endl;
+        SLOG(g_log << Logger::Warning << d_logprefix << " Zone '" << domain.name << "' has no 'file' directive set in " << getArg("config") << endl,
+             d_slog->info(Logr::Warning, "Zone has no 'file' directive set", "zone", Logging::Loggable(domain.name), "filename", Logging::Loggable(getArg("config"))));
         rejected++;
         continue;
       }
 
       if (domain.type.empty()) {
-        g_log << Logger::Notice << d_logprefix << " Zone '" << domain.name << "' has no type specified, assuming 'native'" << endl;
+        SLOG(g_log << Logger::Notice << d_logprefix << " Zone '" << domain.name << "' has no type specified, assuming 'native'" << endl,
+             d_slog->info(Logr::Notice, "Zone has no type specified, assuming 'native'", "zone", Logging::Loggable(domain.name)));
       }
       if (domain.type != "primary" && domain.type != "secondary" && domain.type != "native" && !domain.type.empty() && domain.type != "master" && domain.type != "slave") {
-        g_log << Logger::Warning << d_logprefix << " Warning! Skipping zone '" << domain.name << "' because type '" << domain.type << "' is invalid" << endl;
+        SLOG(g_log << Logger::Warning << d_logprefix << " Warning! Skipping zone '" << domain.name << "' because type '" << domain.type << "' is invalid" << endl,
+             d_slog->info(Logr::Warning, "Skipping zone because type is invalid", "zone", Logging::Loggable(domain.name), "type", Logging::Loggable(domain.type)));
         rejected++;
         continue;
       }
@@ -944,19 +1129,31 @@ void Bind2Backend::loadConfig(string* status) // NOLINT(readability-function-cog
       BB2DomainInfo bbd;
       bool isNew = false;
 
-      if (!safeGetBBDomainInfo(domain.name, &bbd)) {
+      if (safeGetBBDomainInfo(domain.name, &bbd)) {
+        if (bbd.d_pending) {
+          SLOG(g_log << Logger::Warning << d_logprefix << " Warning! Skipping zone '" << domain.name << "' because it is not committed yet" << endl,
+               d_slog->info(Logr::Warning, "Skipping zone because it is not committed yet", "zone", Logging::Loggable(domain.name)));
+          rejected++;
+          continue;
+        }
+      }
+      else {
         isNew = true;
         bbd.d_id = domain_id++;
-        bbd.setCheckInterval(getArgAsNum("check-interval"));
+        bbd.setCheckInterval(getArgAsNum<time_t>("check-interval"));
         bbd.d_lastnotified = 0;
         bbd.d_loaded = false;
       }
 
       // overwrite what we knew about the domain
       bbd.d_name = domain.name;
-      bool filenameChanged = (bbd.d_filename != domain.filename);
+      bool filenameChanged = bbd.d_fileinfo.empty() || (bbd.main_filename() != domain.filename);
       bool addressesChanged = (bbd.d_primaries != domain.primaries || bbd.d_also_notify != domain.alsoNotify);
-      bbd.d_filename = domain.filename;
+      // Preserve existing fileinfo in case we won't reread anything.
+      if (filenameChanged) {
+        bbd.d_fileinfo.clear();
+        bbd.d_fileinfo.emplace_back(std::make_pair(domain.filename, 0));
+      }
       bbd.d_primaries = domain.primaries;
       bbd.d_also_notify = domain.alsoNotify;
 
@@ -973,7 +1170,8 @@ void Bind2Backend::loadConfig(string* status) // NOLINT(readability-function-cog
 
       newnames.insert(bbd.d_name);
       if (filenameChanged || !bbd.d_loaded || !bbd.current()) {
-        g_log << Logger::Info << d_logprefix << " parsing '" << domain.name << "' from file '" << domain.filename << "'" << endl;
+        SLOG(g_log << Logger::Info << d_logprefix << " parsing '" << domain.name << "' from file '" << domain.filename << "'" << endl,
+             d_slog->info(Logr::Info, "Parsing zone from file", "zone", Logging::Loggable(domain.name), "file", Logging::Loggable(domain.filename)));
 
         try {
           parseZoneFile(&bbd);
@@ -986,20 +1184,30 @@ void Bind2Backend::loadConfig(string* status) // NOLINT(readability-function-cog
             *status += msg.str();
           bbd.d_status = msg.str();
 
-          g_log << Logger::Warning << d_logprefix << msg.str() << endl;
+          SLOG(g_log << Logger::Warning << d_logprefix << msg.str() << endl,
+               d_slog->error(Logr::Error, ae.reason, "Error in zone file", "zone", Logging::Loggable(domain.name), "file", Logging::Loggable(domain.filename)));
           rejected++;
         }
         catch (std::system_error& ae) {
           ostringstream msg;
-          if (ae.code().value() == ENOENT && isNew && domain.type == "slave")
+          bool missingNewSecondary = ae.code().value() == ENOENT && isNew && kind == DomainInfo::Secondary;
+          if (missingNewSecondary) {
             msg << " error at " + nowTime() << " no file found for new secondary domain '" << domain.name << "'. Has not been AXFR'd yet";
-          else
+          }
+          else {
             msg << " error at " + nowTime() + " parsing '" << domain.name << "' from file '" << domain.filename << "': " << ae.what();
+          }
 
           if (status != nullptr)
             *status += msg.str();
           bbd.d_status = msg.str();
-          g_log << Logger::Warning << d_logprefix << msg.str() << endl;
+          SLOG(
+            g_log << Logger::Warning << d_logprefix << msg.str() << endl,
+            if (missingNewSecondary) {
+              d_slog->error(Logr::Warning, ae.what(), "Secondary domain has not been AXFR'd yet", "domain", Logging::Loggable(domain.name), "file", Logging::Loggable(domain.filename));
+            } else {
+              d_slog->error(Logr::Warning, ae.what(), "Parse error", "domain", Logging::Loggable(domain.name), "file", Logging::Loggable(domain.filename));
+            });
           rejected++;
         }
         catch (std::exception& ae) {
@@ -1010,7 +1218,8 @@ void Bind2Backend::loadConfig(string* status) // NOLINT(readability-function-cog
             *status += msg.str();
           bbd.d_status = msg.str();
 
-          g_log << Logger::Warning << d_logprefix << msg.str() << endl;
+          SLOG(g_log << Logger::Warning << d_logprefix << msg.str() << endl,
+               d_slog->error(Logr::Warning, ae.what(), "Parse error", "domain", Logging::Loggable(domain.name), "file", Logging::Loggable(domain.filename)));
           rejected++;
         }
         safePutBBDomainInfo(bbd);
@@ -1019,12 +1228,12 @@ void Bind2Backend::loadConfig(string* status) // NOLINT(readability-function-cog
         safePutBBDomainInfo(bbd);
       }
     }
-    vector<DNSName> diff;
+    vector<ZoneName> diff;
 
     set_difference(oldnames.begin(), oldnames.end(), newnames.begin(), newnames.end(), back_inserter(diff));
     unsigned int remdomains = diff.size();
 
-    for (const DNSName& name : diff) {
+    for (const ZoneName& name : diff) {
       safeRemoveBBDomainInfo(name);
     }
 
@@ -1038,16 +1247,24 @@ void Bind2Backend::loadConfig(string* status) // NOLINT(readability-function-cog
     if (status != nullptr)
       *status = msg.str();
 
-    g_log << Logger::Error << d_logprefix << msg.str() << endl;
+    SLOG(
+      g_log << Logger::Error << d_logprefix << msg.str() << endl,
+      if (rejected == 0) {
+        d_slog->info(Logr::Info, "Done parsing domains", "new", Logging::Loggable(newdomains), "removed", Logging::Loggable(remdomains));
+      } else {
+        d_slog->info(Logr::Error, "Done parsing domains", "new", Logging::Loggable(newdomains), "removed", Logging::Loggable(remdomains), "rejected", Logging::Loggable(rejected));
+      });
   }
 }
 
-void Bind2Backend::queueReloadAndStore(unsigned int id)
+// NOLINTNEXTLINE(readability-identifier-length)
+void Bind2Backend::queueReloadAndStore(domainid_t id)
 {
   BB2DomainInfo bbold;
   try {
-    if (!safeGetBBDomainInfo(id, &bbold))
+    if (!safeGetBBDomainInfo(id, &bbold) || bbold.d_pending) {
       return;
+    }
     bbold.d_checknow = false;
     BB2DomainInfo bbnew(bbold);
     /* make sure that nothing will be able to alter the existing records,
@@ -1056,12 +1273,14 @@ void Bind2Backend::queueReloadAndStore(unsigned int id)
     parseZoneFile(&bbnew);
     bbnew.d_wasRejectedLastReload = false;
     safePutBBDomainInfo(bbnew);
-    g_log << Logger::Warning << "Zone '" << bbnew.d_name << "' (" << bbnew.d_filename << ") reloaded" << endl;
+    SLOG(g_log << Logger::Warning << "Zone '" << bbnew.d_name << "' (" << bbnew.main_filename() << ") reloaded" << endl,
+         d_slog->info(Logr::Info, "Zone reloaded", "zone", Logging::Loggable(bbnew.d_name), "file", Logging::Loggable(bbnew.main_filename())));
   }
   catch (PDNSException& ae) {
     ostringstream msg;
-    msg << " error at " + nowTime() + " parsing '" << bbold.d_name << "' from file '" << bbold.d_filename << "': " << ae.reason;
-    g_log << Logger::Warning << "Error parsing '" << bbold.d_name << "' from file '" << bbold.d_filename << "': " << ae.reason << endl;
+    msg << " error at " + nowTime() + " parsing '" << bbold.d_name << "' from file '" << bbold.main_filename() << "': " << ae.reason;
+    SLOG(g_log << Logger::Warning << "Error parsing '" << bbold.d_name << "' from file '" << bbold.main_filename() << "': " << ae.reason << endl,
+         d_slog->error(Logr::Error, ae.reason, "Error reloading zone", "zone", Logging::Loggable(bbold.d_name), "file", Logging::Loggable(bbold.main_filename())));
     bbold.d_status = msg.str();
     bbold.d_lastcheck = time(nullptr);
     bbold.d_wasRejectedLastReload = true;
@@ -1069,8 +1288,9 @@ void Bind2Backend::queueReloadAndStore(unsigned int id)
   }
   catch (std::exception& ae) {
     ostringstream msg;
-    msg << " error at " + nowTime() + " parsing '" << bbold.d_name << "' from file '" << bbold.d_filename << "': " << ae.what();
-    g_log << Logger::Warning << "Error parsing '" << bbold.d_name << "' from file '" << bbold.d_filename << "': " << ae.what() << endl;
+    msg << " error at " + nowTime() + " parsing '" << bbold.d_name << "' from file '" << bbold.main_filename() << "': " << ae.what();
+    SLOG(g_log << Logger::Warning << "Error parsing '" << bbold.d_name << "' from file '" << bbold.main_filename() << "': " << ae.what() << endl,
+         d_slog->error(Logr::Error, ae.what(), "Error reloading zone", "zone", Logging::Loggable(bbold.d_name), "file", Logging::Loggable(bbold.main_filename())));
     bbold.d_status = msg.str();
     bbold.d_lastcheck = time(nullptr);
     bbold.d_wasRejectedLastReload = true;
@@ -1110,11 +1330,18 @@ bool Bind2Backend::findBeforeAndAfterUnhashed(std::shared_ptr<const recordstorag
   return true;
 }
 
-bool Bind2Backend::getBeforeAndAfterNamesAbsolute(uint32_t id, const DNSName& qname, DNSName& unhashed, DNSName& before, DNSName& after)
+// NOLINTNEXTLINE(readability-identifier-length)
+bool Bind2Backend::getBeforeAndAfterNamesAbsolute(domainid_t id, const DNSName& qname, DNSName& unhashed, DNSName& before, DNSName& after)
 {
   BB2DomainInfo bbd;
   if (!safeGetBBDomainInfo(id, &bbd))
     return false;
+  // Ignore pending domains unless we are the backend running the transaction
+  // in which they are being created. This can't be done in safeGetBBDomainInfo
+  // because it needs to be a static method.
+  if (bbd.d_pending && bbd.d_id != d_transaction_id) {
+    return false;
+  }
 
   shared_ptr<const recordstorage_t> records = bbd.d_records.get();
   if (!bbd.d_nsec3zone) {
@@ -1142,46 +1369,65 @@ bool Bind2Backend::getBeforeAndAfterNamesAbsolute(uint32_t id, const DNSName& qn
         iter = --hashindex.end();
       before = DNSName(iter->nsec3hash);
     }
-    unhashed = iter->qname + bbd.d_name;
+    unhashed = iter->qname + bbd.d_name.operator const DNSName&();
 
     return true;
   }
 }
 
-void Bind2Backend::lookup(const QType& qtype, const DNSName& qname, int zoneId, DNSPacket* /* pkt_p */)
+void Bind2Backend::lookup(const QType& qtype, const DNSName& qname, domainid_t zoneId, DNSPacket* /* pkt_p */)
 {
   d_handle.reset();
 
   static bool mustlog = ::arg().mustDo("query-logging");
 
   bool found = false;
-  DNSName domain;
+  ZoneName domain;
   BB2DomainInfo bbd;
 
-  if (mustlog)
-    g_log << Logger::Warning << "Lookup for '" << qtype.toString() << "' of '" << qname << "' within zoneID " << zoneId << endl;
+  if (mustlog) {
+    SLOG(g_log << Logger::Warning << "Lookup for '" << qtype.toString() << "' of '" << qname << "' within zoneID " << zoneId << endl,
+         d_slog->info(Logr::Warning, "Record lookup", "name", Logging::Loggable(qname), "qtype", Logging::Loggable(qtype), "zone id", Logging::Loggable(zoneId)));
+  }
 
-  if (zoneId >= 0) {
-    if ((found = (safeGetBBDomainInfo(zoneId, &bbd) && qname.isPartOf(bbd.d_name)))) {
+  if (zoneId != UnknownDomainID) {
+    found = safeGetBBDomainInfo(zoneId, &bbd) && qname.isPartOf(bbd.d_name);
+    // Ignore pending domains unless we are the backend running the transaction
+    // in which they are being created. This can't be done in safeGetBBDomainInfo
+    // because it needs to be a static method.
+    if (found && bbd.d_pending && bbd.d_id != d_transaction_id) {
+      found = false;
+    }
+    if (found) {
       domain = std::move(bbd.d_name);
     }
   }
   else {
-    domain = qname;
+    domain = ZoneName(qname);
     do {
       found = safeGetBBDomainInfo(domain, &bbd);
+      // Ignore pending domains unless we are the backend running the transaction
+      // in which they are being created. This can't be done in safeGetBBDomainInfo
+      // because it needs to be a static method.
+      if (found && bbd.d_pending && bbd.d_id != d_transaction_id) {
+        found = false;
+      }
     } while (!found && qtype != QType::SOA && domain.chopOff());
   }
 
   if (!found) {
-    if (mustlog)
-      g_log << Logger::Warning << "Found no authoritative zone for '" << qname << "' and/or id " << zoneId << endl;
+    if (mustlog) {
+      SLOG(g_log << Logger::Warning << "Found no authoritative zone for '" << qname << "' and/or id " << zoneId << endl,
+           d_slog->info(Logr::Warning, "Found no authoritative zone", "name", Logging::Loggable(qname), "zone id", Logging::Loggable(zoneId)));
+    }
     d_handle.d_list = false;
     return;
   }
 
-  if (mustlog)
-    g_log << Logger::Warning << "Found a zone '" << domain << "' (with id " << bbd.d_id << ") that might contain data " << endl;
+  if (mustlog) {
+    SLOG(g_log << Logger::Warning << "Found a zone '" << domain << "' (with id " << bbd.d_id << ") that might contain data " << endl,
+         d_slog->info(Logr::Warning, "Found authoritative zone", "zone", Logging::Loggable(domain), "zone id", Logging::Loggable(bbd.d_id)));
+  }
 
   d_handle.id = bbd.d_id;
   d_handle.qname = qname.makeRelative(domain); // strip domain name
@@ -1189,21 +1435,24 @@ void Bind2Backend::lookup(const QType& qtype, const DNSName& qname, int zoneId, 
   d_handle.domain = std::move(domain);
 
   if (!bbd.current()) {
-    g_log << Logger::Warning << "Zone '" << d_handle.domain << "' (" << bbd.d_filename << ") needs reloading" << endl;
+    SLOG(g_log << Logger::Warning << "Zone '" << d_handle.domain << "' (" << bbd.main_filename() << ") needs reloading" << endl,
+         d_slog->info(Logr::Warning, "Zone needs reloading", "zone", Logging::Loggable(d_handle.domain), "file", Logging::Loggable(bbd.main_filename())));
     queueReloadAndStore(bbd.d_id);
     if (!safeGetBBDomainInfo(d_handle.domain, &bbd))
-      throw DBException("Zone '" + bbd.d_name.toLogString() + "' (" + bbd.d_filename + ") gone after reload"); // if we don't throw here, we crash for some reason
+      throw DBException("Zone '" + bbd.d_name.toLogString() + "' (" + bbd.main_filename() + ") gone after reload"); // if we don't throw here, we crash for some reason
   }
 
   if (!bbd.d_loaded) {
     d_handle.reset();
-    throw DBException("Zone for '" + d_handle.domain.toLogString() + "' in '" + bbd.d_filename + "' not loaded (file missing, corrupt or primary dead)"); // fsck
+    throw DBException("Zone for '" + d_handle.domain.toLogString() + "' in '" + bbd.main_filename() + "' not loaded (file missing, corrupt or primary dead)"); // fsck
   }
 
   d_handle.d_records = bbd.d_records.get();
 
-  if (d_handle.d_records->empty())
-    DLOG(g_log << "Query with no results" << endl);
+  if (d_handle.d_records->empty()) {
+    DLOG(SLOG(g_log << "Query with no results" << endl,
+              d_slog->info(Logr::Debug, "No results", "name", Logging::Loggable(qname), "qtype", Logging::Loggable(qtype))));
+  }
 
   d_handle.mustlog = mustlog;
 
@@ -1215,30 +1464,36 @@ void Bind2Backend::lookup(const QType& qtype, const DNSName& qname, int zoneId, 
   d_handle.d_end_iter = range.second;
 }
 
-Bind2Backend::handle::handle()
-{
-  mustlog = false;
-}
-
 bool Bind2Backend::get(DNSResourceRecord& r)
 {
   if (!d_handle.d_records) {
-    if (d_handle.mustlog)
-      g_log << Logger::Warning << "There were no answers" << endl;
+    if (d_handle.mustlog) {
+      SLOG(g_log << Logger::Warning << "There were no answers" << endl,
+           d_slog->info(Logr::Warning, "No answers"));
+    }
     return false;
   }
 
   if (!d_handle.get(r)) {
-    if (d_handle.mustlog)
-      g_log << Logger::Warning << "End of answers" << endl;
+    if (d_handle.mustlog) {
+      SLOG(g_log << Logger::Warning << "End of answers" << endl,
+           d_slog->info(Logr::Warning, "No more answers"));
+    }
 
     d_handle.reset();
 
     return false;
   }
-  if (d_handle.mustlog)
-    g_log << Logger::Warning << "Returning: '" << r.qtype.toString() << "' of '" << r.qname << "', content: '" << r.content << "'" << endl;
+  if (d_handle.mustlog) {
+    SLOG(g_log << Logger::Warning << "Returning: '" << r.qtype.toString() << "' of '" << r.qname << "', content: '" << r.content << "'" << endl,
+         d_slog->info(Logr::Warning, "Returning record", "name", Logging::Loggable(r.qname), "type", Logging::Loggable(r.qtype), "content", Logging::Loggable(r.content)));
+  }
   return true;
+}
+
+void Bind2Backend::lookupEnd()
+{
+  d_handle.reset();
 }
 
 bool Bind2Backend::handle::get(DNSResourceRecord& r)
@@ -1256,25 +1511,28 @@ void Bind2Backend::handle::reset()
   mustlog = false;
 }
 
-//#define DLOG(x) x
 bool Bind2Backend::handle::get_normal(DNSResourceRecord& r)
 {
-  DLOG(g_log << "Bind2Backend get() was called for " << qtype.toString() << " record for '" << qname << "' - " << d_records->size() << " available in total!" << endl);
+  DLOG(SLOG(g_log << "Bind2Backend get() was called for " << qtype.toString() << " record for '" << qname << "' - " << d_records->size() << " available in total!" << endl,
+            d_slog->info(Logr::Debug, "Bind2Backend get() invoked", "name", Logging::Loggable(qname), "type", Logging::Loggable(qtype), "results", Logging::Loggable(d_records->size()))));
 
   if (d_iter == d_end_iter) {
     return false;
   }
 
   while (d_iter != d_end_iter && !(qtype.getCode() == QType::ANY || (d_iter)->qtype == qtype.getCode())) {
-    DLOG(g_log << Logger::Warning << "Skipped " << qname << "/" << QType(d_iter->qtype).toString() << ": '" << d_iter->content << "'" << endl);
+    DLOG(SLOG(g_log << Logger::Warning << "Skipped " << qname << "/" << QType(d_iter->qtype).toString() << ": '" << d_iter->content << "'" << endl,
+              d_slog->info(Logr::Debug, "Skipped record", "name", Logging::Loggable(qname), "type", Logging::Loggable(d_iter->qtype), "content", Logging::Loggable(d_iter->content))));
     d_iter++;
   }
   if (d_iter == d_end_iter) {
     return false;
   }
-  DLOG(g_log << "Bind2Backend get() returning a rr with a " << QType(d_iter->qtype).getCode() << endl);
+  DLOG(SLOG(g_log << "Bind2Backend get() returning a rr with a " << QType(d_iter->qtype).getCode() << endl,
+            d_slog->info(Logr::Debug, "Bind2Backend get() returning a rr", "type", Logging::Loggable(d_iter->qtype))));
 
-  r.qname = qname.empty() ? domain : (qname + domain);
+  const DNSName& domainName(domain);
+  r.qname = qname.empty() ? domainName : (qname + domainName);
   r.domain_id = id;
   r.content = (d_iter)->content;
   //  r.domain_id=(d_iter)->domain_id;
@@ -1290,15 +1548,23 @@ bool Bind2Backend::handle::get_normal(DNSResourceRecord& r)
   return true;
 }
 
-bool Bind2Backend::list(const DNSName& /* target */, int id, bool /* include_disabled */)
+bool Bind2Backend::list(const ZoneName& /* target */, domainid_t domainId, bool /* include_disabled */)
 {
   BB2DomainInfo bbd;
 
-  if (!safeGetBBDomainInfo(id, &bbd))
+  if (!safeGetBBDomainInfo(domainId, &bbd)) {
     return false;
+  }
+  // Ignore pending domains unless we are the backend running the transaction
+  // in which they are being created. This can't be done in safeGetBBDomainInfo
+  // because it needs to be a static method.
+  if (bbd.d_pending && bbd.d_id != d_transaction_id) {
+    return false;
+  }
 
   d_handle.reset();
-  DLOG(g_log << "Bind2Backend constructing handle for list of " << id << endl);
+  DLOG(SLOG(g_log << "Bind2Backend constructing handle for list of " << domainId << endl,
+            d_slog->info(Logr::Debug, "Bind2Backend constructing handle for zone list", "zone id", Logging::Loggable(domainId))));
 
   if (!bbd.d_loaded) {
     throw PDNSException("zone was not loaded, perhaps because of: " + bbd.d_status);
@@ -1308,7 +1574,7 @@ bool Bind2Backend::list(const DNSName& /* target */, int id, bool /* include_dis
   d_handle.d_qname_iter = d_handle.d_records->begin();
   d_handle.d_qname_end = d_handle.d_records->end(); // iter now points to a vector of pointers to vector<BBResourceRecords>
 
-  d_handle.id = id;
+  d_handle.id = domainId;
   d_handle.domain = bbd.d_name;
   d_handle.d_list = true;
   return true;
@@ -1317,7 +1583,8 @@ bool Bind2Backend::list(const DNSName& /* target */, int id, bool /* include_dis
 bool Bind2Backend::handle::get_list(DNSResourceRecord& r)
 {
   if (d_qname_iter != d_qname_end) {
-    r.qname = d_qname_iter->qname.empty() ? domain : (d_qname_iter->qname + domain);
+    const DNSName& domainName(domain);
+    r.qname = d_qname_iter->qname.empty() ? domainName : (d_qname_iter->qname + domainName);
     r.domain_id = id;
     r.content = (d_qname_iter)->content;
     r.qtype = (d_qname_iter)->qtype;
@@ -1334,9 +1601,11 @@ bool Bind2Backend::autoPrimariesList(std::vector<AutoPrimary>& primaries)
   if (getArg("autoprimary-config").empty())
     return false;
 
-  ifstream c_if(getArg("autoprimaries"), std::ios::in);
+  std::string filename(getArg("autoprimaries"));
+  ifstream c_if(filename, std::ios::in);
   if (!c_if) {
-    g_log << Logger::Error << "Unable to open autoprimaries file for read: " << stringerror() << endl;
+    SLOG(g_log << Logger::Error << "Unable to open autoprimaries file for read: " << stringerror() << endl,
+         d_slog->error(Logr::Error, errno, "Unable to open autoprimaries file", "file", Logging::Loggable(filename)));
     return false;
   }
 
@@ -1354,15 +1623,17 @@ bool Bind2Backend::autoPrimariesList(std::vector<AutoPrimary>& primaries)
   return true;
 }
 
-bool Bind2Backend::autoPrimaryBackend(const string& ip, const DNSName& /* domain */, const vector<DNSResourceRecord>& /* nsset */, string* /* nameserver */, string* account, DNSBackend** db)
+bool Bind2Backend::autoPrimaryBackend(const string& ipAddress, const ZoneName& /* domain */, const vector<DNSResourceRecord>& /* nsset */, string* /* nameserver */, string* account, DNSBackend** backend)
 {
   // Check whether we have a configfile available.
   if (getArg("autoprimary-config").empty())
     return false;
 
-  ifstream c_if(getArg("autoprimaries").c_str(), std::ios::in); // this was nocreate?
+  std::string filename(getArg("autoprimaries"));
+  ifstream c_if(filename.c_str(), std::ios::in); // this was nocreate?
   if (!c_if) {
-    g_log << Logger::Error << "Unable to open autoprimaries file for read: " << stringerror() << endl;
+    SLOG(g_log << Logger::Error << "Unable to open autoprimaries file for read: " << stringerror() << endl,
+         d_slog->error(Logr::Error, errno, "Unable to open autoprimaries file", "file", Logging::Loggable(filename)));
     return false;
   }
 
@@ -1372,33 +1643,32 @@ bool Bind2Backend::autoPrimaryBackend(const string& ip, const DNSName& /* domain
   while (getline(c_if, line)) {
     std::istringstream ii(line);
     ii >> sip;
-    if (sip == ip) {
+    if (sip == ipAddress) {
       ii >> saccount;
       break;
     }
   }
   c_if.close();
 
-  if (sip != ip) // ip not found in authorization list - reject
+  if (sip != ipAddress) { // ip not found in authorization list - reject
     return false;
+  }
 
   // ip authorized as autoprimary - accept
-  *db = this;
+  *backend = this;
   if (saccount.length() > 0)
     *account = saccount.c_str();
 
   return true;
 }
 
-BB2DomainInfo Bind2Backend::createDomainEntry(const DNSName& domain, const string& filename)
+BB2DomainInfo Bind2Backend::createDomainEntry(const ZoneName& domain)
 {
-  int newid = 1;
+  domainid_t newid = 1;
   { // Find a free zone id nr.
     auto state = s_state.read_lock();
     if (!state->empty()) {
-      // older (1.53) versions of boost have an expression for s_state.rbegin()
-      // that is ambiguous in C++17. So construct it explicitly
-      newid = boost::make_reverse_iterator(state->end())->d_id + 1;
+      newid = state->rbegin()->d_id + 1;
     }
   }
 
@@ -1407,45 +1677,87 @@ BB2DomainInfo Bind2Backend::createDomainEntry(const DNSName& domain, const strin
   bbd.d_id = newid;
   bbd.d_records = std::make_shared<recordstorage_t>();
   bbd.d_name = domain;
-  bbd.setCheckInterval(getArgAsNum("check-interval"));
-  bbd.d_filename = filename;
+  bbd.setCheckInterval(getArgAsNum<time_t>("check-interval"));
 
   return bbd;
 }
 
-bool Bind2Backend::createSecondaryDomain(const string& ip, const DNSName& domain, const string& /* nameserver */, const string& account)
+bool Bind2Backend::createSecondaryDomain(const string& ipAddress, const ZoneName& domain, const string& /* nameserver */, const string& account, DomainInfo& info, bool startTransaction)
 {
-  string filename = getArg("autoprimary-destdir") + '/' + domain.toStringNoDot();
+  info.backend = this; // to be able to abortTransaction if the operation fails
 
-  g_log << Logger::Warning << d_logprefix
-        << " Writing bind config zone statement for superslave zone '" << domain
-        << "' from autoprimary " << ip << endl;
+  std::string domainname = domain.toStringNoDot();
+
+  // Reject domain name if it embeds quotes; this may happen if 8bit-dns is
+  // used, and bind currently does not allow for character escapes in zone
+  // names.
+  if (domainname.find_first_of("\"") != std::string::npos) {
+    SLOG(g_log << Logger::Error << d_logprefix
+               << " Unable to accept autosecondary zone '" << domain
+               << "' from autoprimary " << ipAddress
+               << " due to unauthorized characters in domain name for bind configuration file"
+               << endl,
+         d_slog->error(Logr::Error, "unauthorized characters in domain name for bind configuration file", "Unable to accept autosecondary zone", "zone", Logging::Loggable(domain), "autoprimary address", Logging::Loggable(ipAddress)));
+    throw PDNSException("Unauthorized characters in domain name for bind configuration file");
+  }
+
+  string filename = getArg("autoprimary-destdir") + '/';
+  if (domainname.empty()) {
+    filename.append("rootzone.");
+  }
+  else {
+    // Make sure the zone file name does not contain path separators.
+    filename.append(boost::replace_all_copy(domainname, "/", "\\047"));
+  }
+
+  BB2DomainInfo bbd = createDomainEntry(domain);
+  bbd.d_kind = DomainInfo::Secondary;
+  bbd.d_primaries.emplace_back(ComboAddress(ipAddress, 53));
+  bbd.d_fileinfo.emplace_back(std::make_pair(filename, 0));
+  bbd.updateCtime();
+
+  if (startTransaction) {
+    // Remember this domain is pending until the transaction gets committed.
+    bbd.d_pending = true;
+    startDomainReplacementTransactionInternal(bbd);
+  }
+  safePutBBDomainInfo(bbd);
+
+  SLOG(g_log << Logger::Warning << d_logprefix
+             << " Writing bind config zone statement for autosecondary zone '" << domain
+             << "' from autoprimary " << ipAddress << endl,
+       d_slog->info(Logr::Warning, "Writing bind config zone statement for autosecondary zone", "zone", Logging::Loggable(domain), "autoprimary address", Logging::Loggable(ipAddress)));
 
   {
-    std::lock_guard<std::mutex> l2(s_autosecondary_config_lock);
+    auto lock = std::scoped_lock(s_autosecondary_config_lock);
 
-    ofstream c_of(getArg("autoprimary-config").c_str(), std::ios::app);
+    std::string configfile(getArg("autoprimary-config"));
+    ofstream c_of(configfile.c_str(), std::ios::app);
     if (!c_of) {
-      g_log << Logger::Error << "Unable to open autoprimary configfile for append: " << stringerror() << endl;
-      throw DBException("Unable to open autoprimary configfile for append: " + stringerror());
+      int err = errno;
+      auto errorMessage = stringerror();
+      SLOG(g_log << Logger::Error << "Unable to open autoprimary configfile for append: " << errorMessage << endl,
+           d_slog->error(Logr::Error, err, "Unable to open autoprimary configuration file for append", "file", Logging::Loggable(configfile)));
+      throw DBException("Unable to open autoprimary configfile for append: " + errorMessage);
     }
 
     c_of << endl;
-    c_of << "# AutoSecondary zone '" << domain.toString() << "' (added: " << nowTime() << ") (account: " << account << ')' << endl;
-    c_of << "zone \"" << domain.toStringNoDot() << "\" {" << endl;
+    c_of << "# AutoSecondary zone '" << domainname << "' (added: " << nowTime() << ") (account: " << account << ')' << endl;
+    c_of << "zone \"" << domainname << "\" {" << endl;
     c_of << "\ttype secondary;" << endl;
     c_of << "\tfile \"" << filename << "\";" << endl;
-    c_of << "\tprimaries { " << ip << "; };" << endl;
+    c_of << "\tprimaries { " << ipAddress << "; };" << endl;
     c_of << "};" << endl;
     c_of.close();
   }
 
-  BB2DomainInfo bbd = createDomainEntry(domain, filename);
-  bbd.d_kind = DomainInfo::Secondary;
-  bbd.d_primaries.push_back(ComboAddress(ip, 53));
-  bbd.setCtime();
-  safePutBBDomainInfo(bbd);
-
+  info.id = bbd.d_id;
+  info.zone = domain;
+  info.primaries = bbd.d_primaries;
+  info.last_check = bbd.d_lastcheck;
+  info.backend = this;
+  info.kind = bbd.d_kind;
+  info.serial = 0;
   return true;
 }
 
@@ -1453,8 +1765,10 @@ bool Bind2Backend::searchRecords(const string& pattern, size_t maxResults, vecto
 {
   SimpleMatch sm(pattern, true);
   static bool mustlog = ::arg().mustDo("query-logging");
-  if (mustlog)
-    g_log << Logger::Warning << "Search for pattern '" << pattern << "'" << endl;
+  if (mustlog) {
+    SLOG(g_log << Logger::Warning << "Search for pattern '" << pattern << "'" << endl,
+         d_slog->info(Logr::Debug, "Search for pattern", "pattern", Logging::Loggable(pattern)));
+  }
 
   {
     auto state = s_state.read_lock();
@@ -1462,6 +1776,12 @@ bool Bind2Backend::searchRecords(const string& pattern, size_t maxResults, vecto
     for (const auto& i : *state) {
       BB2DomainInfo h;
       if (!safeGetBBDomainInfo(i.d_id, &h)) {
+        continue;
+      }
+      // Ignore pending domains unless we are the backend running the transaction
+      // in which they are being created. This can't be done in safeGetBBDomainInfo
+      // because it needs to be a static method.
+      if (h.d_pending && h.d_id != d_transaction_id) {
         continue;
       }
 
@@ -1472,7 +1792,8 @@ bool Bind2Backend::searchRecords(const string& pattern, size_t maxResults, vecto
       shared_ptr<const recordstorage_t> rhandle = h.d_records.get();
 
       for (recordstorage_t::const_iterator ri = rhandle->begin(); result.size() < maxResults && ri != rhandle->end(); ri++) {
-        DNSName name = ri->qname.empty() ? i.d_name : (ri->qname + i.d_name);
+        const DNSName& domainName(i.d_name);
+        DNSName name = ri->qname.empty() ? domainName : (ri->qname + domainName);
         if (sm.match(name) || sm.match(ri->content)) {
           DNSResourceRecord r;
           r.qname = std::move(name);
@@ -1536,6 +1857,9 @@ public:
   Bind2Loader()
   {
     BackendMakers().report(std::make_unique<Bind2Factory>());
+    // If this module is not loaded dynamically at runtime, this code runs
+    // as part of a global constructor, before the structured logger has a
+    // chance to be set up, so fallback to simple logging.
     g_log << Logger::Info << "[bind2backend] This is the bind backend version " << VERSION
 #ifndef REPRODUCIBLE
           << " (" __DATE__ " " __TIME__ ")"

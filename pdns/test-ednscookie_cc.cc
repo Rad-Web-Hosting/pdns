@@ -25,17 +25,18 @@
 
 #define BOOST_TEST_NO_MAIN
 
-#ifdef HAVE_CONFIG_H
 #include "config.h"
-#endif
-#include "ednscookies.hh"
 
+#include <string>
 #include <boost/test/unit_test.hpp>
+
+#include "ednscookies.hh"
+#include "iputils.hh"
 
 BOOST_AUTO_TEST_SUITE(test_ednscookie)
 BOOST_AUTO_TEST_CASE(test_getEDNSCookiesOptFromString)
 {
-  string cookie("");
+  std::string cookie;
   EDNSCookiesOpt eco(cookie);
   // Length 0
   BOOST_CHECK(!eco.isWellFormed());
@@ -73,7 +74,7 @@ BOOST_AUTO_TEST_CASE(test_getEDNSCookiesOptFromString)
 
 BOOST_AUTO_TEST_CASE(test_ctor)
 {
-  string cookie("");
+  std::string cookie;
   auto eco = EDNSCookiesOpt(cookie);
   BOOST_CHECK(!eco.isWellFormed());
 
@@ -91,7 +92,7 @@ BOOST_AUTO_TEST_CASE(test_createEDNSServerCookie)
   BOOST_CHECK(eco.isWellFormed());
 
   // wrong keysize (not 128 bits)
-  string secret = "blablablabla";
+  std::string secret = "blablablabla";
   BOOST_CHECK(!eco.makeServerCookie(secret, remote));
   BOOST_CHECK(eco.isWellFormed());
   BOOST_CHECK(!eco.isValid(secret, remote));
@@ -105,6 +106,23 @@ BOOST_AUTO_TEST_CASE(test_createEDNSServerCookie)
   BOOST_CHECK(!eco2.isValid(secret, ComboAddress("192.0.2.1")));
   BOOST_CHECK(!eco2.isValid("blablablablabla1", remote));
   BOOST_CHECK(eco2.isValid(secret, remote));
+
+  /* very old cookie (epoch) */
+  const auto veryOldCookie = EDNSCookiesOpt(std::string("\x12\x34\x56\x78\x90\xab\xcd\xef\x01\x00\x00\x00\x00\x00\x00\x00\xcb\xc9\x38\x5f\xb5\x75\x75\x2a", (8U + 16U)));
+  BOOST_CHECK(!veryOldCookie.isValid(secret, remote));
+}
+
+BOOST_AUTO_TEST_CASE(test_checkServerCookies)
+{
+  auto eco = EDNSCookiesOpt("\x12\x34\x56\x78\x90\xab\xcd\xef");
+  ComboAddress remote("192.0.2.2");
+  BOOST_CHECK(eco.isWellFormed());
+
+  std::string secret = "blablablablablab";
+  std::string secret2 = "1234lablablablab";
+  BOOST_CHECK(eco.makeServerCookie(secret, remote));
+  BOOST_CHECK(eco.isWellFormed());
+  BOOST_CHECK(eco.isValid(secret2, remote, {secret}));
 }
 #endif
 

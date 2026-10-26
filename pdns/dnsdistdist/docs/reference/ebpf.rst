@@ -18,11 +18,6 @@ These are all the functions, objects and methods related to the :doc:`../advance
               newBPFFilter(v4Parameters, v6Parameters, qnamesParameters) -> BPFFilter (1.7.x)
               newBPFFilter(maxV4, maxV6, maxQNames) -> BPFFilter (before 1.7.0)
 
-  .. versionchanged:: 1.7.0
-    This function now supports a table for each parameters, and the ability to use pinned eBPF maps.
-  .. versionchanged:: 1.8.0
-    This function now gets its parameters via a table.
-
   Return a new eBPF socket filter with a maximum of maxV4 IPv4, maxV6 IPv6 and maxQNames qname entries in the block tables.
   Maps can be pinned to a filesystem path, which makes their content persistent across restarts and allows external programs to read their content and to add new entries. dnsdist will try to load maps that are pinned to a filesystem path on startups, inheriting any existing entries, and fall back to creating them if they do not exist yet. Note that the user dnsdist is running under must have the right privileges to read and write to the given file, and to go through all the directories in the path leading to that file. The pinned path must be on a filesystem of type ``BPF``, usually below ``/sys/fs/bpf/``.
 
@@ -70,24 +65,22 @@ These are all the functions, objects and methods related to the :doc:`../advance
 
   Represents an eBPF filter
 
-  .. method:: BPFFilter:attachToAllBinds()
+  .. method:: attachToAllBinds()
 
     Attach this filter to every bind already defined.
     This is the run-time equivalent of :func:`setDefaultBPFFilter`.
     This method can be used at run-time only.
 
 
-  .. method:: BPFFilter:block(address)
+  .. method:: block(address)
 
     Block this address
 
     :param ComboAddress address: The address to block
 
-  .. method:: BPFFilter:addRangeRule(Netmask , action [, force=false])
+  .. method:: addRangeRule(Netmask , action [, force=false])
 
-    .. versionadded:: 1.8.0
-
-    Block all IP addresses in this range. 
+    Block all IP addresses in this range.
 
     DNSDist eBPF code first checks if an exact IP match is found, then if a range matches, and finally if a DNSName does.
 
@@ -95,36 +88,38 @@ These are all the functions, objects and methods related to the :doc:`../advance
     :param int action: set ``action``  to ``0`` to allow a range, set ``action`` to ``1`` to block a range, set ``action`` to ``2`` to truncate a range.
     :param bool force: When ``force`` is set to true, DNSDist always accepts adding a new item to BPF maps, even if the item to be added may already be included in the larger network range.
 
-  .. method:: BPFFilter:blockQName(name [, qtype=255])
+  .. method:: blockQName(name [, qtype=65535])
 
-    Block queries for this exact qname. An optional qtype can be used, defaults to 255.
+  .. versionchanged:: 2.0.0
+    Before 2.0.0 the value used to block queries for all types was 255. It also used to be the default value. This was changed because it prevented blocking only queries for the ``ANY`` (255) qtype.
+
+    Block queries for this exact qname. An optional qtype can be used, defaults to 65535 which blocks queries for all types.
 
     :param DNSName name: The name to block
     :param int qtype: QType to block
 
-  .. method:: BPFFilter:getStats()
+  .. method:: getStats()
 
     Print the block tables.
 
-  .. method:: BPFFilter:unblock(address)
+  .. method:: unblock(address)
 
     Unblock this address.
 
     :param ComboAddress address: The address to unblock
 
-  .. method:: BPFFilter:rmRangeRule(Netmask)
-
-    .. versionadded:: 1.8.0
+  .. method:: rmRangeRule(Netmask)
 
     :param Netmask string: The rule you want to remove
 
-  .. method:: BPFFilter:lsRangeRule()
-
-    .. versionadded:: 1.8.0
+  .. method:: lsRangeRule()
 
     List all range rule.
 
-  .. method:: BPFFilter:unblockQName(name [, qtype=255])
+  .. method:: unblockQName(name [, qtype=65535])
+
+  .. versionchanged:: 2.0.0
+    Before 2.0.0 the value used to block queries for all types was 255. It also used to be the default value. This was changed because it prevented blocking only queries for the ``ANY`` (255) qtype.
 
     Remove this qname from the block list.
 
@@ -133,20 +128,20 @@ These are all the functions, objects and methods related to the :doc:`../advance
 
 .. class:: DynBPFFilter
 
-  Represents an dynamic eBPF filter, allowing the use of ephemeral rules to an existing eBPF filter. Note that since 1.6.0 the default BPF filter set via :func:`setDefaultBPFFilter` will automatically be used by a :ref:`DynBlockRulesGroup`, becoming the preferred way of dealing with ephemeral rules.
+  Represents a dynamic eBPF filter, allowing the use of ephemeral rules to an existing eBPF filter. Note that since 1.6.0 the default BPF filter set via :func:`setDefaultBPFFilter` will automatically be used by a :ref:`DynBlockRulesGroup`, becoming the preferred way of dealing with ephemeral rules.
 
-  .. method:: DynBPFFilter:purgeExpired()
+  .. method:: purgeExpired()
 
     Remove the expired ephemeral rules associated with this filter.
 
-  .. method:: DynBPFFilter:excludeRange(netmasks)
+  .. method:: excludeRange(netmasks)
 
-    Exclude this range, or list of ranges, meaning that no dynamic block will ever be inserted for clients in that range. Default to empty, meaning rules are applied to all ranges. When used in combination with :meth:`DynBPFFilter:includeRange`, the more specific entry wins.
+    Exclude this range, or list of ranges, meaning that no dynamic block will ever be inserted for clients in that range. Default to empty, meaning rules are applied to all ranges. When used in combination with :meth:`DynBPFFilter.includeRange`, the more specific entry wins.
 
     :param str or list of str netmasks: A netmask, or list of netmasks, as strings, like for example "192.0.2.1/24"
 
-  .. method:: DynBPFFilter:includeRange(netmasks)
+  .. method:: includeRange(netmasks)
 
-    Include this range, or list of ranges, meaning that rules will be applied to this range. When used in combination with :meth:`DynBPFFilter:excludeRange`, the more specific entry wins.
+    Include this range, or list of ranges, meaning that rules will be applied to this range. When used in combination with :meth:`DynBPFFilter.excludeRange`, the more specific entry wins.
 
     :param str or list of str netmasks: A netmask, or list of netmasks, as strings, like for example "192.0.2.1/24"

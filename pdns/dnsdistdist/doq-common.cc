@@ -26,6 +26,9 @@
 
 #ifdef HAVE_DNS_OVER_QUIC
 
+#include "dnsdist.hh"
+#include "dnsdist-concurrent-connections.hh"
+
 #if 0
 #define DEBUGLOG_ENABLED
 #define DEBUGLOG(x) std::cerr << x << std::endl;
@@ -63,7 +66,8 @@ PacketBuffer mintToken(const PacketBuffer& dcid, const ComboAddress& peer)
     return encryptedTokenPacket;
   }
   catch (const std::exception& exp) {
-    vinfolog("Error while minting DoH3 token: %s", exp.what());
+    VERBOSESLOG(infolog("Error while minting DoH3 token: %s", exp.what()),
+                dnsdist::logging::getTopLogger("doh3")->error(Logr::Info, exp.what(), "Error while minting DoH3 token"));
     throw;
   }
 }
@@ -121,33 +125,47 @@ std::optional<PacketBuffer> validateToken(const PacketBuffer& token, const Combo
     return PacketBuffer(plainText.begin() + (sizeof(ttd) + addrBytes.size()), plainText.end());
   }
   catch (const std::exception& exp) {
-    vinfolog("Error while validating DoH3 token: %s", exp.what());
+    VERBOSESLOG(infolog("Error while validating DoH3 token: %s", exp.what()),
+                dnsdist::logging::getTopLogger("doh3")->error(Logr::Info, exp.what(), "Error while validating DoH3 token"));
     return std::nullopt;
   }
 }
 
-static void sendFromTo(Socket& sock, const ComboAddress& peer, const ComboAddress& local, PacketBuffer& buffer)
+static void sendFromTo(Socket& sock, const ComboAddress& peer, const ComboAddress& local, PacketBuffer& buffer, [[maybe_unused]] bool socketBoundToAny)
 {
-  const int flags = 0;
-  if (local.sin4.sin_family == 0) {
+  /* we only want to specify the source address to use if we were able to
+     either harvest it from the incoming packet, or if our socket is already
+     bound to a specific address */
+  bool setSourceAddress = local.sin4.sin_family != 0;
+#if defined(__FreeBSD__) || defined(__DragonFly__)
+  /* FreeBSD and DragonFlyBSD refuse the use of IP_SENDSRCADDR on a socket that is bound to a
+     specific address, returning EINVAL in that case. */
+  if (!socketBoundToAny) {
+    setSourceAddress = false;
+  }
+#endif /* __FreeBSD__ || __DragonFly__ */
+
+  if (!setSourceAddress) {
+    const int flags = 0;
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     auto ret = sendto(sock.getHandle(), buffer.data(), buffer.size(), flags, reinterpret_cast<const struct sockaddr*>(&peer), peer.getSocklen());
     if (ret < 0) {
       auto error = errno;
-      vinfolog("Error while sending QUIC datagram of size %d to %s: %s", buffer.size(), peer.toStringWithPort(), stringerror(error));
+      VERBOSESLOG(infolog("Error while sending QUIC datagram of size %d to %s: %s", buffer.size(), peer.toStringWithPort(), stringerror(error)),
+                  dnsdist::logging::getTopLogger("quic-send-from-to")->error(Logr::Info, error, "Error while sending QUIC datagram", "datagram_size", Logging::Loggable(buffer.size()), "client.address", Logging::Loggable(peer)));
     }
     return;
   }
 
-  try {
-    sendMsgWithOptions(sock.getHandle(), buffer.data(), buffer.size(), &peer, &local, 0, 0);
-  }
-  catch (const std::exception& exp) {
-    vinfolog("Error while sending QUIC datagram of size %d from %s to %s: %s", buffer.size(), local.toStringWithPort(), peer.toStringWithPort(), exp.what());
+  auto ret = sendMsgWithOptions(sock.getHandle(), buffer.data(), buffer.size(), &peer, &local, 0, 0);
+
+  if (!ret.has_value()) {
+    VERBOSESLOG(infolog("Error while sending QUIC datagram of size %d from %s to %s: %s", buffer.size(), local.toStringWithPort(), peer.toStringWithPort(), stringerror(ret.error())),
+                dnsdist::logging::getTopLogger("quic-send-from-to")->error(Logr::Info, ret.error(), "Error while sending QUIC datagram", "datagram_size", Logging::Loggable(buffer.size()), "source.address", Logging::Loggable(local), "client.address", Logging::Loggable(peer)));
   }
 }
 
-void handleStatelessRetry(Socket& sock, const PacketBuffer& clientConnID, const PacketBuffer& serverConnID, const ComboAddress& peer, const ComboAddress& localAddr, uint32_t version, PacketBuffer& buffer)
+void handleStatelessRetry(Socket& sock, const PacketBuffer& clientConnID, const PacketBuffer& serverConnID, const ComboAddress& peer, const ComboAddress& localAddr, uint32_t version, PacketBuffer& buffer, bool socketBoundToAny)
 {
   auto newServerConnID = getCID();
   if (!newServerConnID) {
@@ -170,10 +188,10 @@ void handleStatelessRetry(Socket& sock, const PacketBuffer& clientConnID, const 
   }
 
   buffer.resize(static_cast<size_t>(written));
-  sendFromTo(sock, peer, localAddr, buffer);
+  sendFromTo(sock, peer, localAddr, buffer, socketBoundToAny);
 }
 
-void handleVersionNegociation(Socket& sock, const PacketBuffer& clientConnID, const PacketBuffer& serverConnID, const ComboAddress& peer, const ComboAddress& localAddr, PacketBuffer& buffer)
+void handleVersionNegotiation(Socket& sock, const PacketBuffer& clientConnID, const PacketBuffer& serverConnID, const ComboAddress& peer, const ComboAddress& localAddr, PacketBuffer& buffer, bool socketBoundToAny)
 {
   buffer.resize(MAX_DATAGRAM_SIZE);
 
@@ -187,10 +205,10 @@ void handleVersionNegociation(Socket& sock, const PacketBuffer& clientConnID, co
   }
 
   buffer.resize(static_cast<size_t>(written));
-  sendFromTo(sock, peer, localAddr, buffer);
+  sendFromTo(sock, peer, localAddr, buffer, socketBoundToAny);
 }
 
-void flushEgress(Socket& sock, QuicheConnection& conn, const ComboAddress& peer, const ComboAddress& localAddr, PacketBuffer& buffer)
+void flushEgress(Socket& sock, QuicheConnection& conn, const ComboAddress& peer, const ComboAddress& localAddr, PacketBuffer& buffer, bool socketBoundToAny)
 {
   buffer.resize(MAX_DATAGRAM_SIZE);
   quiche_send_info send_info;
@@ -206,7 +224,7 @@ void flushEgress(Socket& sock, QuicheConnection& conn, const ComboAddress& peer,
     }
     // FIXME pacing (as send_info.at should tell us when to send the packet) ?
     buffer.resize(static_cast<size_t>(written));
-    sendFromTo(sock, peer, localAddr, buffer);
+    sendFromTo(sock, peer, localAddr, buffer, socketBoundToAny);
   }
 }
 
@@ -215,12 +233,12 @@ void configureQuiche(QuicheConfig& config, const QuicheParams& params, bool isHT
   for (const auto& pair : params.d_tlsConfig.d_certKeyPairs) {
     auto res = quiche_config_load_cert_chain_from_pem_file(config.get(), pair.d_cert.c_str());
     if (res != 0) {
-      throw std::runtime_error("Error loading the server certificate: " + std::to_string(res));
+      throw std::runtime_error("Error loading the server certificate from '" + pair.d_cert + "': " + std::to_string(res));
     }
     if (pair.d_key) {
       res = quiche_config_load_priv_key_from_pem_file(config.get(), pair.d_key->c_str());
       if (res != 0) {
-        throw std::runtime_error("Error loading the server key: " + std::to_string(res));
+        throw std::runtime_error("Error loading the server key from '" + *(pair.d_key) + "': " + std::to_string(res));
       }
     }
   }
@@ -245,7 +263,7 @@ void configureQuiche(QuicheConfig& config, const QuicheParams& params, bool isHT
   // 0 means none will get accepted, that's why we have a default value of 65535
   quiche_config_set_initial_max_streams_bidi(config.get(), params.d_maxInFlight);
 
-  // The number of bytes of incoming stream data to be buffered for each localy or remotely-initiated bidirectional stream
+  // The number of bytes of incoming stream data to be buffered for each locally or remotely-initiated bidirectional stream
   quiche_config_set_initial_max_stream_data_bidi_local(config.get(), 8192);
   quiche_config_set_initial_max_stream_data_bidi_remote(config.get(), 8192);
 
@@ -268,10 +286,7 @@ void configureQuiche(QuicheConfig& config, const QuicheParams& params, bool isHT
     quiche_config_log_keys(config.get());
   }
 
-  auto algo = dnsdist::doq::s_available_cc_algorithms.find(params.d_ccAlgo);
-  if (algo != dnsdist::doq::s_available_cc_algorithms.end()) {
-    quiche_config_set_cc_algorithm(config.get(), static_cast<enum quiche_cc_algorithm>(algo->second));
-  }
+  quiche_config_set_cc_algorithm_name(config.get(), params.d_ccAlgo.c_str());
 
   {
     PacketBuffer resetToken;
@@ -312,9 +327,7 @@ bool recvAsync(Socket& socket, PacketBuffer& buffer, ComboAddress& clientAddr, C
        This is indicated by setting the family to 0 which is acted upon
        in sendUDPResponse() and DelayedPacket::().
     */
-    const ComboAddress bogusV4("0.0.0.0:0");
-    const ComboAddress bogusV6("[::]:0");
-    if ((localAddr.sin4.sin_family == AF_INET && localAddr == bogusV4) || (localAddr.sin4.sin_family == AF_INET6 && localAddr == bogusV6)) {
+    if (localAddr.isUnspecified()) {
       localAddr.sin4.sin_family = 0;
     }
   }
@@ -325,6 +338,80 @@ bool recvAsync(Socket& socket, PacketBuffer& buffer, ComboAddress& clientAddr, C
   return !buffer.empty();
 }
 
-};
+std::string getSNIFromQuicheConnection([[maybe_unused]] const QuicheConnection& conn)
+{
+#if defined(HAVE_QUICHE_CONN_SERVER_NAME)
+  const uint8_t* sniPtr = nullptr;
+  size_t sniPtrSize = 0;
+  quiche_conn_server_name(conn.get(), &sniPtr, &sniPtrSize);
+  if (sniPtrSize > 0) {
+    return std::string(reinterpret_cast<const char*>(sniPtr), sniPtrSize);
+  }
+#endif /* HAVE_QUICHE_CONN_SERVER_NAME */
+  return {};
+}
 
+void configureQLog([[maybe_unused]] const QuicheConnection& conn, [[maybe_unused]] const std::string& qLogDir, [[maybe_unused]] const ComboAddress& peer)
+{
+#ifdef HAVE_QUICHE_CONN_SET_QLOG_PATH
+  const unsigned char* trace_id = nullptr;
+  size_t trace_id_len = 0;
+  quiche_conn_trace_id(conn.get(), &trace_id, &trace_id_len);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): std::string's API
+  auto path = (qLogDir + "/" + std::string(reinterpret_cast<const char*>(trace_id), trace_id_len)) + ".qlog";
+  auto description = "peer_ip=" + peer.toString();
+  if (!quiche_conn_set_qlog_path(conn.get(), path.c_str(), "", description.c_str())) {
+    VERBOSESLOG(infolog("QLOG creation failed for connection from $s", peer.toStringWithPort()),
+                dnsdist::logging::getTopLogger("quic-qlog")->info(Logr::Info, "QLOG creation failed", "client.address", Logging::Loggable(peer)));
+  }
+#endif
+}
+
+QUICConnection::QUICConnection(ClientState& frontend, const ComboAddress& peer, const ComboAddress& localAddr, QuicheConfig config, QuicheConnection&& conn) :
+  d_frontend(frontend), d_peer(peer), d_localAddr(localAddr), d_conn(std::move(conn)), d_config(std::move(config))
+{
+  auto concurrentConnections = ++d_frontend.tcpCurrentConnections;
+  if (concurrentConnections > d_frontend.tcpMaxConcurrentConnections.load()) {
+    d_frontend.tcpMaxConcurrentConnections.store(concurrentConnections);
+  }
+}
+
+QUICConnection::~QUICConnection()
+{
+  try {
+    /* do not account if we have been moved! */
+    if (d_conn) {
+      --d_frontend.tcpCurrentConnections;
+
+      dnsdist::IncomingConcurrentTCPConnectionsManager::accountClosedTCPConnection(d_peer);
+
+      timeval now{};
+      gettimeofday(&now, nullptr);
+      auto diff = now - d_connectionStartTime;
+      d_frontend.updateTCPMetrics(d_queriesCount, (diff.tv_sec * 1000) + (diff.tv_usec / 1000), d_queriesCount > 0 ? d_readIOsTotal / d_queriesCount : d_readIOsTotal);
+
+      if (!quiche_conn_is_resumed(d_conn.get())) {
+        ++d_frontend.tlsNewSessions;
+        dnsdist::IncomingConcurrentTCPConnectionsManager::accountTLSNewSession(d_peer);
+      }
+      else {
+        ++d_frontend.tlsResumptions;
+        dnsdist::IncomingConcurrentTCPConnectionsManager::accountTLSResumedSession(d_peer);
+      }
+    }
+  }
+  catch (...) {
+    /* in theory it might raise an exception, and we cannot allow it to be uncaught in a dtor */
+  }
+}
+
+std::shared_ptr<const std::string> QUICConnection::getSNI()
+{
+  if (!d_sni) {
+    d_sni = std::make_shared<const std::string>(getSNIFromQuicheConnection(d_conn));
+  }
+  return d_sni;
+}
+
+}
 #endif

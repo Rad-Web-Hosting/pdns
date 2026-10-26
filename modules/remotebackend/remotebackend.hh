@@ -71,13 +71,15 @@ protected:
     }
     throw JsonException("Json value not convertible to String");
   };
+
+  std::shared_ptr<Logr::Logger> d_slog;
 };
 
 // fwd declarations
 class UnixsocketConnector : public Connector
 {
 public:
-  UnixsocketConnector(std::map<std::string, std::string> options);
+  UnixsocketConnector(Logr::log_t log, std::map<std::string, std::string> options);
   ~UnixsocketConnector() override;
   int send_message(const Json& input) override;
   int recv_message(Json& output) override;
@@ -96,7 +98,7 @@ private:
 class HTTPConnector : public Connector
 {
 public:
-  HTTPConnector(std::map<std::string, std::string> options);
+  HTTPConnector(Logr::log_t log, std::map<std::string, std::string> options);
   ~HTTPConnector() override;
 
   int send_message(const Json& input) override;
@@ -123,7 +125,7 @@ private:
 class ZeroMQConnector : public Connector
 {
 public:
-  ZeroMQConnector(std::map<std::string, std::string> options);
+  ZeroMQConnector(Logr::log_t log, std::map<std::string, std::string> options);
   ~ZeroMQConnector() override;
   int send_message(const Json& input) override;
   int recv_message(Json& output) override;
@@ -142,7 +144,7 @@ private:
 class PipeConnector : public Connector
 {
 public:
-  PipeConnector(std::map<std::string, std::string> options);
+  PipeConnector(Logr::log_t log, std::map<std::string, std::string> options);
   ~PipeConnector() override;
 
   int send_message(const Json& input) override;
@@ -167,36 +169,38 @@ public:
   RemoteBackend(const std::string& suffix = "");
   ~RemoteBackend() override;
 
-  void lookup(const QType& qtype, const DNSName& qdomain, int zoneId = -1, DNSPacket* pkt_p = nullptr) override;
+  unsigned int getCapabilities() override;
+  void lookup(const QType& qtype, const DNSName& qdomain, domainid_t zoneId, DNSPacket* pkt_p = nullptr) override;
+  void APILookup(const QType& qtype, const DNSName& qdomain, domainid_t zoneId, bool include_disabled = false) override;
   bool get(DNSResourceRecord& rr) override;
-  bool list(const DNSName& target, int domain_id, bool include_disabled = false) override;
+  bool list(const ZoneName& target, domainid_t domain_id, bool include_disabled = false) override;
 
-  bool getAllDomainMetadata(const DNSName& name, std::map<std::string, std::vector<std::string>>& meta) override;
-  bool getDomainMetadata(const DNSName& name, const std::string& kind, std::vector<std::string>& meta) override;
-  bool getDomainKeys(const DNSName& name, std::vector<DNSBackend::KeyData>& keys) override;
+  bool getAllDomainMetadata(const ZoneName& name, std::map<std::string, std::vector<std::string>>& meta) override;
+  bool getDomainMetadata(const ZoneName& name, const std::string& kind, std::vector<std::string>& meta) override;
+  bool getDomainKeys(const ZoneName& name, std::vector<DNSBackend::KeyData>& keys) override;
   bool getTSIGKey(const DNSName& name, DNSName& algorithm, std::string& content) override;
-  bool getBeforeAndAfterNamesAbsolute(uint32_t id, const DNSName& qname, DNSName& unhashed, DNSName& before, DNSName& after) override;
-  bool setDomainMetadata(const DNSName& name, const string& kind, const std::vector<std::basic_string<char>>& meta) override;
-  bool removeDomainKey(const DNSName& name, unsigned int id) override;
-  bool addDomainKey(const DNSName& name, const KeyData& key, int64_t& id) override;
-  bool activateDomainKey(const DNSName& name, unsigned int id) override;
-  bool deactivateDomainKey(const DNSName& name, unsigned int id) override;
-  bool publishDomainKey(const DNSName& name, unsigned int id) override;
-  bool unpublishDomainKey(const DNSName& name, unsigned int id) override;
-  bool getDomainInfo(const DNSName& domain, DomainInfo& di, bool getSerial = true) override;
-  void setNotified(uint32_t id, uint32_t serial) override;
-  bool doesDNSSEC() override;
-  bool autoPrimaryBackend(const string& ip, const DNSName& domain, const vector<DNSResourceRecord>& nsset, string* nameserver, string* account, DNSBackend** ddb) override;
-  bool createSecondaryDomain(const string& ip, const DNSName& domain, const string& nameserver, const string& account) override;
-  bool replaceRRSet(uint32_t domain_id, const DNSName& qname, const QType& qt, const vector<DNSResourceRecord>& rrset) override;
+  bool getBeforeAndAfterNamesAbsolute(domainid_t id, const DNSName& qname, DNSName& unhashed, DNSName& before, DNSName& after) override;
+  bool setDomainMetadata(const ZoneName& name, const string& kind, const std::vector<std::basic_string<char>>& meta) override;
+  bool removeDomainKey(const ZoneName& name, unsigned int keyId) override;
+  bool addDomainKey(const ZoneName& name, const KeyData& key, int64_t& keyId) override;
+  bool activateDomainKey(const ZoneName& name, unsigned int keyId) override;
+  bool deactivateDomainKey(const ZoneName& name, unsigned int keyId) override;
+  bool publishDomainKey(const ZoneName& name, unsigned int keyId) override;
+  bool unpublishDomainKey(const ZoneName& name, unsigned int keyId) override;
+  bool getDomainInfo(const ZoneName& domain, DomainInfo& info, bool getSerial = true) override;
+  void setNotified(domainid_t id, uint32_t serial) override;
+  bool autoPrimaryBackend(const string& ipAddress, const ZoneName& domain, const vector<DNSResourceRecord>& nsset, string* nameserver, string* account, DNSBackend** ddb) override;
+  bool createSecondaryDomain(const string& ipAddress, const ZoneName& domain, const string& nameserver, const string& account, DomainInfo& info, bool startTransaction) override;
+  bool replaceRRSet(domainid_t domain_id, const DNSName& qname, const QType& qt, const vector<DNSResourceRecord>& rrset) override;
   bool feedRecord(const DNSResourceRecord& r, const DNSName& ordername, bool ordernameIsNSEC3 = false) override;
-  bool feedEnts(int domain_id, map<DNSName, bool>& nonterm) override;
-  bool feedEnts3(int domain_id, const DNSName& domain, map<DNSName, bool>& nonterm, const NSEC3PARAMRecordContent& ns3prc, bool narrow) override;
-  bool startTransaction(const DNSName& domain, int domain_id) override;
+  bool feedEnts(domainid_t domain_id, map<DNSName, bool>& nonterm) override;
+  bool feedEnts3(domainid_t domain_id, const DNSName& domain, map<DNSName, bool>& nonterm, const NSEC3PARAMRecordContent& ns3prc, bool narrow) override;
+  bool startDomainReplacementTransaction(const ZoneName& qname, domainid_t domainId) override;
+  bool startDomainModificationTransaction(const ZoneName& qname) override;
   bool commitTransaction() override;
   bool abortTransaction() override;
   bool setTSIGKey(const DNSName& name, const DNSName& algorithm, const string& content) override;
-  bool deleteTSIGKey(const DNSName& name) override;
+  bool deleteTSIGKey(const DNSName& name, const DNSName& algorithm) override;
   bool getTSIGKeys(std::vector<struct TSIGKey>& keys) override;
   string directBackendCmd(const string& querystr) override;
   bool searchRecords(const string& pattern, size_t maxResults, vector<DNSResourceRecord>& result) override;
@@ -204,10 +208,8 @@ public:
   void getAllDomains(vector<DomainInfo>* domains, bool getSerial, bool include_disabled) override;
   void getUpdatedPrimaries(vector<DomainInfo>& domains, std::unordered_set<DNSName>& catalogs, CatalogHashMap& catalogHashes) override;
   void getUnfreshSecondaryInfos(vector<DomainInfo>* domains) override;
-  void setStale(uint32_t domain_id) override;
-  void setFresh(uint32_t domain_id) override;
-
-  static DNSBackend* maker();
+  void setStale(domainid_t domain_id) override;
+  void setFresh(domainid_t domain_id) override;
 
 private:
   int build();
@@ -220,7 +222,6 @@ private:
 
   bool send(Json& value);
   bool recv(Json& value);
-  static void makeErrorAndThrow(Json& value);
 
   static string asString(const Json& value)
   {
@@ -256,4 +257,5 @@ private:
   };
 
   void parseDomainInfo(const json11::Json& obj, DomainInfo& di);
+  bool startTransactionInternal(const ZoneName& domain, domainid_t domain_id);
 };

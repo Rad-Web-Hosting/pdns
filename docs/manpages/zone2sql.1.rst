@@ -10,13 +10,13 @@ Description
 -----------
 
 :program:`zone2sql` parses BIND named.conf files and zonefiles and outputs SQL
-on standard out, which can then be fed to your database.
+on standard output, which can then be fed to your database.
 
 :program:`zone2sql` understands the BIND master file extension ``$GENERATE``
 and will also honour ``$ORIGIN`` and ``$TTL``.
 
-For backends supporting slave operation there is also an option to keep
-slave zones as slaves, and not convert them to native operation.
+For backends supporting secondary operation there is also an option to keep
+secondary zones as secondaries, and not convert them to native operation.
 
 :program:`zone2sql` can generate SQL for the Generic MySQL, Generic PostgreSQL,
 Generic SQLite3 backend.
@@ -58,6 +58,12 @@ OUTPUT Options
 OTHER Options
 -------------
 
+--delete-matching-domains
+    Adds a delete statement to the sql output to allow re-importing zones.
+    Mostly only useful during testing.
+    Since this will only delete the domain, but not its records, 
+    you should have the optional foreign key relationship enabled in your 
+    schema in order to avoid leaving dangling records.
 --filter-duplicate-soa
     If there's more than one SOA record in the zone (possibly because it
     was AXFR'd), ignore it. If this option is not set, all SOA records
@@ -67,7 +73,7 @@ OTHER Options
 --on-error-resume-next
     Ignore missing zone files during parsing. Dangerous.
 --secondary
-    Maintain slave status of zones listed in named.conf as being slaves.
+    Maintain secondary status of zones listed in named.conf as being slaves.
     The default behaviour is to convert all zones to native operation.
 --verbose
     Be verbose during conversion.

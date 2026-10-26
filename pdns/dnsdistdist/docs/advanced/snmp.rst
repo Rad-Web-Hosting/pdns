@@ -7,8 +7,8 @@ SNMP support is enabled via the :func:`snmpAgent` directive.
 By default, the only traps sent when Traps are enabled, are backend status change notifications.
 But custom traps can also be sent:
 
- * from Lua, with :func:`sendCustomTrap` and :meth:`DNSQuestion:sendTrap`
- * For selected queries and responses, using :func:`SNMPTrapAction` and :func:`SNMPTrapResponseAction`
+* from Lua, with :func:`sendCustomTrap` and :meth:`DNSQuestion.sendTrap`
+* For selected queries and responses, using :func:`SNMPTrapAction` and :func:`SNMPTrapResponseAction`
 
 ``Net SNMP snmpd`` doesn't accept subagent connections by default, so to use the SNMP features of :program:`dnsdist` the following line should be added to the ``snmpd.conf`` configuration file::
 
@@ -19,7 +19,7 @@ This can be done with the following lines in ``snmpd.conf`` (assuming `dnsdist` 
 
   agentxperms 0700 0700 dnsdist dnsdist
 
-In order to allow the retrieval of statistics via SNMP, ``snmpd``'s access control has to configured.
+In order to allow the retrieval of statistics via SNMP, ``snmpd``'s access control has to be configured.
 A very simple SNMPv2c setup only needs the configuration of a read-only community in ``snmpd.conf``::
 
   rocommunity dnsdist42

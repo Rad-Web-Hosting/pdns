@@ -43,6 +43,14 @@
 #include "dnsrecords.hh"
 #include "statnode.hh"
 
+#if !defined(IP_OFFMASK)
+// Solaris and derivatives do not define IP_OFFMASK in <netinet/ip.h>.
+// We can't even use ~(IP_RF | IP_DF | IP_MF) as it doesn't define IP_RF either.
+#define IP_OFFMASK 0x1fff /* mask for fragmenting bits */
+#endif
+
+bool g_slogStructured{false};
+
 namespace po = boost::program_options;
 po::variables_map g_vm;
 
@@ -108,13 +116,15 @@ static void visitor(const StatNode* node, const StatNode::Stat& /* selfstat */, 
 {
   // 20% servfails, >100 children, on average less than 2 copies of a query
   // >100 different subqueries
-  double dups=1.0*childstat.queries/node->children.size();
-  if(dups > 2.0)
+  auto dups = 1.0 * static_cast<double>(childstat.queries) / static_cast<double>(node->getNumberOfChildren());
+  if (dups > 2.0) {
     return;
-  if(1.0*childstat.servfails / childstat.queries > 0.2 && node->children.size()>100) {
-    cout<<node->fullname<<", servfails: "<<childstat.servfails<<", nxdomains: "<<childstat.nxdomains<<", remotes: "<<childstat.remotes.size()<<", children: "<<node->children.size()<<", childstat.queries: "<<childstat.queries;
+  }
+
+  if (1.0 * static_cast<double>(childstat.servfails) / static_cast<double>(childstat.queries) > 0.2 && node->getNumberOfChildren() > 100) {
+    cout<<node->fullname<<", servfails: "<<childstat.servfails<<", nxdomains: "<<childstat.nxdomains<<", remotes: "<<childstat.remotes.size()<<", children: "<<node->getNumberOfChildren()<<", childstat.queries: "<<childstat.queries;
     cout<<", dups2: "<<dups<<endl;
-    for(const StatNode::Stat::remotes_t::value_type& rem :  childstat.remotes) {
+    for (const auto& rem :  childstat.remotes) {
       cout<<"source: "<<node->fullname<<"\t"<<rem.first.toString()<<"\t"<<rem.second<<endl;
     }
   }
@@ -225,7 +235,8 @@ try
   typedef vector<pair<time_t, LiveCounts> > pcounts_t;
   pcounts_t pcounts;
   const uint16_t port = g_vm["port"].as<uint16_t>();
-  OPTRecordContent::report();
+
+  reportAllTypes();
 
   for(unsigned int fno=0; fno < files.size(); ++fno) {
     PcapPacketReader pr(files[fno]);
@@ -382,8 +393,9 @@ try
             ComboAddress rem = pr.getDest();
             rem.sin4.sin_port=0;
 
-            if(doServFailTree)
-              root.submit(qname, header.rcode, pr.d_len, false, rem);
+            if (doServFailTree) {
+              root.submit(qname, header.rcode, pr.d_len, false, rem, 0U);
+            }
           }
 
           if(!qd.d_qcount || qd.d_qcount == qd.d_answercount) {

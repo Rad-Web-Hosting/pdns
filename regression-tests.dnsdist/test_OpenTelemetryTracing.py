@@ -1,0 +1,1651 @@
+#!/usr/bin/env python
+
+import base64
+import binascii
+import pprint
+import threading
+import time
+
+import dns.edns
+import dns.message
+import dns.rcode
+import dns.rdataclass
+import dns.rdatatype
+import dns.rrset
+import google.protobuf.json_format
+import opentelemetry.proto.trace.v1.trace_pb2
+
+from dnsdisttests import pickAvailablePort
+import test_Protobuf
+
+
+class DNSDistOpenTelemetryProtobufTest(test_Protobuf.DNSDistProtobufTest):
+    def checkProtobufOpenTelemetryBase(self, msg):
+        self.assertTrue(msg)
+        self.assertTrue(msg.HasField("openTelemetry"))
+
+    def sendQueryAndGetProtobuf(
+        self,
+        useTCP=False,
+        traceID="",
+        spanID="",
+        ednsTraceIDOpt=65500,
+        dropped=False,
+        querySentByDNSDist=True,
+    ):
+        name = "query.ot.tests.powerdns.com."
+
+        target = "target.ot.tests.powerdns.com."
+        query = dns.message.make_query(name, "A", "IN")
+
+        if traceID != "":
+            ottrace = dns.edns.GenericOption(str(ednsTraceIDOpt), "\x00\x00")
+            ottrace.data += binascii.a2b_hex(traceID)
+            if spanID != "":
+                ottrace.data += binascii.a2b_hex(spanID)
+            ottrace.data += b"\x00"  # flags
+            query = dns.message.make_query(name, "A", "IN", use_edns=True, options=[ottrace])
+
+        response = dns.message.make_response(query)
+
+        rrset = dns.rrset.from_text(name, 3600, dns.rdataclass.IN, dns.rdatatype.CNAME, target)
+        response.answer.append(rrset)
+
+        rrset = dns.rrset.from_text(target, 3600, dns.rdataclass.IN, dns.rdatatype.A, "127.0.0.1")
+        response.answer.append(rrset)
+
+        if useTCP:
+            receivedQuery, receivedResponse = self.sendTCPQuery(query, response)
+        else:
+            receivedQuery, receivedResponse = self.sendUDPQuery(query, response)
+
+        if querySentByDNSDist:
+            self.assertTrue(receivedQuery)
+            receivedQuery.id = query.id
+            self.assertEqual(query, receivedQuery)
+
+        if not dropped:
+            self.assertTrue(receivedResponse)
+            self.assertEqual(response, receivedResponse)
+
+        # check the protobuf message corresponding to the UDP query
+        return self.getFirstProtobufMessage(timeout=1)
+
+    def checkOTDataBase(self, otData):
+        pprint.pprint(otData)
+        self.assertEqual(len(otData["resource_spans"]), 1)
+        self.assertEqual(len(otData["resource_spans"][0]["resource"]["attributes"]), 1)
+
+        # Ensure all attributes exist
+        for field in otData["resource_spans"][0]["resource"]["attributes"]:
+            self.assertIn(field["key"], ["service.name"])
+
+    def checkOTData(
+        self,
+        otData,
+        hasProcessResponseAfterRules=False,
+        useTCP=False,
+        hasRemoteLogResponseAction=True,
+        hasSelectBackendForOutgoingQuery=True,
+        hasResponse=True,
+        extraFunctions=set(),
+    ):
+        self.checkOTDataBase(otData)
+
+        # Ensure the values are correct
+        # TODO: query.remote with port
+        msg_scope_attr_keys = [v["key"] for v in otData["resource_spans"][0]["scope_spans"][0]["scope"]["attributes"]]
+        self.assertListEqual(msg_scope_attr_keys, ["instance"])
+
+        root_span_attr_keys = [
+            v["key"] for v in otData["resource_spans"][0]["scope_spans"][0]["spans"][0]["attributes"]
+        ]
+        self.assertListEqual(
+            root_span_attr_keys,
+            ["query.qname", "query.qtype", "query.remote.address", "query.remote.port"],
+        )
+
+        # No way to guess the test port, but check the rest of the values
+        root_span_attrs = {
+            v["key"]: v["value"]["string_value"]
+            for v in otData["resource_spans"][0]["scope_spans"][0]["spans"][0]["attributes"]
+            if v["key"] not in ["query.remote.port"]
+        }
+        self.assertDictEqual(
+            {
+                "query.qname": "query.ot.tests.powerdns.com",
+                "query.qtype": "A",
+                "query.remote.address": "127.0.0.1",
+            },
+            root_span_attrs,
+        )
+
+        msg_span_name = {v["name"] for v in otData["resource_spans"][0]["scope_spans"][0]["spans"]}
+
+        funcs = {
+            "processQuery",
+            "applyRulesToQuery",
+            "Rule: Enable tracing",
+            "applyRulesChainToQuery",
+            "applyRulesToResponse",
+        }
+
+        if hasSelectBackendForOutgoingQuery:
+            funcs.add("selectBackendForOutgoingQuery")
+
+        if hasResponse:
+            funcs.add("processResponse")
+
+        if hasRemoteLogResponseAction:
+            funcs.add("ResponseRule: Do PB logging")
+
+        if useTCP:
+            funcs.add("IncomingTCPConnectionState::handleQuery")
+        else:
+            funcs.add("processUDPQuery")
+            if hasSelectBackendForOutgoingQuery:
+                funcs.add("assignOutgoingUDPQueryToBackend")
+
+        if hasProcessResponseAfterRules:
+            funcs.add("processResponseAfterRules")
+
+        funcs = funcs.union(extraFunctions)
+
+        self.assertSetEqual(msg_span_name, funcs)
+
+
+class DNSDistOpenTelemetryProtobufBaseTest(DNSDistOpenTelemetryProtobufTest):
+    def doTest(
+        self,
+        hasProcessResponseAfterRules=False,
+        hasRemoteLogResponseAction=True,
+        useTCP=False,
+        traceID="",
+        spanID="",
+        extraFunctions=set(),
+    ):
+        msg = self.sendQueryAndGetProtobuf(useTCP, traceID, spanID)
+
+        self.assertTrue(msg.HasField("openTelemetryTraceID"))
+        self.assertNotEqual(msg.openTelemetryTraceID, "")
+
+        if traceID != "":
+            self.assertEqual(msg.openTelemetryTraceID, binascii.a2b_hex(traceID))
+
+        self.assertTrue(msg.HasField("openTelemetryData"))
+        traces_data = opentelemetry.proto.trace.v1.trace_pb2.TracesData()
+        traces_data.ParseFromString(msg.openTelemetryData)
+        ot_data = google.protobuf.json_format.MessageToDict(traces_data, preserving_proto_field_name=True)
+
+        self.checkOTData(
+            ot_data,
+            useTCP=useTCP,
+            extraFunctions=extraFunctions,
+            hasRemoteLogResponseAction=hasRemoteLogResponseAction,
+            hasProcessResponseAfterRules=hasProcessResponseAfterRules,
+        )
+
+        traceId = base64.b64encode(msg.openTelemetryTraceID).decode()
+        for msg_span in ot_data["resource_spans"][0]["scope_spans"][0]["spans"]:
+            self.assertEqual(
+                msg_span["trace_id"],
+                traceId,
+                f"span {msg_span} does not have the trace id {traceId} of the protobuf message",
+            )
+
+        if spanID != "":
+            for span in ot_data["resource_spans"][0]["scope_spans"][0]["spans"]:
+                if span["parent_span_id"] == binascii.a2b_hex("0000000000000000"):
+                    self.assertEqual(binascii.a2b_hex(spanID), span["span_id"])
+                    break
+
+
+class TestOpenTelemetryTracingBaseYAML(DNSDistOpenTelemetryProtobufBaseTest):
+    _yaml_config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+
+remote_logging:
+ protobuf_loggers:
+   - name: pblog
+     address: 127.0.0.1:%d
+
+query_rules:
+ - name: Enable tracing
+   selector:
+     type: All
+   action:
+     type: SetTrace
+     value: true
+
+response_rules:
+ - name: Do PB logging
+   selector:
+     type: All
+   action:
+     type: RemoteLog
+     logger_name: pblog
+"""
+
+    def testBasic(self):
+        self.doTest()
+
+    def testTCP(self):
+        self.doTest(
+            useTCP=True,
+            extraFunctions={
+                "createTCPQuery",
+                "TCPConnectionToBackend::handleResponse",
+                "getDownstreamConnection",
+                "TCPConnectionToBackend::sendQuery",
+                "handleResponse",
+                "prepareQueryForSending",
+                "TCPConnectionToBackend::queueQuery",
+            },
+        )
+
+
+class TestOpenTelemetryTracingBaseLua(DNSDistOpenTelemetryProtobufBaseTest):
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+
+    _config_template = """
+newServer{address="127.0.0.1:%d"}
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+
+addAction(AllRule(), SetTraceAction(true), {name="Enable tracing"})
+addResponseAction(AllRule(), RemoteLogResponseAction(rl), {name="Do PB logging"})
+"""
+
+    def testBasic(self):
+        self.doTest()
+
+    def testTCP(self):
+        self.doTest(
+            useTCP=True,
+            extraFunctions={
+                "createTCPQuery",
+                "TCPConnectionToBackend::handleResponse",
+                "getDownstreamConnection",
+                "TCPConnectionToBackend::sendQuery",
+                "handleResponse",
+                "prepareQueryForSending",
+                "TCPConnectionToBackend::queueQuery",
+            },
+        )
+
+
+class TestOpenTelemetryTracingBaseDelayYAML(DNSDistOpenTelemetryProtobufBaseTest):
+    _yaml_config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+
+remote_logging:
+ protobuf_loggers:
+   - name: pblog
+     address: 127.0.0.1:%d
+
+query_rules:
+ - name: Enable tracing
+   selector:
+     type: All
+   action:
+     type: SetTrace
+     value: true
+
+response_rules:
+ - name: Do PB logging
+   selector:
+     type: All
+   action:
+     type: RemoteLog
+     logger_name: pblog
+     delay: true
+"""
+
+    def testBasic(self):
+        self.doTest(True)
+
+    def testTCP(self):
+        self.doTest(
+            hasProcessResponseAfterRules=True,
+            useTCP=True,
+            extraFunctions={
+                "queueResponse",
+                "handleResponse",
+                "TCPConnectionToBackend::queueQuery",
+                "createTCPQuery",
+                "prepareQueryForSending",
+                "getDownstreamConnection",
+                "TCPConnectionToBackend::handleResponse",
+                "TCPConnectionToBackend::sendQuery",
+            },
+        )
+
+
+class TestOpenTelemetryTracingBaseDelayLua(DNSDistOpenTelemetryProtobufBaseTest):
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+
+    _config_template = """
+newServer{address="127.0.0.1:%d"}
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+
+addAction(AllRule(), SetTraceAction(true), {name="Enable tracing"})
+addResponseAction(AllRule(), RemoteLogResponseAction(rl, nil, false, {}, {}, true), {name="Do PB logging"})
+"""
+
+    def testBasic(self):
+        self.doTest(True)
+
+    def testTCP(self):
+        self.doTest(
+            hasProcessResponseAfterRules=True,
+            useTCP=True,
+            extraFunctions={
+                "queueResponse",
+                "handleResponse",
+                "TCPConnectionToBackend::queueQuery",
+                "createTCPQuery",
+                "prepareQueryForSending",
+                "getDownstreamConnection",
+                "TCPConnectionToBackend::handleResponse",
+                "TCPConnectionToBackend::sendQuery",
+            },
+        )
+
+
+class TestOpenTelemetryTracingUseIncomingYAML(DNSDistOpenTelemetryProtobufBaseTest):
+    _yaml_config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+
+remote_logging:
+ protobuf_loggers:
+   - name: pblog
+     address: 127.0.0.1:%d
+
+query_rules:
+ - name: Enable tracing
+   selector:
+     type: All
+   action:
+     type: SetTrace
+     value: true
+     use_incoming_traceparent: true
+
+response_rules:
+ - name: Do PB logging
+   selector:
+     type: All
+   action:
+     type: RemoteLog
+     logger_name: pblog
+"""
+
+    def testNoTraceID(self):
+        self.doTest()
+
+    def testTraceIDAndSpanID(self):
+        self.doTest(
+            traceID="0123456789ABCDEF0123456789ABCDEF",
+            spanID="FEDCBA9876543210",
+        )
+
+
+class TestOpenTelemetryTracingUseIncomingLua(DNSDistOpenTelemetryProtobufBaseTest):
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+    _config_template = """
+newServer{address="127.0.0.1:%d"}
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+
+addAction(AllRule(), SetTraceAction(true, {useIncomingTraceparent=true}), {name="Enable tracing"})
+addResponseAction(AllRule(), RemoteLogResponseAction(rl, nil, false, {}, {}, false), {name="Do PB logging"})
+"""
+
+    def testNoTraceID(self):
+        self.doTest()
+
+    def testTraceIDAndSpanID(self):
+        self.doTest(
+            traceID="0123456789ABCDEF0123456789ABCDEF",
+            spanID="FEDCBA9876543210",
+        )
+
+
+class DNSDistOpenTelemetryProtobufNoOTDataTest(DNSDistOpenTelemetryProtobufTest):
+    def doTest(self):
+        msg = self.sendQueryAndGetProtobuf()
+
+        self.assertFalse(msg.HasField("openTelemetryTraceID"))
+        self.assertFalse(msg.HasField("openTelemetryData"))
+
+
+class DNSDistOpenTelemetryProtobufEnabledButUnsetYAML(DNSDistOpenTelemetryProtobufNoOTDataTest):
+    _yaml_config_params = ["_testServerPort", "_protobufServerPort"]
+    _yaml_config_template = """---
+
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+
+remote_logging:
+ protobuf_loggers:
+   - name: pblog
+     address: 127.0.0.1:%d
+
+response_rules:
+ - name: Do PB logging
+   selector:
+     type: All
+   action:
+     type: RemoteLog
+     logger_name: pblog
+"""
+
+    def testEnabledButUnset(self):
+        self.doTest()
+
+
+class DNSDistOpenTelemetryProtobufEnabledButUnsetLua(DNSDistOpenTelemetryProtobufNoOTDataTest):
+    _config_params = ["_testServerPort", "_protobufServerPort"]
+    _config_template = """
+newServer{address="127.0.0.1:%d"}
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+
+addResponseAction(AllRule(), RemoteLogResponseAction(rl))
+"""
+
+    def testEnabledButUnset(self):
+        self.doTest()
+
+
+class DNSDistOpenTelemetryProtobufEnabledSetButTurnedOffYAML(DNSDistOpenTelemetryProtobufNoOTDataTest):
+    """Here we turn tracing on for the query, only to disable it after that"""
+
+    _yaml_config_params = ["_testServerPort", "_protobufServerPort"]
+
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+
+remote_logging:
+ protobuf_loggers:
+   - name: pblog
+     address: 127.0.0.1:%d
+
+query_rules:
+ - name: Enable tracing
+   selector:
+     type: All
+   action:
+     type: SetTrace
+     value: true
+ - name: Enable tracing
+   selector:
+     type: All
+   action:
+     type: SetTrace
+     value: false
+
+response_rules:
+ - name: Do PB logging
+   selector:
+     type: All
+   action:
+     type: RemoteLog
+     logger_name: pblog
+"""
+
+    def testDisabledAfterEnabled(self):
+        self.doTest()
+
+
+class DNSDistOpenTelemetryProtobufEnabledSetButTurnedOffLua(DNSDistOpenTelemetryProtobufNoOTDataTest):
+    _config_params = ["_testServerPort", "_protobufServerPort"]
+    _config_template = """
+newServer{address="127.0.0.1:%d"}
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+
+addAction(AllRule(), SetTraceAction(true))
+addAction(AllRule(), SetTraceAction(false))
+addResponseAction(AllRule(), RemoteLogResponseAction(rl))
+"""
+
+    def testEnabledButUnset(self):
+        self.doTest()
+
+
+class DNSDistOpenTelemetryProtobufBaseLoggersInActionYAML(DNSDistOpenTelemetryProtobufBaseTest):
+    _yaml_config_params = ["_testServerPort", "_protobufServerPort"]
+
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+
+remote_logging:
+ protobuf_loggers:
+   - name: pblog
+     address: 127.0.0.1:%d
+
+query_rules:
+ - name: Enable tracing
+   selector:
+     type: All
+   action:
+     type: SetTrace
+     value: true
+     remote_loggers:
+       - pblog
+"""
+
+    def testBasic(self):
+        self.doTest(hasRemoteLogResponseAction=False, hasProcessResponseAfterRules=True)
+
+    def testTCP(self):
+        self.doTest(
+            useTCP=True,
+            hasRemoteLogResponseAction=False,
+            hasProcessResponseAfterRules=True,
+            extraFunctions={
+                "createTCPQuery",
+                "queueResponse",
+                "TCPConnectionToBackend::handleResponse",
+                "getDownstreamConnection",
+                "TCPConnectionToBackend::sendQuery",
+                "handleResponse",
+                "prepareQueryForSending",
+                "TCPConnectionToBackend::queueQuery",
+            },
+        )
+
+
+class TestOpenTelemetryTracingBaseYAMLIncludedRemoteLoggerDropped(DNSDistOpenTelemetryProtobufTest):
+    _yaml_config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+
+remote_logging:
+ protobuf_loggers:
+   - name: pblog
+     address: 127.0.0.1:%d
+
+query_rules:
+ - name: Enable tracing
+   selector:
+     type: All
+   action:
+     type: SetTrace
+     value: true
+     remote_loggers:
+       - pblog
+
+response_rules:
+ - name: Drop
+   selector:
+     type: All
+   action:
+     type: Drop
+"""
+
+    def doTest(self, useTCP=False, extraFunctions=set()):
+        msg = self.sendQueryAndGetProtobuf(useTCP=useTCP, dropped=True)
+        traces_data = opentelemetry.proto.trace.v1.trace_pb2.TracesData()
+        traces_data.ParseFromString(msg.openTelemetryData)
+        ot_data = google.protobuf.json_format.MessageToDict(traces_data, preserving_proto_field_name=True)
+
+        funcs = extraFunctions.union(
+            {
+                "ResponseRule: Drop",
+            }
+        )
+
+        self.checkOTData(
+            ot_data,
+            hasProcessResponseAfterRules=False,
+            hasRemoteLogResponseAction=False,
+            useTCP=useTCP,
+            extraFunctions=funcs,
+        )
+
+    def testBasic(self):
+        self.doTest(False)
+
+    def testTCP(self):
+        self.doTest(
+            True,
+            extraFunctions={
+                "handleResponse",
+                "TCPConnectionToBackend::queueQuery",
+                "getDownstreamConnection",
+                "createTCPQuery",
+                "TCPConnectionToBackend::handleResponse",
+                "TCPConnectionToBackend::sendQuery",
+                "prepareQueryForSending",
+            },
+        )
+
+
+class TestOpenTelemetryTracingBaseLuaIncludedRemoteLoggerDropped(
+    TestOpenTelemetryTracingBaseYAMLIncludedRemoteLoggerDropped
+):
+    _yaml_config_params = []
+    _yaml_config_template = ""
+
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+    _config_template = """
+newServer{address="127.0.0.1:%d"}
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+
+addAction(AllRule(), SetTraceAction(true, {remoteLoggers={rl}}), {name="Enable tracing"})
+addResponseAction(AllRule(), DropResponseAction(), {name="Drop"})
+"""
+
+
+class TestOpenTelemetryTracingBaseYAMLIncludedRemoteLoggerSpoofed(DNSDistOpenTelemetryProtobufTest):
+    _yaml_config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+
+remote_logging:
+ protobuf_loggers:
+   - name: pblog
+     address: 127.0.0.1:%d
+
+query_rules:
+ - name: Enable tracing
+   selector:
+     type: All
+   action:
+     type: SetTrace
+     value: true
+     remote_loggers:
+       - pblog
+ - name: Spoof A record
+   selector:
+     type: All
+   action:
+     type: Spoof
+     ips:
+       - 192.0.2.1
+"""
+
+    def doTest(self, useTCP=False, extraFunctions=set()):
+        msg = self.sendQueryAndGetProtobuf(useTCP=useTCP, querySentByDNSDist=False, dropped=True)
+        traces_data = opentelemetry.proto.trace.v1.trace_pb2.TracesData()
+        traces_data.ParseFromString(msg.openTelemetryData)
+        ot_data = google.protobuf.json_format.MessageToDict(traces_data, preserving_proto_field_name=True)
+
+        funcs = extraFunctions.union({"Rule: Spoof A record"})
+        self.checkOTData(
+            ot_data,
+            hasProcessResponseAfterRules=False,
+            hasRemoteLogResponseAction=False,
+            useTCP=useTCP,
+            hasSelectBackendForOutgoingQuery=False,
+            hasResponse=False,
+            extraFunctions=funcs,
+        )
+
+    def testBasic(self):
+        self.doTest()
+
+    def testTCP(self):
+        self.doTest(useTCP=True, extraFunctions={"queueResponse"})
+
+
+def servfailOnTraceParent(request: dns.message.Message):
+    response = dns.message.make_response(request)
+    if any(opt.otype == 65500 for opt in request.options):
+        response.set_rcode(dns.rcode.SERVFAIL)
+    return response.to_wire()
+
+
+class TestOpenTelemetryTracingStripIncomingTraceParent(DNSDistOpenTelemetryProtobufTest):
+    # this test suite uses a different responder port
+    # because it uses a different responder logic so we
+    # need to make sure we are not hitting the backend
+    # from a different test
+    _testServerPort = pickAvailablePort()
+    _yaml_config_params = [
+        "_testServerPort",
+    ]
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+
+query_rules:
+ - name: Enable tracing
+   selector:
+     type: All
+   action:
+     type: SetTrace
+     value: true
+     strip_incoming_traceparent: true
+"""
+
+    @classmethod
+    def startResponders(cls):
+        print("Launching responders..")
+
+        cls._UDPResponder = threading.Thread(
+            name="UDP Responder",
+            target=cls.UDPResponder,
+            args=[
+                cls._testServerPort,
+                cls._toResponderQueue,
+                cls._fromResponderQueue,
+                False,
+                servfailOnTraceParent,
+            ],
+        )
+        cls._UDPResponder.daemon = True
+        cls._UDPResponder.start()
+
+        cls._TCPResponder = threading.Thread(
+            name="TCP Responder",
+            target=cls.TCPResponder,
+            args=[
+                cls._testServerPort,
+                cls._toResponderQueue,
+                cls._fromResponderQueue,
+                False,
+                False,
+                servfailOnTraceParent,
+            ],
+        )
+        cls._TCPResponder.daemon = True
+        cls._TCPResponder.start()
+
+    def doQuery(self, useTCP=False):
+        name = "query.ot.tests.powerdns.com."
+
+        ottrace = dns.edns.GenericOption(str(65500), "\x00\x00")
+        ottrace.data += binascii.a2b_hex("12345678901234567890123456789012")
+        ottrace.data += binascii.a2b_hex("1234567890123456")
+        ottrace.data += binascii.a2b_hex("00")
+        query = dns.message.make_query(name, "A", "IN", use_edns=True, options=[ottrace])
+
+        if useTCP:
+            _, receivedResponse = self.sendTCPQuery(query, response=None)
+        else:
+            _, receivedResponse = self.sendUDPQuery(query, response=None)
+
+        self.assertIsNotNone(receivedResponse)
+        # If we stripped the OpenTelemetry Trace ID from the query, we should not get a SERVFAIL
+        self.assertEqual(receivedResponse.rcode(), dns.rcode.NOERROR)
+
+    def testStripIncomingTraceIDUDP(self):
+        self.doQuery()
+
+    def testStripIncomingTraceIDTCP(self):
+        self.doQuery(True)
+
+
+def verifyTraceparentInQuery(request: dns.message.Message):
+    print(request)
+    response = dns.message.make_response(request)
+
+    traceparent: dns.edns.Option | None = next((i for i in request.options if i.otype == 65500), None)
+
+    print(traceparent)
+
+    if traceparent is None:
+        response.set_rcode(dns.rcode.SERVFAIL)
+        return response.to_wire()
+
+    # Ensure the SpanID is not 1234567890123456
+    if traceparent.to_text()[-17:-1] == "1234567890123456":
+        response.set_rcode(dns.rcode.SERVFAIL)
+        return response.to_wire()
+
+    # technically wrong, as we include the TRACEPARENT in the response
+    return response.to_wire()
+
+
+class TestOpenTelemetryTracingSendTraceparentDownstream(DNSDistOpenTelemetryProtobufTest):
+    # this test suite uses a different responder port
+    # because it uses a different responder logic so we
+    # need to make sure we are not hitting the backend
+    # from a different test
+    _testServerPort = pickAvailablePort()
+    _yaml_config_params = [
+        "_testServerPort",
+    ]
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+    health_checks:
+      mode: up
+
+query_rules:
+ - name: Enable tracing
+   selector:
+     type: All
+   action:
+     type: SetTrace
+     value: true
+     send_downstream_traceparent: true
+"""
+
+    @classmethod
+    def startResponders(cls):
+        print("Launching responders..")
+
+        cls._UDPResponder = threading.Thread(
+            name="UDP Responder",
+            target=cls.UDPResponder,
+            args=[
+                cls._testServerPort,
+                cls._toResponderQueue,
+                cls._fromResponderQueue,
+                False,
+                verifyTraceparentInQuery,
+            ],
+        )
+        cls._UDPResponder.daemon = True
+        cls._UDPResponder.start()
+
+        cls._TCPResponder = threading.Thread(
+            name="TCP Responder",
+            target=cls.TCPResponder,
+            args=[
+                cls._testServerPort,
+                cls._toResponderQueue,
+                cls._fromResponderQueue,
+                False,
+                False,
+                verifyTraceparentInQuery,
+            ],
+        )
+        cls._TCPResponder.daemon = True
+        cls._TCPResponder.start()
+
+    def doQuery(self, useTCP=False):
+        name = "query.ot.tests.powerdns.com."
+
+        query = dns.message.make_query(name, "A", "IN", use_edns=True)
+
+        if useTCP:
+            _, receivedResponse = self.sendTCPQuery(query, response=None)
+        else:
+            _, receivedResponse = self.sendUDPQuery(query, response=None)
+
+        self.assertIsNotNone(receivedResponse)
+        # If we stripped the OpenTelemetry Trace ID from the query, we should not get a SERVFAIL
+        self.assertEqual(receivedResponse.rcode(), dns.rcode.NOERROR)
+
+    def testSetDownstreamTraceparentUDP(self):
+        self.doQuery()
+
+    def testSetDownstreamTraceparentTCP(self):
+        self.doQuery(True)
+
+
+class TestOpenTelemetryTracingSendTraceparentDownstreamLua(TestOpenTelemetryTracingSendTraceparentDownstream):
+    _yaml_config_template = None
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+    _config_template = """
+newServer{address="127.0.0.1:%d"}
+getServer(0):setUp()
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+
+addAction(AllRule(), SetTraceAction(true, {remoteLoggers={rl}, sendDownstreamTraceparent=true}), {name="Enable tracing"})
+addResponseAction(AllRule(), RemoteLogResponseAction(rl), {name="Do PB logging"})
+        """
+
+
+class TestOpenTelemetryTracingSpansFromLua(DNSDistOpenTelemetryProtobufBaseTest):
+    _yaml_config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+    health_checks:
+      mode: up
+
+remote_logging:
+  protobuf_loggers:
+    - name: pblog
+      address: 127.0.0.1:%d
+
+query_rules:
+  - name: Enable tracing
+    selector:
+      type: All
+    action:
+      type: SetTrace
+      value: true
+      remote_loggers:
+        - pblog
+  - name: A traced LuaAction
+    selector:
+      type: All
+    action:
+      type: Lua
+      function_code: |
+        return function (dq)
+          withTraceSpan("my-span",
+            function ()
+              setSpanAttribute("my-key-from-lua", "my-value-from-lua")
+              withTraceSpan("my-second-span",
+                function()
+                end
+              )
+            end
+          )
+          return DNSAction.None
+        end
+"""
+
+    def testBasic(self):
+        self.doTest(
+            hasProcessResponseAfterRules=True,
+            hasRemoteLogResponseAction=False,
+            extraFunctions={
+                "my-span",
+                "my-second-span",
+                "Rule: A traced LuaAction",
+            },
+        )
+
+    def testTCP(self):
+        self.doTest(
+            useTCP=True,
+            hasProcessResponseAfterRules=True,
+            hasRemoteLogResponseAction=False,
+            extraFunctions={
+                "my-span",
+                "my-second-span",
+                "Rule: A traced LuaAction",
+                "createTCPQuery",
+                "queueResponse",
+                "TCPConnectionToBackend::handleResponse",
+                "getDownstreamConnection",
+                "TCPConnectionToBackend::sendQuery",
+                "handleResponse",
+                "prepareQueryForSending",
+                "TCPConnectionToBackend::queueQuery",
+            },
+        )
+
+
+class TestOpenTelemetryTracingSpansFromLuaFFI(TestOpenTelemetryTracingSpansFromLua):
+    _yaml_config_template = None
+    _yaml_config_params = []
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+    _config_template = """
+    newServer{address="127.0.0.1:%d"}
+    rl = newRemoteLogger('127.0.0.1:%d')
+    setOpenTelemetryTracing(true)
+
+
+    function luaffiaction(dq)
+      withTraceSpan("my-span",
+        function ()
+          setSpanAttribute("my-key-from-lua", "my-value-from-lua")
+          withTraceSpan("my-second-span",
+            function()
+            end
+          )
+        end
+      )
+      return DNSAction.None
+    end
+
+addAction(AllRule(), SetTraceAction(true, {remoteLoggers={rl}}), {name="Enable tracing"})
+addAction(AllRule(), LuaFFIAction(luaffiaction), {name="A traced LuaFFIAction"})
+"""
+
+    def testBasic(self):
+        self.doTest(
+            hasProcessResponseAfterRules=True,
+            hasRemoteLogResponseAction=False,
+            extraFunctions={
+                "my-span",
+                "my-second-span",
+                "Rule: A traced LuaFFIAction",
+            },
+        )
+
+    def testTCP(self):
+        self.doTest(
+            useTCP=True,
+            hasProcessResponseAfterRules=True,
+            hasRemoteLogResponseAction=False,
+            extraFunctions={
+                "my-span",
+                "my-second-span",
+                "Rule: A traced LuaFFIAction",
+                "createTCPQuery",
+                "queueResponse",
+                "TCPConnectionToBackend::handleResponse",
+                "getDownstreamConnection",
+                "TCPConnectionToBackend::sendQuery",
+                "handleResponse",
+                "prepareQueryForSending",
+                "TCPConnectionToBackend::queueQuery",
+            },
+        )
+
+
+class TestOpenTelemetryTracingSpansFromLuaFFIResponse(TestOpenTelemetryTracingSpansFromLua):
+    _yaml_config_template = None
+    _yaml_config_params = []
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+    _config_template = """
+    newServer{address="127.0.0.1:%d"}
+    rl = newRemoteLogger('127.0.0.1:%d')
+    setOpenTelemetryTracing(true)
+
+
+    function luaffiaction(dq)
+      withTraceSpan("my-span",
+        function ()
+          setSpanAttribute("my-key-from-lua", "my-value-from-lua")
+          withTraceSpan("my-second-span",
+            function()
+            end
+          )
+        end
+      )
+      return DNSAction.None
+    end
+
+addAction(AllRule(), SetTraceAction(true, {remoteLoggers={rl}}), {name="Enable tracing"})
+addResponseAction(AllRule(), LuaFFIResponseAction(luaffiaction), {name="A traced LuaFFIResponseAction"})
+"""
+
+    def testBasic(self):
+        self.doTest(
+            hasProcessResponseAfterRules=True,
+            hasRemoteLogResponseAction=False,
+            extraFunctions={
+                "my-span",
+                "my-second-span",
+                "ResponseRule: A traced LuaFFIResponseAction",
+            },
+        )
+
+    def testTCP(self):
+        self.doTest(
+            useTCP=True,
+            hasProcessResponseAfterRules=True,
+            hasRemoteLogResponseAction=False,
+            extraFunctions={
+                "my-span",
+                "my-second-span",
+                "ResponseRule: A traced LuaFFIResponseAction",
+                "createTCPQuery",
+                "queueResponse",
+                "TCPConnectionToBackend::handleResponse",
+                "getDownstreamConnection",
+                "TCPConnectionToBackend::sendQuery",
+                "handleResponse",
+                "prepareQueryForSending",
+                "TCPConnectionToBackend::queueQuery",
+            },
+        )
+
+
+class TestOpenTelemetryTracingSpansFromLuaResponseAction(DNSDistOpenTelemetryProtobufBaseTest):
+    _yaml_config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+    health_checks:
+      mode: up
+
+remote_logging:
+  protobuf_loggers:
+    - name: pblog
+      address: 127.0.0.1:%d
+
+query_rules:
+  - name: Enable tracing
+    selector:
+      type: All
+    action:
+      type: SetTrace
+      value: true
+      remote_loggers:
+        - pblog
+
+response_rules:
+  - name: A traced LuaResponseAction
+    selector:
+      type: All
+    action:
+      type: Lua
+      function_code: |
+        return function (dq)
+          withTraceSpan("my-span",
+            function ()
+              setSpanAttribute("my-key-from-lua", "my-value-from-lua")
+              withTraceSpan("my-second-span",
+                function()
+                end
+              )
+            end
+          )
+          return DNSAction.None
+        end
+"""
+
+    def testBasic(self):
+        self.doTest(
+            hasProcessResponseAfterRules=True,
+            hasRemoteLogResponseAction=False,
+            extraFunctions={
+                "my-span",
+                "my-second-span",
+                "ResponseRule: A traced LuaResponseAction",
+            },
+        )
+
+    def testTCP(self):
+        self.doTest(
+            useTCP=True,
+            hasProcessResponseAfterRules=True,
+            hasRemoteLogResponseAction=False,
+            extraFunctions={
+                "my-span",
+                "my-second-span",
+                "ResponseRule: A traced LuaResponseAction",
+                "createTCPQuery",
+                "queueResponse",
+                "TCPConnectionToBackend::handleResponse",
+                "getDownstreamConnection",
+                "TCPConnectionToBackend::sendQuery",
+                "handleResponse",
+                "prepareQueryForSending",
+                "TCPConnectionToBackend::queueQuery",
+            },
+        )
+
+
+class TestOpenTelemetryTracingInternalBase(DNSDistOpenTelemetryProtobufTest):
+    @staticmethod
+    def getSpan(otData, name):
+        result = [v for v in otData["resource_spans"][0]["scope_spans"][0]["spans"] if v["name"] == name]
+        if len(result) > 0:
+            return result[0]
+        raise KeyError(f"{name} not found in OT Data")
+
+    def checkMaintenanceSpanNames(self, all_span_name, extra_names=set(), callback_names=set()):
+        all_names = {
+            "maintenanceThread",
+            "maintenanceHooks",
+            "DynamicBlocks::runRegisteredGroups",
+        }.union(extra_names).union({f"maintenanceCallback/{name}" for name in callback_names})
+
+        self.assertSetEqual(all_span_name, all_names)
+
+    def getFirstMaintenanceProtobufMessage(self):
+        while self._protobufQueue.empty():
+            # let the protobuf messages the time to get there
+            time.sleep(0.1)
+
+        msg = self.getFirstProtobufMessage()
+        traces_data = opentelemetry.proto.trace.v1.trace_pb2.TracesData()
+        traces_data.ParseFromString(msg.openTelemetryData)
+        otData = google.protobuf.json_format.MessageToDict(traces_data, preserving_proto_field_name=True)
+        self.checkOTDataBase(otData)
+        return otData
+
+
+class TestOpenTelemetryTracingInternalYaml(TestOpenTelemetryTracingInternalBase):
+    _yaml_config_template = """---
+logging:
+  open_telemetry_tracing:
+    enabled: true
+    internal_tracing:
+      - kind: maintenance
+        sample_rate: 60
+        remote_loggers:
+          - pblog
+
+backends:
+  - address: 127.0.0.1:%d
+    protocol: Do53
+    health_checks:
+      mode: up
+
+remote_logging:
+  protobuf_loggers:
+    - name: pblog
+      address: 127.0.0.1:%d
+"""
+
+    _yaml_config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+
+    def testMaintenance(self):
+        otData = self.getFirstMaintenanceProtobufMessage()
+        msg_span_name = {v["name"] for v in otData["resource_spans"][0]["scope_spans"][0]["spans"]}
+        self.checkMaintenanceSpanNames(msg_span_name)
+
+
+class TestOpenTelemetryTracingInternalLua(TestOpenTelemetryTracingInternalYaml):
+    _yaml_config_template = None
+
+    _config_template = """
+newServer{address="127.0.0.1:%d"}
+getServer(0):setUp()
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+setOpenTelemetryInternalTrace('maintenance', {rl}, 60)
+"""
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+
+
+class TestOpenTelemetryTracingInternalWithFunctionsLua(TestOpenTelemetryTracingInternalBase):
+    _config_template = """
+newServer{address="127.0.0.1:%d"}
+getServer(0):setUp()
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+setOpenTelemetryInternalTrace('maintenance', {rl}, 60)
+
+function maintenance()
+	setSpanAttribute("outside", "hello from the outside")
+	withTraceSpan("my-span", function()
+		setSpanAttribute("inside", "hello from the inside")
+		os.execute("sleep 0.1")
+	end)
+end
+"""
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+
+    def testMaintenance(self):
+        otData = self.getFirstMaintenanceProtobufMessage()
+
+        msg_span_name = {v["name"] for v in otData["resource_spans"][0]["scope_spans"][0]["spans"]}
+
+        self.checkMaintenanceSpanNames(
+            msg_span_name,
+            {
+                "maintenanceFunction",
+                "my-span",
+            },
+        )
+
+        maintenanceFunction_span = self.getSpan(otData, "maintenanceFunction")
+        self.assertListEqual(
+            maintenanceFunction_span["attributes"],
+            [{"key": "outside", "value": {"string_value": "hello from the outside"}}],
+        )
+
+        my_span = self.getSpan(otData, "my-span")
+        self.assertListEqual(
+            my_span["attributes"],
+            [{"key": "inside", "value": {"string_value": "hello from the inside"}}],
+        )
+
+
+class TestOpenTelemetryTracingInternalWithFunctionsCallbackLua(TestOpenTelemetryTracingInternalBase):
+    _config_template = """
+local function my_maintenance()
+	setSpanAttribute("outside", "hello from the outside")
+	withTraceSpan("my-span", function()
+		setSpanAttribute("inside", "hello from the inside")
+		os.execute("sleep 0.1")
+	end)
+end
+
+newServer{address="127.0.0.1:%d"}
+getServer(0):setUp()
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+setOpenTelemetryInternalTrace('maintenance', {rl}, 60)
+
+addMaintenanceCallback(my_maintenance)
+"""
+
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+
+    def testMaintenance(self):
+        otData = self.getFirstMaintenanceProtobufMessage()
+
+        msg_span_name = {v["name"] for v in otData["resource_spans"][0]["scope_spans"][0]["spans"]}
+
+        self.checkMaintenanceSpanNames(
+            msg_span_name,
+            {
+                "my-span",
+            },
+            {
+                "unnamed",
+            },
+        )
+
+        maintenanceFunction_span = self.getSpan(otData, "maintenanceHooks")
+        self.assertListEqual(
+            maintenanceFunction_span["attributes"],
+            [{"key": "outside", "value": {"string_value": "hello from the outside"}}],
+        )
+
+        my_span = self.getSpan(otData, "my-span")
+        self.assertListEqual(
+            my_span["attributes"],
+            [{"key": "inside", "value": {"string_value": "hello from the inside"}}],
+        )
+
+
+class TestOpenTelemetryTracingInternalWithFunctionsNamedCallbackLua(TestOpenTelemetryTracingInternalBase):
+    _config_template = """
+local function my_maintenance()
+	setSpanAttribute("outside", "hello from the outside")
+	withTraceSpan("my-span", function()
+		setSpanAttribute("inside", "hello from the inside")
+		os.execute("sleep 0.1")
+	end)
+end
+
+newServer{address="127.0.0.1:%d"}
+getServer(0):setUp()
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+setOpenTelemetryInternalTrace('maintenance', {rl}, 60)
+
+addMaintenanceCallback(my_maintenance, "my_maintenance")
+"""
+
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+
+    def testMaintenance(self):
+        otData = self.getFirstMaintenanceProtobufMessage()
+
+        msg_span_name = {v["name"] for v in otData["resource_spans"][0]["scope_spans"][0]["spans"]}
+
+        self.checkMaintenanceSpanNames(
+            msg_span_name,
+            {
+                "my-span",
+            },
+            {
+                "my_maintenance",
+            },
+        )
+
+        maintenanceFunction_span = self.getSpan(otData, "maintenanceHooks")
+        self.assertListEqual(
+            maintenanceFunction_span["attributes"],
+            [{"key": "outside", "value": {"string_value": "hello from the outside"}}],
+        )
+
+        my_span = self.getSpan(otData, "my-span")
+        self.assertListEqual(
+            my_span["attributes"],
+            [{"key": "inside", "value": {"string_value": "hello from the inside"}}],
+        )
+
+
+class TestOpenTelemetryTracingInternalNewThreadLua(TestOpenTelemetryTracingInternalBase):
+    _config_template = """
+newServer{address="127.0.0.1:%d"}
+getServer(0):setUp()
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+newThread([==[
+    -- do some setup here
+    local ctr = 0
+    while true do
+        withTraceSpan("newThreadRootSpan", function()
+            setSpanAttribute("rootspan", "I am a root span")
+            setSpanAttribute("loop", ctr)
+            withTraceSpan("innerspan", function()
+                setSpanAttribute("inner", "I am an inner span")
+                os.execute("sleep 0.1")
+            end)
+        end)
+        ctr = ctr + 1
+        -- make sure we only send 2 traces for this test
+        if ctr < 2 then
+            sendOpenTelemetryTrace()
+        end
+    end
+]==],
+  {interval=1, remoteloggers={rl}}
+)
+"""
+
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+
+    def testNewThread(self):
+        for ctr in range(1):
+            otData = self.getFirstMaintenanceProtobufMessage()
+
+            msg_span_names = {v["name"] for v in otData["resource_spans"][0]["scope_spans"][0]["spans"]}
+            self.assertSetEqual(msg_span_names, {"newThreadRootSpan", "innerspan"})
+
+            root_span = self.getSpan(otData, "newThreadRootSpan")
+            self.assertListEqual(
+                root_span["attributes"],
+                [
+                    {"key": "rootspan", "value": {"string_value": "I am a root span"}},
+                    {
+                        "key": "loop",
+                        "value": {"string_value": str(ctr)},
+                    },  # TODO: let setSpanAttribute accept an std::variant
+                ],
+            )
+
+            inner_span = self.getSpan(otData, "innerspan")
+            self.assertListEqual(
+                inner_span["attributes"],
+                [{"key": "inner", "value": {"string_value": "I am an inner span"}}],
+            )
+
+
+class TestOpenTelemetryTracingFFIActionPerThread(DNSDistOpenTelemetryProtobufBaseTest):
+    _config_template = """
+newServer{address="127.0.0.1:%d"}
+getServer(0):setUp()
+rl = newRemoteLogger('127.0.0.1:%d')
+setOpenTelemetryTracing(true)
+
+local action = [[
+  return function(dq)
+    withTraceSpan("action-span",
+      function ()
+        setSpanAttribute("my-key-from-lua", "my-value-from-lua")
+        withTraceSpan("my-second-action-span",
+          function()
+          end
+        )
+      end
+    )
+    return DNSAction.None
+  end
+]]
+
+local responseAction = [[
+  return function(dq)
+    withTraceSpan("response-action-span",
+      function ()
+        setSpanAttribute("my-key-from-lua", "my-value-from-lua")
+        withTraceSpan("my-second-response-action-span",
+          function()
+          end
+        )
+      end
+    )
+    return DNSAction.None
+  end
+]]
+
+addAction(AllRule(), SetTraceAction(true, {remoteLoggers={rl}}), {name="Enable tracing"})
+addAction(AllRule(), LuaFFIPerThreadAction(action), {name="FFI"})
+addResponseAction(AllRule(), LuaFFIPerThreadResponseAction(responseAction), {name="FFIResponse"})
+"""
+
+    _config_params = [
+        "_testServerPort",
+        "_protobufServerPort",
+    ]
+
+    def testBasic(self):
+        self.doTest(
+            hasProcessResponseAfterRules=True,
+            hasRemoteLogResponseAction=False,
+            extraFunctions={
+                "action-span",
+                "my-second-action-span",
+                "response-action-span",
+                "my-second-response-action-span",
+                "Rule: FFI",
+                "ResponseRule: FFIResponse",
+            },
+        )
+
+    def testTCP(self):
+        self.doTest(
+            useTCP=True,
+            hasProcessResponseAfterRules=True,
+            hasRemoteLogResponseAction=False,
+            extraFunctions={
+                "action-span",
+                "my-second-action-span",
+                "response-action-span",
+                "my-second-response-action-span",
+                "Rule: FFI",
+                "ResponseRule: FFIResponse",
+                "createTCPQuery",
+                "queueResponse",
+                "TCPConnectionToBackend::handleResponse",
+                "getDownstreamConnection",
+                "TCPConnectionToBackend::sendQuery",
+                "handleResponse",
+                "prepareQueryForSending",
+                "TCPConnectionToBackend::queueQuery",
+            },
+        )

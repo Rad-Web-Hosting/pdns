@@ -47,16 +47,11 @@ public:
   UeberBackend(const string& pname = "default");
   ~UeberBackend();
 
-  bool autoPrimaryBackend(const string& ip, const DNSName& domain, const vector<DNSResourceRecord>& nsset, string* nameserver, string* account, DNSBackend** dnsBackend);
+  bool autoPrimaryBackend(const string& ip, const ZoneName& domain, const vector<DNSResourceRecord>& nsset, string* nameserver, string* account, DNSBackend** dnsBackend);
 
   bool autoPrimaryAdd(const AutoPrimary& primary);
   bool autoPrimaryRemove(const struct AutoPrimary& primary);
   bool autoPrimariesList(std::vector<AutoPrimary>& primaries);
-
-  /** Tracks all created UeberBackend instances for us. We use this vector to notify
-      existing threads of new modules
-  */
-  static LockGuarded<vector<UeberBackend*>> d_instances;
 
   static bool loadmodule(const string& name);
   static bool loadModules(const vector<string>& modules, const string& path);
@@ -67,72 +62,54 @@ public:
       new modules are loaded */
   vector<std::unique_ptr<DNSBackend>> backends;
 
-  //! the very magic handle for UeberBackend questions
-  class handle
-  {
-  public:
-    bool get(DNSZoneRecord& record);
-    handle();
-    ~handle();
-
-    //! The UeberBackend class where this handle belongs to
-    UeberBackend* parent{nullptr};
-    //! The current real backend, which is answering questions
-    DNSBackend* d_hinterBackend{nullptr};
-
-    //! DNSPacket who asked this question
-    DNSPacket* pkt_p{nullptr};
-    DNSName qname;
-
-    //! Index of the current backend within the backends vector
-    unsigned int i{0};
-    QType qtype;
-    int zoneId{-1};
-
-  private:
-    static AtomicCounter instances;
-  };
-
-  void lookup(const QType& qtype, const DNSName& qname, int zoneId, DNSPacket* pkt_p = nullptr);
+  void lookup(const QType& qtype, const DNSName& qname, domainid_t zoneId, DNSPacket* pkt_p = nullptr);
   /** Read a single record from a lookup(...) result. */
   bool get(DNSZoneRecord& resourceRecord);
   /** Close state created by lookup(...). */
   void lookupEnd();
 
   /** Determines if we are authoritative for a zone, and at what level */
-  bool getAuth(const DNSName& target, const QType& qtype, SOAData* soaData, bool cachedOk = true);
+  bool getAuth(const ZoneName& target, const QType& qtype, SOAData* soaData, Netmask remote, bool cachedOk = true, DNSPacket* pkt_p = nullptr);
   /** Load SOA info from backends, ignoring the cache.*/
-  bool getSOAUncached(const DNSName& domain, SOAData& soaData);
+  bool getSOAUncached(const ZoneName& domain, SOAData& soaData);
   void getAllDomains(vector<DomainInfo>* domains, bool getSerial, bool include_disabled);
 
   void getUnfreshSecondaryInfos(vector<DomainInfo>* domains);
   void getUpdatedPrimaries(vector<DomainInfo>& domains, std::unordered_set<DNSName>& catalogs, CatalogHashMap& catalogHashes);
-  bool getDomainInfo(const DNSName& domain, DomainInfo& domainInfo, bool getSerial = true);
-  bool createDomain(const DNSName& domain, DomainInfo::DomainKind kind, const vector<ComboAddress>& primaries, const string& account);
+  bool getDomainInfo(const ZoneName& domain, DomainInfo& domainInfo, bool getSerial = true);
+  bool createDomain(const ZoneName& domain, DomainInfo::DomainKind kind, const vector<ComboAddress>& primaries, const string& account, DomainInfo& domainInfo, bool startTransaction);
 
   bool doesDNSSEC();
-  bool addDomainKey(const DNSName& name, const DNSBackend::KeyData& key, int64_t& keyID);
-  bool getDomainKeys(const DNSName& name, std::vector<DNSBackend::KeyData>& keys);
-  bool getAllDomainMetadata(const DNSName& name, std::map<std::string, std::vector<std::string>>& meta);
-  bool getDomainMetadata(const DNSName& name, const std::string& kind, std::vector<std::string>& meta);
-  bool getDomainMetadata(const DNSName& name, const std::string& kind, std::string& meta);
-  bool setDomainMetadata(const DNSName& name, const std::string& kind, const std::vector<std::string>& meta);
-  bool setDomainMetadata(const DNSName& name, const std::string& kind, const std::string& meta);
+  bool addDomainKey(const ZoneName& name, const DNSBackend::KeyData& key, int64_t& keyID);
+  bool getDomainKeys(const ZoneName& name, std::vector<DNSBackend::KeyData>& keys);
+  bool getAllDomainMetadata(const ZoneName& name, std::map<std::string, std::vector<std::string>>& meta);
+  bool getDomainMetadata(const ZoneName& name, const std::string& kind, std::vector<std::string>& meta);
+  bool getDomainMetadata(const ZoneName& name, const std::string& kind, std::string& meta);
+  bool setDomainMetadata(const ZoneName& name, const std::string& kind, const std::vector<std::string>& meta);
+  bool setDomainMetadata(const ZoneName& name, const std::string& kind, const std::string& meta);
 
-  bool removeDomainKey(const DNSName& name, unsigned int keyID);
-  bool activateDomainKey(const DNSName& name, unsigned int keyID);
-  bool deactivateDomainKey(const DNSName& name, unsigned int keyID);
-  bool publishDomainKey(const DNSName& name, unsigned int keyID);
-  bool unpublishDomainKey(const DNSName& name, unsigned int keyID);
+  bool removeDomainKey(const ZoneName& name, unsigned int keyID);
+  bool activateDomainKey(const ZoneName& name, unsigned int keyID);
+  bool deactivateDomainKey(const ZoneName& name, unsigned int keyID);
+  bool publishDomainKey(const ZoneName& name, unsigned int keyID);
+  bool unpublishDomainKey(const ZoneName& name, unsigned int keyID);
 
-  void alsoNotifies(const DNSName& domain, set<string>* ips);
+  void alsoNotifies(const ZoneName& domain, set<string>* ips);
   void rediscover(string* status = nullptr);
   void reload();
 
   bool setTSIGKey(const DNSName& name, const DNSName& algorithm, const string& content);
   bool getTSIGKey(const DNSName& name, DNSName& algorithm, string& content);
   bool getTSIGKeys(std::vector<struct TSIGKey>& keys);
-  bool deleteTSIGKey(const DNSName& name);
+  bool deleteTSIGKey(const DNSName& name, const DNSName& algorithm);
+
+  void viewList(vector<string>& result);
+  void viewListZones(const string& view, vector<ZoneName>& result);
+  bool viewAddZone(const string& /* view */, const ZoneName& /* zone */);
+  bool viewDelZone(const string& /* view */, const ZoneName& /* zone */);
+
+  bool networkSet(const Netmask& net, std::string& tag);
+  void networkList(vector<pair<Netmask, string>>& networks);
 
   bool searchRecords(const string& pattern, vector<DNSResourceRecord>::size_type maxResults, vector<DNSResourceRecord>& result);
   bool searchComments(const string& pattern, size_t maxResults, vector<Comment>& result);
@@ -141,20 +118,61 @@ public:
 
   bool inTransaction();
 
+  bool hasCreatedLocalFiles();
+
+  unsigned int getCapabilities();
+
+  void flush();
+
 private:
+  std::shared_ptr<Logr::Logger> d_slog;
+
+  struct Question
+  {
+    DNSName qname;
+    domainid_t zoneId;
+    QType qtype;
+  } d_question;
+
+  //! the very magic handle for UeberBackend questions
+  class handle
+  {
+  public:
+    void setSLog(Logr::log_t slog) { d_slog = slog; }
+    void setParent(UeberBackend* parent) { d_parent = parent; }
+    void selectNextBackend();
+
+    void setupQuestion(Question& question) const;
+    void lookup(const QType& qtype, const DNSName& qname, domainid_t zoneId, DNSPacket* pkt_p);
+    bool get(DNSZoneRecord& record);
+    void lookupEnd() const;
+
+  private:
+    std::shared_ptr<Logr::Logger> d_slog;
+
+    //! The UeberBackend class where this handle belongs to
+    UeberBackend* d_parent{nullptr};
+
+    //! The currently selected real backend, which is answering questions
+    DNSBackend* d_hinterBackend{nullptr};
+
+    //! Index of the current backend within the backends vector
+    size_t d_backendIndex{0};
+
+    //! DNSPacket who asked this question
+    DNSPacket* d_pkt_p{nullptr};
+    DNSName d_qname;
+
+    QType d_qtype;
+    domainid_t d_zoneId{UnknownDomainID};
+  };
+
   handle d_handle;
   vector<DNSZoneRecord> d_answers;
   vector<DNSZoneRecord>::const_iterator d_cachehandleiter;
 
   static std::mutex d_mut;
   static std::condition_variable d_cond;
-
-  struct Question
-  {
-    DNSName qname;
-    int zoneId;
-    QType qtype;
-  } d_question;
 
   unsigned int d_cache_ttl, d_negcache_ttl;
   uint16_t d_qtype{0};
@@ -177,6 +195,6 @@ private:
   void addNegCache(const Question& question) const;
   void addCache(const Question& question, vector<DNSZoneRecord>&& rrs) const;
 
-  bool fillSOAFromZoneRecord(DNSName& shorter, int zoneId, SOAData* soaData);
-  CacheResult fillSOAFromCache(SOAData* soaData, DNSName& shorter);
+  bool fillSOAFromZoneRecord(ZoneName& shorter, domainid_t zoneId, SOAData* soaData);
+  CacheResult fillSOAFromCache(SOAData* soaData, ZoneName& shorter);
 };

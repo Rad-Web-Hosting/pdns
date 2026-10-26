@@ -6,8 +6,9 @@
 	createdb --user="$GPGSQL2USER" "$GPGSQL2DB" || echo ignoring createdb failure
 	psql --user="$GPGSQL2USER" "$GPGSQL2DB" < ../modules/gpgsqlbackend/schema.pgsql.sql
 
+	backend=gpgsql2
 	cat > pdns-gpgsql2.conf << __EOF__
-module-dir=./modules
+module-dir=$PDNS_MODULE_PATH
 launch=gpgsql
 gpgsql-dbname=$GPGSQL2DB
 gpgsql-user=$GPGSQL2USER
@@ -59,6 +60,6 @@ __EOF__
 	done
 	if [ $todo -ne 0 ]
 	then
-		echo "AXFR FAILED" >> failed_tests
+		echo "AXFR FAILED" | tee -a failed_tests
 		exit
 	fi

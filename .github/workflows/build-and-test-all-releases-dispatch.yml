@@ -11,12 +11,17 @@ permissions: # least privileges, see https://docs.github.com/en/actions/using-wo
   contents: read
 
 jobs:
-  call-build-and-test-all-master-debian-11:
+  call-build-and-test-all-auth-51:
     if: ${{ vars.SCHEDULED_JOBS_BUILD_AND_TEST_ALL }}
-    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@master
+    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/auth-5.1.x
     with:
-      branch-name: master
-      runner-docker-image-name: base-pdns-ci-image/debian-11-pdns-base
+      branch-name: rel/auth-5.1.x
+
+  call-build-and-test-all-auth-50:
+    if: ${{ vars.SCHEDULED_JOBS_BUILD_AND_TEST_ALL }}
+    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/auth-5.0.x
+    with:
+      branch-name: rel/auth-5.0.x
 
   call-build-and-test-all-auth-49:
     if: ${{ vars.SCHEDULED_JOBS_BUILD_AND_TEST_ALL }}
@@ -24,44 +29,26 @@ jobs:
     with:
       branch-name: rel/auth-4.9.x
 
-  call-build-and-test-all-auth-48:
+  call-build-and-test-all-rec-54:
     if: ${{ vars.SCHEDULED_JOBS_BUILD_AND_TEST_ALL }}
-    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/auth-4.8.x
+    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/rec-5.4.x
     with:
-      branch-name: rel/auth-4.8.x
+      branch-name: rel/rec-5.4.x
 
-  call-build-and-test-all-auth-47:
+  call-build-and-test-all-rec-53:
     if: ${{ vars.SCHEDULED_JOBS_BUILD_AND_TEST_ALL }}
-    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/auth-4.7.x
+    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/rec-5.3.x
     with:
-      branch-name: rel/auth-4.7.x
+      branch-name: rel/rec-5.3.x
 
-  call-build-and-test-all-rec-51:
+  call-build-and-test-all-dnsdist-21:
     if: ${{ vars.SCHEDULED_JOBS_BUILD_AND_TEST_ALL }}
-    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/rec-5.1.x
+    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/dnsdist-2.1.x
     with:
-      branch-name: rel/rec-5.1.x
+      branch-name: rel/dnsdist-2.1.x
 
-  call-build-and-test-all-rec-50:
+  call-build-and-test-all-dnsdist-20:
     if: ${{ vars.SCHEDULED_JOBS_BUILD_AND_TEST_ALL }}
-    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/rec-5.0.x
+    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/dnsdist-2.0.x
     with:
-      branch-name: rel/rec-5.0.x
-
-  call-build-and-test-all-rec-49:
-    if: ${{ vars.SCHEDULED_JOBS_BUILD_AND_TEST_ALL }}
-    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/rec-4.9.x
-    with:
-      branch-name: rel/rec-4.9.x
-
-  call-build-and-test-all-dnsdist-19:
-    if: ${{ vars.SCHEDULED_JOBS_BUILD_AND_TEST_ALL }}
-    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/dnsdist-1.9.x
-    with:
-      branch-name: rel/dnsdist-1.9.x
-
-  call-build-and-test-all-dnsdist-18:
-    if: ${{ vars.SCHEDULED_JOBS_BUILD_AND_TEST_ALL }}
-    uses: PowerDNS/pdns/.github/workflows/build-and-test-all.yml@rel/dnsdist-1.8.x
-    with:
-      branch-name: rel/dnsdist-1.8.x
+      branch-name: rel/dnsdist-2.0.x

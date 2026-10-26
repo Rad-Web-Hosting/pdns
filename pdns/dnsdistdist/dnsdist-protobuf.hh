@@ -21,11 +21,19 @@
  */
 #pragma once
 
-#include "dnsdist.hh"
 #include "dnsname.hh"
+#include <optional>
 
 #ifndef DISABLE_PROTOBUF
+#include <boost/multi_index_container.hpp>
+#include <boost/multi_index/hashed_index.hpp>
+#include <boost/multi_index/key_extractors.hpp>
+
 #include "protozero.hh"
+#include "protozero-trace.hh"
+
+struct DNSQuestion;
+struct DNSResponse;
 
 class DNSDistProtoBufMessage
 {
@@ -53,7 +61,7 @@ public:
   void addMeta(const std::string& key, std::vector<std::string>&& strValues, const std::vector<int64_t>& intValues);
   void addRR(DNSName&& qname, uint16_t uType, uint16_t uClass, uint32_t uTTL, const std::string& data);
 
-  void serialize(std::string& data) const;
+  void serialize(std::string& data, bool withOpenTelemetryTraceData = true) const;
 
   [[nodiscard]] std::string toDebugString() const;
 
@@ -92,18 +100,20 @@ private:
   const DNSResponse* d_dr{nullptr};
   const std::string* d_ServerIdentityRef{nullptr};
 
-  boost::optional<PBQuestion> d_question{boost::none};
-  boost::optional<std::string> d_serverIdentity{boost::none};
-  boost::optional<ComboAddress> d_requestor{boost::none};
-  boost::optional<ComboAddress> d_responder{boost::none};
-  boost::optional<Netmask> d_ednsSubnet{boost::none};
-  boost::optional<std::pair<time_t, uint32_t>> d_time{boost::none};
-  boost::optional<std::pair<time_t, uint32_t>> d_queryTime{boost::none};
-  boost::optional<size_t> d_bytes{boost::none};
-  boost::optional<uint8_t> d_rcode{boost::none};
+  std::optional<PBQuestion> d_question{std::nullopt};
+  std::optional<std::string> d_serverIdentity{std::nullopt};
+  std::optional<ComboAddress> d_requestor{std::nullopt};
+  std::optional<ComboAddress> d_responder{std::nullopt};
+  std::optional<Netmask> d_ednsSubnet{std::nullopt};
+  std::optional<std::pair<time_t, uint32_t>> d_time{std::nullopt};
+  std::optional<std::pair<time_t, uint32_t>> d_queryTime{std::nullopt};
+  std::optional<size_t> d_bytes{std::nullopt};
+  std::optional<uint8_t> d_rcode{std::nullopt};
 
   pdns::ProtoZero::Message::MessageType d_type{pdns::ProtoZero::Message::MessageType::DNSQueryType};
   bool d_includeCNAME{false};
+
+  std::optional<std::vector<pdns::trace::Span>> d_traceSpans{std::nullopt};
 };
 
 class ProtoBufMetaKey
@@ -146,9 +156,9 @@ class ProtoBufMetaKey
 
   using TypeContainer = boost::multi_index_container<
     KeyTypeDescription,
-    indexed_by<
-      hashed_unique<tag<NameTag>, member<KeyTypeDescription, const std::string, &KeyTypeDescription::d_name>>,
-      hashed_unique<tag<TypeTag>, member<KeyTypeDescription, const Type, &KeyTypeDescription::d_type>>>>;
+    boost::multi_index::indexed_by<
+      boost::multi_index::hashed_unique<boost::multi_index::tag<NameTag>, boost::multi_index::member<KeyTypeDescription, const std::string, &KeyTypeDescription::d_name>>,
+      boost::multi_index::hashed_unique<boost::multi_index::tag<TypeTag>, boost::multi_index::member<KeyTypeDescription, const Type, &KeyTypeDescription::d_type>>>>;
 
   static const TypeContainer s_types;
 

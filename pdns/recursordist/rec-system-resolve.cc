@@ -56,6 +56,7 @@ ComboAddress resolve(const std::string& name)
       vec.emplace_back(address);
     }
     catch (...) {
+      ;
     }
     res = res->ai_next;
   }
@@ -80,7 +81,7 @@ PacketBuffer resolve(const string& name, QClass cls, QType type)
   return answer;
 }
 
-// do a id.server/CH/TXT query
+// do an id.server/CH/TXT query
 std::string serverID()
 {
   auto buffer = resolve("id.server", QClass::CHAOS, QType::TXT);
@@ -88,20 +89,25 @@ std::string serverID()
     return {};
   }
 
-  MOADNSParser parser(false, static_cast<const char*>(static_cast<void*>(buffer.data())), buffer.size());
-  if (parser.d_header.rcode != RCode::NoError || parser.d_answers.size() != 1) {
-    return {};
-  }
-  const auto& dnsrecord = parser.d_answers.at(0);
-  if (dnsrecord.d_type == QType::TXT) {
-    if (auto txt = getRR<TXTRecordContent>(dnsrecord); txt != nullptr) {
-      const auto& text = txt->d_text;
-      if (text.size() >= 2 && text.at(0) == '"' && text.at(text.size() - 1) == '"') {
-        // remove quotes around text
-        return txt->d_text.substr(1, txt->d_text.size() - 2);
-      }
-      return txt->d_text;
+  try {
+    MOADNSParser parser(false, static_cast<const char*>(static_cast<void*>(buffer.data())), buffer.size());
+    if (parser.d_header.rcode != RCode::NoError || parser.d_answers.size() != 1) {
+      return {};
     }
+    const auto& dnsrecord = parser.d_answers.at(0);
+    if (dnsrecord.d_type == QType::TXT) {
+      if (auto txt = getRR<TXTRecordContent>(dnsrecord); txt != nullptr) {
+        const auto& text = txt->d_text;
+        if (text.size() >= 2 && text.at(0) == '"' && text.at(text.size() - 1) == '"') {
+          // remove quotes around text
+          return txt->d_text.substr(1, txt->d_text.size() - 2);
+        }
+        return txt->d_text;
+      }
+    }
+  }
+  catch (const MOADNSException&) {
+    ;
   }
   return {};
 }
@@ -209,7 +215,7 @@ bool pdns::RecResolve::refresh(time_t now)
         ttd += d_ttl;
       }
       else {
-        log->error(Logr::Error, "Name did not resolve", "name", Logging::Loggable(entry.first));
+        log->info(Logr::Error, "Name did not resolve", "name", Logging::Loggable(entry.first));
       }
       if (newAddress != entry.second.d_address) {
         log->info(Logr::Debug, "Name resolved to new address",
@@ -253,7 +259,7 @@ void pdns::RecResolve::Refresher::refreshLoop()
   while (!stop) {
     const time_t startTime = time(nullptr);
     time_t wakeTime = startTime;
-    // The expresion wakeTime - startTime is equal to the total amount of time slept
+    // The expression wakeTime - startTime is equal to the total amount of time slept
     while (wakeTime - startTime < d_interval) {
       std::unique_lock lock(mutex);
       time_t remaining = d_interval - (wakeTime - startTime);
@@ -303,4 +309,27 @@ void pdns::RecResolve::Refresher::trigger()
   stop = true;
   wakeup = true;
   condVar.notify_one();
+}
+
+ComboAddress pdns::fromNameOrIP(const string& str, uint16_t defPort, Logr::log_t log)
+{
+  try {
+    ComboAddress addr = parseIPAndPort(str, defPort);
+    return addr;
+  }
+  catch (const PDNSException&) {
+    uint16_t port = defPort;
+    string::size_type pos = str.rfind(':');
+    if (pos != string::npos) {
+      port = pdns::checked_stoi<uint16_t>(str.substr(pos + 1));
+    }
+    auto& res = pdns::RecResolve::getInstance();
+    ComboAddress address = res.lookupAndRegister(str.substr(0, pos), time(nullptr));
+    if (address != ComboAddress()) {
+      address.setPort(port);
+      return address;
+    }
+    log->info(Logr::Error, "Could not resolve name", "name", Logging::Loggable(str));
+    throw PDNSException("Could not resolve " + str);
+  }
 }

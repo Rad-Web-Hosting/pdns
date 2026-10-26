@@ -31,6 +31,10 @@
 #include <sstream>
 #include <boost/algorithm/string/join.hpp>
 
+#ifdef RECURSOR
+#include "rust/misc.rs.h"
+#endif
+
 static ProductType productType;
 
 string compilerVersion()
@@ -107,9 +111,6 @@ string getBuildConfiguration()
 {
   ostringstream ret;
   ret << "Features:"
-#ifdef HAVE_LIBDECAF
-      << " decaf"
-#endif
 #ifdef HAVE_LIBCRYPTO_ECDSA
       << " libcrypto-ecdsa"
 #endif
@@ -121,6 +122,9 @@ string getBuildConfiguration()
 #endif
 #ifdef HAVE_LIBCRYPTO_EDDSA
       << " libcrypto-eddsa"
+#endif
+#ifdef HAVE_LIBCRYPTO_ML_DSA_44
+      << " libcrypto-mldsa44"
 #endif
 #ifdef HAVE_LIBDL
       << " libdl"
@@ -156,6 +160,12 @@ string getBuildConfiguration()
 #ifdef HAVE_LIBSODIUM
       << " sodium"
 #endif
+#ifdef HAVE_LIBSSL
+      << " libssl"
+#endif
+#ifdef HAVE_GNUTLS
+      << " gnutls"
+#endif
 #ifdef HAVE_LIBCURL
       << " curl"
 #endif
@@ -170,6 +180,12 @@ string getBuildConfiguration()
 #endif
 #ifdef VERBOSELOG
       << " verboselog"
+#endif
+#ifdef HAVE_LIBCAP
+      << " libcap"
+#endif
+#ifdef RECURSOR
+      << pdns::rust::misc::rust_features()
 #endif
       << endl;
 #ifdef PDNS_MODULES

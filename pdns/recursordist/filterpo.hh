@@ -98,7 +98,7 @@ public:
     std::string d_name;
     std::string d_extendedErrorExtra;
     DNSRecord d_soa{};
-    boost::optional<uint16_t> d_extendedErrorCode{boost::none};
+    std::optional<uint16_t> d_extendedErrorCode{std::nullopt};
     Priority d_priority{maximumPriority};
     bool d_policyOverridesGettag{true};
     bool d_includeSOA{false};
@@ -212,7 +212,7 @@ public:
 
     [[nodiscard]] bool getSOA(DNSRecord& rec) const
     {
-      if (d_zoneData) {
+      if (d_zoneData && d_zoneData->d_soa.getContent()) {
         rec = d_zoneData->d_soa;
         return true;
       }
@@ -303,6 +303,25 @@ public:
     {
     }
 
+    // Special copy constructor, as we want a deep copy of d_zoneData
+    Zone(const Zone& other) :
+      d_qpolName(other.d_qpolName),
+      d_qpolAddr(other.d_qpolAddr),
+      d_propolName(other.d_propolName),
+      d_propolNSAddr(other.d_propolNSAddr),
+      d_postpolAddr(other.d_postpolAddr),
+      d_domain(other.d_domain),
+      d_zoneData(std::make_shared<PolicyZoneData>(*other.d_zoneData)), // deep copy, d_zoneData is never nullptr
+      d_serial(other.d_serial),
+      d_refresh(other.d_refresh)
+    {
+    }
+
+    Zone& operator=(const Zone&) = delete;
+    Zone& operator=(Zone&&) = delete;
+    Zone(Zone&&) = delete;
+    ~Zone() = default;
+
     void clear()
     {
       d_qpolAddr.clear();
@@ -360,6 +379,13 @@ public:
       return d_zoneData->d_name;
     }
 
+    void getQNames(std::unordered_set<DNSName>& names) const
+    {
+      for (const auto& pol : d_qpolName) {
+        names.emplace(pol.first);
+      }
+    }
+
     [[nodiscard]] DNSName getDomain() const
     {
       return d_domain;
@@ -373,6 +399,10 @@ public:
     [[nodiscard]] uint32_t getSerial() const
     {
       return d_serial;
+    }
+    [[nodiscard]] const DNSRecord& getSOA() const
+    {
+      return d_zoneData->d_soa;
     }
 
     [[nodiscard]] size_t size() const

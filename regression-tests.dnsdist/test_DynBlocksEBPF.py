@@ -1,16 +1,11 @@
 #!/usr/bin/env python
-import dns
 import os
 import unittest
-from dnsdisttests import DNSDistTest
 from dnsdistDynBlockTests import DynBlocksTest
 
-class EBPFTest(object):
-    pass
 
-@unittest.skipUnless('ENABLE_SUDO_TESTS' in os.environ, "sudo is not available")
+@unittest.skipUnless("ENABLE_SUDO_TESTS" in os.environ, "sudo is not available")
 class TestDynBlockEBPFQPS(DynBlocksTest):
-
     _config_template = """
     bpf = newBPFFilter({ipv4MaxItems=10, ipv6MaxItems=10, qnamesMaxItems=10})
     setDefaultBPFFilter(bpf)
@@ -30,16 +25,24 @@ class TestDynBlockEBPFQPS(DynBlocksTest):
     bpf:unblock(newCA("2001:DB8::42"))
     bpf:unblockQName(newDNSName("powerdns.com."), 255)
 
-    newServer{address="127.0.0.1:%s"}
-    webserver("127.0.0.1:%s")
+    newServer{address="127.0.0.1:%d"}
+    webserver("127.0.0.1:%d")
     setWebserverConfig({password="%s", apiKey="%s"})
     """
-    _config_params = ['_dynBlockQPS', '_dynBlockPeriod', '_dynBlockDuration', '_testServerPort', '_webServerPort', '_webServerBasicAuthPasswordHashed', '_webServerAPIKeyHashed']
+    _config_params = [
+        "_dynBlockQPS",
+        "_dynBlockPeriod",
+        "_dynBlockDuration",
+        "_testServerPort",
+        "_webServerPort",
+        "_webServerBasicAuthPasswordHashed",
+        "_webServerAPIKeyHashed",
+    ]
     _sudoMode = True
 
     def testDynBlocksQRate(self):
         """
         Dyn Blocks: QRate
         """
-        name = 'qrate.dynblocks.tests.powerdns.com.'
+        name = "qrate.dynblocks.tests.powerdns.com."
         self.doTestQRate(name, ebpf=True)

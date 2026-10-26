@@ -1,21 +1,17 @@
 import base64
+import copy
 import asyncio
-import pickle
-import ssl
-import struct
 import dns
-import time
 import async_timeout
 
 from collections import deque
-from typing import BinaryIO, Callable, Deque, Dict, List, Optional, Union, cast
+from typing import Deque, Dict, Optional, Tuple, Union, cast
 from urllib.parse import urlparse
 
-import aioquic
 from aioquic.asyncio.client import connect
 from aioquic.asyncio.protocol import QuicConnectionProtocol
-from aioquic.h0.connection import H0_ALPN, H0Connection
-from aioquic.h3.connection import H3_ALPN, ErrorCode, H3Connection
+from aioquic.h0.connection import H0Connection
+from aioquic.h3.connection import H3_ALPN, H3Connection
 from aioquic.h3.events import (
     DataReceived,
     H3Event,
@@ -23,12 +19,12 @@ from aioquic.h3.events import (
     PushPromiseReceived,
 )
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.events import QuicEvent, StreamDataReceived, StreamReset
-from aioquic.tls import CipherSuite, SessionTicket
+from aioquic.quic.events import QuicEvent, StreamReset
 
 from doqclient import StreamResetError
 
 HttpConnection = Union[H0Connection, H3Connection]
+
 
 class URL:
     def __init__(self, url: str) -> None:
@@ -57,6 +53,7 @@ class HttpRequest:
         self.method = method
         self.url = url
 
+
 class HttpClient(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -75,20 +72,13 @@ class HttpClient(QuicConnectionProtocol):
         """
         Perform a GET request.
         """
-        return await self._request(
-            HttpRequest(method="GET", url=URL(url), headers=headers)
-        )
+        return await self._request(HttpRequest(method="GET", url=URL(url), headers=headers))
 
-    async def post(
-        self, url: str, data: bytes, headers: Optional[Dict] = None
-    ) -> Deque[H3Event]:
+    async def post(self, url: str, data: bytes, headers: Optional[Dict] = None) -> Deque[H3Event]:
         """
         Perform a POST request.
         """
-        return await self._request(
-            HttpRequest(method="POST", url=URL(url), content=data, headers=headers)
-        )
-
+        return await self._request(HttpRequest(method="POST", url=URL(url), content=data, headers=headers))
 
     def http_event_received(self, event: H3Event) -> None:
         if isinstance(event, (HeadersReceived, DataReceived)):
@@ -133,13 +123,11 @@ class HttpClient(QuicConnectionProtocol):
                 (b":authority", request.url.authority.encode()),
                 (b":path", request.url.full_path.encode()),
             ]
-            + [(k.encode(), v.encode()) for (k, v) in request.headers.items()],
+            + [(k.lower().encode(), v.encode()) for (k, v) in request.headers.items()],
             end_stream=not request.content,
         )
         if request.content:
-            self._http.send_data(
-                stream_id=stream_id, data=request.content, end_stream=True
-            )
+            self._http.send_data(stream_id=stream_id, data=request.content, end_stream=True)
 
         waiter = self._loop.create_future()
         self._request_events[stream_id] = deque()
@@ -155,48 +143,56 @@ async def perform_http_request(
     data: Optional[bytes],
     include: bool,
     output_dir: Optional[str],
-) -> None:
+    additional_headers: Optional[Dict] = None,
+) -> Tuple[str, Dict[str, str]]:
     # perform request
-    start = time.time()
     if data is not None:
+        headers = copy.deepcopy(additional_headers) if additional_headers else {}
+        headers["content-length"] = str(len(data))
+        headers["content-type"] = "application/dns-message"
         http_events = await client.post(
             url,
             data=data,
-            headers={
-                "content-length": str(len(data)),
-                "content-type": "application/dns-message",
-            },
+            headers=headers,
         )
-        method = "POST"
     else:
-        http_events = await client.get(url)
-        method = "GET"
-    elapsed = time.time() - start
+        http_events = await client.get(url, headers=additional_headers)
 
     result = bytes()
+    headers = {}
     for http_event in http_events:
         if isinstance(http_event, DataReceived):
             result += http_event.data
         if isinstance(http_event, StreamReset):
             result = http_event
-    return result
+        if isinstance(http_event, HeadersReceived):
+            for k, v in http_event.headers:
+                headers[k] = v
+    return (result, headers)
 
 
 async def async_h3_query(
     configuration: QuicConfiguration,
+    host: str,
     baseurl: str,
     port: int,
     query: dns.message,
     timeout: float,
     post: bool,
     create_protocol=HttpClient,
-) -> None:
+    additional_headers: Optional[Dict] = None,
+    raw_query=False,
+) -> Union[Tuple[str, Dict[str, str]], Tuple[asyncio.TimeoutError, Dict[str, str]]]:
 
     url = baseurl
+    if not raw_query:
+        query = query.to_wire()
+    else:
+        post = True
     if not post:
-        url = "{}?dns={}".format(baseurl, base64.urlsafe_b64encode(query.to_wire()).decode('UTF8').rstrip('='))
+        url = "{}?dns={}".format(baseurl, base64.urlsafe_b64encode(query).decode("UTF8").rstrip("="))
     async with connect(
-        "127.0.0.1",
+        host,
         port,
         configuration=configuration,
         create_protocol=create_protocol,
@@ -205,39 +201,56 @@ async def async_h3_query(
 
         try:
             async with async_timeout.timeout(timeout):
-
                 answer = await perform_http_request(
                     client=client,
                     url=url,
-                    data=query.to_wire() if post else None,
+                    data=query if post else None,
                     include=False,
                     output_dir=None,
+                    additional_headers=additional_headers,
                 )
 
                 return answer
         except asyncio.TimeoutError as e:
-            return e
+            return (e, {})
 
 
-def doh3_query(query, baseurl, timeout=2, port=853, verify=None, server_hostname=None, post=False):
-    configuration = QuicConfiguration(alpn_protocols=H3_ALPN, is_client=True)
+def doh3_query(
+    query,
+    host,
+    baseurl,
+    timeout=2,
+    port=853,
+    verify=None,
+    server_hostname=None,
+    post=False,
+    additional_headers=None,
+    raw_response=False,
+    raw_query=False,
+):
+    configuration = QuicConfiguration(alpn_protocols=H3_ALPN, is_client=True, server_name=server_hostname)
     if verify:
         configuration.load_verify_locations(verify)
 
-    result = asyncio.run(
+    (result, headers) = asyncio.run(
         async_h3_query(
             configuration=configuration,
+            host=host,
             baseurl=baseurl,
             port=port,
             query=query,
             timeout=timeout,
             create_protocol=HttpClient,
-            post=post
+            post=post,
+            additional_headers=additional_headers,
+            raw_query=raw_query,
         )
     )
 
-    if (isinstance(result, StreamReset)):
+    if isinstance(result, StreamReset):
         raise StreamResetError(result.error_code)
-    if (isinstance(result, asyncio.TimeoutError)):
+    if isinstance(result, asyncio.TimeoutError):
         raise TimeoutError()
+    if raw_response:
+        return (result, headers)
     return dns.message.from_wire(result)

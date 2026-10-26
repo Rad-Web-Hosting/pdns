@@ -87,8 +87,8 @@ public:
 
   void xfr48BitInt(uint64_t val);
   void xfrNodeOrLocatorID(const NodeOrLocatorID& val);
-  void xfr32BitInt(uint32_t val);
-  void xfr16BitInt(uint16_t val);
+  void xfr32BitInt(uint64_t val);
+  void xfr16BitInt(uint64_t val);
   void xfrType(uint16_t val)
   {
     xfr16BitInt(val);
@@ -125,9 +125,9 @@ public:
     xfr32BitInt(val);
   }
 
-  void xfr8BitInt(uint8_t val);
+  void xfr8BitInt(uint64_t val);
 
-  void xfrName(const DNSName& label, bool compress=false, bool noDot=false);
+  void xfrName(const DNSName& name, bool compress=false);
   void xfrText(const string& text, bool multi=false, bool lenField=true);
   void xfrUnquotedText(const string& text, bool lenField);
   void xfrBlob(const string& blob, int len=-1);
@@ -138,6 +138,7 @@ public:
 
   dnsheader* getHeader();
   void getRecordPayload(string& records); // call __before commit__
+  void getWireFormatContent(string& record); // call __before commit__
 
   void setCanonic(bool val)
   {
@@ -152,31 +153,38 @@ public:
   {
     return d_content;
   }
-  bool eof() { return true; } // we don't know how long the record should be
+  bool eof() const { return true; } // we don't know how long the record should be
 
-  const string getRemaining() const {
+  std::string getRemaining() const {
     return "";
   }
+
+#if defined(PDNS_AUTH) // [
+  /* This method is only there for parity with DNSParser::consumeRemaining(),
+     see the comment there to know why it is needed.
+  */
+  void consumeRemaining() const
+  {
+  }
+#endif // ]
 
   size_t getSizeWithOpts(const optvect_t& options) const;
 
 private:
   uint16_t lookupName(const DNSName& name, uint16_t* matchlen);
-  vector<uint16_t> d_namepositions;
-  // We declare 1 uint_16 in the public section, these 3 align on a 8-byte boundary
-  uint16_t d_sor;
-  uint16_t d_rollbackmarker; // start of last complete packet, for rollback
 
-  Container& d_content;
+  std::vector<uint16_t> d_namepositions;
   DNSName d_qname;
-
-  uint16_t d_truncatemarker; // end of header, for truncate
-  DNSResourceRecord::Place d_recordplace;
-  bool d_canonic, d_lowerCase, d_compress{false};
+  Container& d_content;
+  size_t d_sor{0};
+  uint16_t d_rollbackmarker{0}; // start of last complete packet, for rollback
+  uint16_t d_truncatemarker{0}; // end of header, for truncate
+  DNSResourceRecord::Place d_recordplace{DNSResourceRecord::QUESTION};
+  bool d_canonic{false};
+  bool d_lowerCase{false};
+  bool d_compress{false};
 };
 
 using DNSPacketWriter = GenericDNSPacketWriter<std::vector<uint8_t>>;
 
-typedef vector<pair<string::size_type, string::size_type> > labelparts_t;
-// bool labeltokUnescape(labelparts_t& parts, const DNSName& label);
 std::vector<string> segmentDNSText(const string& text); // from dnslabeltext.rl

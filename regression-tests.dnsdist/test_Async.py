@@ -11,13 +11,13 @@ import doqclient
 
 from dnsdisttests import DNSDistTest, pickAvailablePort
 
+
 def AsyncResponder(listenPath, responsePath):
     # Make sure the socket does not already exist
     try:
         os.unlink(listenPath)
-    except OSError:
-        if os.path.exists(listenPath):
-            raise
+    except FileNotFoundError:
+        pass
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     try:
@@ -33,47 +33,47 @@ def AsyncResponder(listenPath, responsePath):
             break
 
         request = dns.message.from_wire(data)
-        reply = str(request.id) + ' '
-        if str(request.question[0].name).startswith('accept-then-refuse'):
+        reply = str(request.id) + " "
+        if str(request.question[0].name).startswith("accept-then-refuse"):
             if request.flags & dns.flags.QR:
-                reply = reply + 'refuse'
+                reply = reply + "refuse"
             else:
-                reply = reply + 'accept'
-        elif str(request.question[0].name).startswith('accept-then-drop'):
+                reply = reply + "accept"
+        elif str(request.question[0].name).startswith("accept-then-drop"):
             if request.flags & dns.flags.QR:
-                reply = reply + 'drop'
+                reply = reply + "drop"
             else:
-                reply = reply + 'accept'
-        elif str(request.question[0].name).startswith('accept-then-custom'):
+                reply = reply + "accept"
+        elif str(request.question[0].name).startswith("accept-then-custom"):
             if request.flags & dns.flags.QR:
-                reply = reply + 'custom'
+                reply = reply + "custom"
             else:
-                reply = reply + 'accept'
-        elif str(request.question[0].name).startswith('timeout-then-accept'):
+                reply = reply + "accept"
+        elif str(request.question[0].name).startswith("timeout-then-accept"):
             if request.flags & dns.flags.QR:
-                reply = reply + 'accept'
+                reply = reply + "accept"
             else:
                 # no response
                 continue
-        elif str(request.question[0].name).startswith('accept-then-timeout'):
+        elif str(request.question[0].name).startswith("accept-then-timeout"):
             if request.flags & dns.flags.QR:
                 # no response
                 continue
             else:
-                reply = reply + 'accept'
-        elif str(request.question[0].name).startswith('accept'):
-            reply = reply + 'accept'
-        elif str(request.question[0].name).startswith('refuse'):
-            reply = reply + 'refuse'
-        elif str(request.question[0].name).startswith('drop'):
-            reply = reply + 'drop'
-        elif str(request.question[0].name).startswith('custom'):
-            reply = reply + 'custom'
-        elif str(request.question[0].name).startswith('timeout'):
+                reply = reply + "accept"
+        elif str(request.question[0].name).startswith("accept"):
+            reply = reply + "accept"
+        elif str(request.question[0].name).startswith("refuse"):
+            reply = reply + "refuse"
+        elif str(request.question[0].name).startswith("drop"):
+            reply = reply + "drop"
+        elif str(request.question[0].name).startswith("custom"):
+            reply = reply + "custom"
+        elif str(request.question[0].name).startswith("timeout"):
             # no response
             continue
         else:
-            reply = reply + 'invalid'
+            reply = reply + "invalid"
 
         remote = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         remote.connect(responsePath)
@@ -82,45 +82,54 @@ def AsyncResponder(listenPath, responsePath):
 
     sock.close()
 
-asyncResponderSocketPath = '/tmp/async-responder.sock'
-dnsdistSocketPath = '/tmp/dnsdist.sock'
-asyncResponder = threading.Thread(name='Asynchronous Responder', target=AsyncResponder, args=[asyncResponderSocketPath, dnsdistSocketPath])
+
+asyncResponderSocketPath = "/tmp/async-responder.sock"
+dnsdistSocketPath = "/tmp/dnsdist.sock"
+asyncResponder = threading.Thread(
+    name="Asynchronous Responder",
+    target=AsyncResponder,
+    args=[asyncResponderSocketPath, dnsdistSocketPath],
+)
 asyncResponder.daemon = True
 asyncResponder.start()
 
+
 class AsyncTests(object):
-    _serverKey = 'server.key'
-    _serverCert = 'server.chain'
-    _serverName = 'tls.tests.dnsdist.org'
-    _caCert = 'ca.pem'
+    _serverKey = "server.key"
+    _serverCert = "server.chain"
+    _serverName = "tls.tests.dnsdist.org"
+    _caCert = "ca.pem"
     _tlsServerPort = pickAvailablePort()
     _dohWithNGHTTP2ServerPort = pickAvailablePort()
-    _dohWithH2OServerPort = pickAvailablePort()
-    _dohWithNGHTTP2BaseURL = ("https://%s:%d/" % (_serverName, _dohWithNGHTTP2ServerPort))
-    _dohWithH2OBaseURL = ("https://%s:%d/" % (_serverName, _dohWithH2OServerPort))
+    _dohWithNGHTTP2BaseURL = "https://%s:%d/" % (_serverName, _dohWithNGHTTP2ServerPort)
     _doqServerPort = pickAvailablePort()
 
     def testPass(self):
         """
         Async: Accept
         """
-        for name in ['accept.async.tests.powerdns.com.', 'accept.tcp-only.async.tests.powerdns.com.']:
-            query = dns.message.make_query(name, 'A', 'IN')
+        for name in [
+            "accept.async.tests.powerdns.com.",
+            "accept.tcp-only.async.tests.powerdns.com.",
+        ]:
+            query = dns.message.make_query(name, "A", "IN")
 
             response = dns.message.make_response(query)
-            rrset = dns.rrset.from_text(name,
-                                        60,
-                                        dns.rdataclass.IN,
-                                        dns.rdatatype.A,
-                                        '192.0.2.1')
+            rrset = dns.rrset.from_text(name, 60, dns.rdataclass.IN, dns.rdatatype.A, "192.0.2.1")
             response.answer.append(rrset)
 
-            for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper", "sendDOQQueryWrapper"):
+            for method in (
+                "sendUDPQuery",
+                "sendTCPQuery",
+                "sendDOTQueryWrapper",
+                "sendDOHWithNGHTTP2QueryWrapper",
+                "sendDOQQueryWrapper",
+            ):
                 sender = getattr(self, method)
                 (receivedQuery, receivedResponse) = sender(query, response)
                 receivedQuery.id = query.id
                 self.assertEqual(query, receivedQuery)
-                if method == 'sendDOQQueryWrapper':
+                if method == "sendDOQQueryWrapper":
                     # dnspython sets the ID to 0
                     receivedResponse.id = response.id
                 self.assertEqual(response, receivedResponse)
@@ -129,20 +138,22 @@ class AsyncTests(object):
         """
         Async: Accept (cached)
         """
-        name = 'accept.cache.async.tests.powerdns.com.'
-        query = dns.message.make_query(name, 'A', 'IN')
+        name = "accept.cache.async.tests.powerdns.com."
+        query = dns.message.make_query(name, "A", "IN")
 
         response = dns.message.make_response(query)
-        rrset = dns.rrset.from_text(name,
-                                    60,
-                                    dns.rdataclass.IN,
-                                    dns.rdatatype.A,
-                                    '192.0.2.1')
+        rrset = dns.rrset.from_text(name, 60, dns.rdataclass.IN, dns.rdatatype.A, "192.0.2.1")
         response.answer.append(rrset)
 
-        for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper", "sendDOQQueryWrapper"):
+        for method in (
+            "sendUDPQuery",
+            "sendTCPQuery",
+            "sendDOTQueryWrapper",
+            "sendDOHWithNGHTTP2QueryWrapper",
+            "sendDOQQueryWrapper",
+        ):
             sender = getattr(self, method)
-            if method != 'sendDOTQueryWrapper' and method != 'sendDOHWithH2OQueryWrapper' and method != 'sendDOQQueryWrapper':
+            if method != "sendDOTQueryWrapper" and method != "sendDOQQueryWrapper":
                 # first time to fill the cache
                 # disabled for DoT since it was already filled via TCP
                 (receivedQuery, receivedResponse) = sender(query, response)
@@ -153,7 +164,7 @@ class AsyncTests(object):
             # second time from the cache
             sender = getattr(self, method)
             (_, receivedResponse) = sender(query, response=None, useQueue=False)
-            if method == 'sendDOQQueryWrapper':
+            if method == "sendDOQQueryWrapper":
                 # dnspython sets the ID to 0
                 receivedResponse.id = response.id
             self.assertEqual(response, receivedResponse)
@@ -162,23 +173,28 @@ class AsyncTests(object):
         """
         Async: Timeout then accept
         """
-        for name in ['timeout-then-accept.async.tests.powerdns.com.', 'timeout-then-accept.tcp-only.async.tests.powerdns.com.']:
-            query = dns.message.make_query(name, 'A', 'IN')
+        for name in [
+            "timeout-then-accept.async.tests.powerdns.com.",
+            "timeout-then-accept.tcp-only.async.tests.powerdns.com.",
+        ]:
+            query = dns.message.make_query(name, "A", "IN")
 
             response = dns.message.make_response(query)
-            rrset = dns.rrset.from_text(name,
-                                        60,
-                                        dns.rdataclass.IN,
-                                        dns.rdatatype.A,
-                                        '192.0.2.1')
+            rrset = dns.rrset.from_text(name, 60, dns.rdataclass.IN, dns.rdatatype.A, "192.0.2.1")
             response.answer.append(rrset)
 
-            for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper", "sendDOQQueryWrapper"):
+            for method in (
+                "sendUDPQuery",
+                "sendTCPQuery",
+                "sendDOTQueryWrapper",
+                "sendDOHWithNGHTTP2QueryWrapper",
+                "sendDOQQueryWrapper",
+            ):
                 sender = getattr(self, method)
                 (receivedQuery, receivedResponse) = sender(query, response)
                 receivedQuery.id = query.id
                 self.assertEqual(query, receivedQuery)
-                if method == 'sendDOQQueryWrapper':
+                if method == "sendDOQQueryWrapper":
                     # dnspython sets the ID to 0
                     receivedResponse.id = response.id
                 self.assertEqual(response, receivedResponse)
@@ -187,23 +203,28 @@ class AsyncTests(object):
         """
         Async: Accept then timeout
         """
-        for name in ['accept-then-timeout.async.tests.powerdns.com.', 'accept-then-timeout.tcp-only.async.tests.powerdns.com.']:
-            query = dns.message.make_query(name, 'A', 'IN')
+        for name in [
+            "accept-then-timeout.async.tests.powerdns.com.",
+            "accept-then-timeout.tcp-only.async.tests.powerdns.com.",
+        ]:
+            query = dns.message.make_query(name, "A", "IN")
 
             response = dns.message.make_response(query)
-            rrset = dns.rrset.from_text(name,
-                                        60,
-                                        dns.rdataclass.IN,
-                                        dns.rdatatype.A,
-                                        '192.0.2.1')
+            rrset = dns.rrset.from_text(name, 60, dns.rdataclass.IN, dns.rdatatype.A, "192.0.2.1")
             response.answer.append(rrset)
 
-            for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper", "sendDOQQueryWrapper"):
+            for method in (
+                "sendUDPQuery",
+                "sendTCPQuery",
+                "sendDOTQueryWrapper",
+                "sendDOHWithNGHTTP2QueryWrapper",
+                "sendDOQQueryWrapper",
+            ):
                 sender = getattr(self, method)
                 (receivedQuery, receivedResponse) = sender(query, response)
                 receivedQuery.id = query.id
                 self.assertEqual(query, receivedQuery)
-                if method == 'sendDOQQueryWrapper':
+                if method == "sendDOQQueryWrapper":
                     # dnspython sets the ID to 0
                     receivedResponse.id = response.id
                 self.assertEqual(response, receivedResponse)
@@ -212,27 +233,32 @@ class AsyncTests(object):
         """
         Async: Accept then refuse
         """
-        for name in ['accept-then-refuse.async.tests.powerdns.com.', 'accept-then-refuse.tcp-only.async.tests.powerdns.com.']:
-            query = dns.message.make_query(name, 'A', 'IN')
+        for name in [
+            "accept-then-refuse.async.tests.powerdns.com.",
+            "accept-then-refuse.tcp-only.async.tests.powerdns.com.",
+        ]:
+            query = dns.message.make_query(name, "A", "IN")
 
             response = dns.message.make_response(query)
-            rrset = dns.rrset.from_text(name,
-                                        60,
-                                        dns.rdataclass.IN,
-                                        dns.rdatatype.A,
-                                        '192.0.2.1')
+            rrset = dns.rrset.from_text(name, 60, dns.rdataclass.IN, dns.rdatatype.A, "192.0.2.1")
             response.answer.append(rrset)
 
             expectedResponse = dns.message.make_response(query)
             expectedResponse.flags |= dns.flags.RA
             expectedResponse.set_rcode(dns.rcode.REFUSED)
 
-            for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper", "sendDOQQueryWrapper"):
+            for method in (
+                "sendUDPQuery",
+                "sendTCPQuery",
+                "sendDOTQueryWrapper",
+                "sendDOHWithNGHTTP2QueryWrapper",
+                "sendDOQQueryWrapper",
+            ):
                 sender = getattr(self, method)
                 (receivedQuery, receivedResponse) = sender(query, response)
                 receivedQuery.id = query.id
                 self.assertEqual(query, receivedQuery)
-                if method == 'sendDOQQueryWrapper':
+                if method == "sendDOQQueryWrapper":
                     # dnspython sets the ID to 0
                     receivedResponse.id = expectedResponse.id
                 self.assertEqual(expectedResponse, receivedResponse)
@@ -241,29 +267,34 @@ class AsyncTests(object):
         """
         Async: Accept then custom
         """
-        for name in ['accept-then-custom.async.tests.powerdns.com.', 'accept-then-custom.tcp-only.async.tests.powerdns.com.']:
-            query = dns.message.make_query(name, 'A', 'IN')
+        for name in [
+            "accept-then-custom.async.tests.powerdns.com.",
+            "accept-then-custom.tcp-only.async.tests.powerdns.com.",
+        ]:
+            query = dns.message.make_query(name, "A", "IN")
 
             response = dns.message.make_response(query)
-            rrset = dns.rrset.from_text(name,
-                                        60,
-                                        dns.rdataclass.IN,
-                                        dns.rdatatype.A,
-                                        '192.0.2.1')
+            rrset = dns.rrset.from_text(name, 60, dns.rdataclass.IN, dns.rdatatype.A, "192.0.2.1")
             response.answer.append(rrset)
 
-            expectedQuery = dns.message.make_query(name, 'A', 'IN')
+            expectedQuery = dns.message.make_query(name, "A", "IN")
             expectedQuery.id = query.id
             expectedResponse = dns.message.make_response(expectedQuery)
             expectedResponse.flags |= dns.flags.RA
             expectedResponse.set_rcode(dns.rcode.FORMERR)
 
-            for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper", "sendDOQQueryWrapper"):
+            for method in (
+                "sendUDPQuery",
+                "sendTCPQuery",
+                "sendDOTQueryWrapper",
+                "sendDOHWithNGHTTP2QueryWrapper",
+                "sendDOQQueryWrapper",
+            ):
                 sender = getattr(self, method)
                 (receivedQuery, receivedResponse) = sender(query, response)
                 receivedQuery.id = query.id
                 self.assertEqual(query, receivedQuery)
-                if method == 'sendDOQQueryWrapper':
+                if method == "sendDOQQueryWrapper":
                     # dnspython sets the ID to 0
                     receivedResponse.id = expectedResponse.id
                 self.assertEqual(expectedResponse, receivedResponse)
@@ -272,21 +303,29 @@ class AsyncTests(object):
         """
         Async: Accept then drop
         """
-        for name in ['accept-then-drop.async.tests.powerdns.com.', 'accept-then-drop.tcp-only.async.tests.powerdns.com.']:
-            query = dns.message.make_query(name, 'A', 'IN')
+        for name in [
+            "accept-then-drop.async.tests.powerdns.com.",
+            "accept-then-drop.tcp-only.async.tests.powerdns.com.",
+        ]:
+            query = dns.message.make_query(name, "A", "IN")
 
             response = dns.message.make_response(query)
-            rrset = dns.rrset.from_text(name,
-                                        60,
-                                        dns.rdataclass.IN,
-                                        dns.rdatatype.A,
-                                        '192.0.2.1')
+            rrset = dns.rrset.from_text(name, 60, dns.rdataclass.IN, dns.rdatatype.A, "192.0.2.1")
             response.answer.append(rrset)
 
-            for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper", "sendDOQQueryWrapper"):
+            for method in (
+                "sendUDPQuery",
+                "sendTCPQuery",
+                "sendDOTQueryWrapper",
+                "sendDOHWithNGHTTP2QueryWrapper",
+                "sendDOQQueryWrapper",
+            ):
                 sender = getattr(self, method)
                 try:
-                    (receivedQuery, receivedResponse) = sender(query, response)
+                    if method in ["sendDOQQueryWrapper"]:
+                        (receivedQuery, receivedResponse) = sender(query, response, passExceptions=True)
+                    else:
+                        (receivedQuery, receivedResponse) = sender(query, response)
                 except doqclient.StreamResetError:
                     if not self._fromResponderQueue.empty():
                         receivedQuery = self._fromResponderQueue.get(True, 1.0)
@@ -299,18 +338,24 @@ class AsyncTests(object):
         """
         Async: Refused
         """
-        name = 'refused.async.tests.powerdns.com.'
-        query = dns.message.make_query(name, 'A', 'IN')
+        name = "refused.async.tests.powerdns.com."
+        query = dns.message.make_query(name, "A", "IN")
 
         expectedResponse = dns.message.make_response(query)
         expectedResponse.flags |= dns.flags.RA
         expectedResponse.set_rcode(dns.rcode.REFUSED)
 
-        for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper", "sendDOQQueryWrapper"):
+        for method in (
+            "sendUDPQuery",
+            "sendTCPQuery",
+            "sendDOTQueryWrapper",
+            "sendDOHWithNGHTTP2QueryWrapper",
+            "sendDOQQueryWrapper",
+        ):
             sender = getattr(self, method)
             (_, receivedResponse) = sender(query, response=None, useQueue=False)
             self.assertTrue(receivedResponse)
-            if method == 'sendDOQQueryWrapper':
+            if method == "sendDOQQueryWrapper":
                 # dnspython sets the ID to 0
                 receivedResponse.id = expectedResponse.id
             self.assertEqual(expectedResponse, receivedResponse)
@@ -319,10 +364,16 @@ class AsyncTests(object):
         """
         Async: Drop
         """
-        name = 'drop.async.tests.powerdns.com.'
-        query = dns.message.make_query(name, 'A', 'IN')
+        name = "drop.async.tests.powerdns.com."
+        query = dns.message.make_query(name, "A", "IN")
 
-        for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper", "sendDOQQueryWrapper"):
+        for method in (
+            "sendUDPQuery",
+            "sendTCPQuery",
+            "sendDOTQueryWrapper",
+            "sendDOHWithNGHTTP2QueryWrapper",
+            "sendDOQQueryWrapper",
+        ):
             sender = getattr(self, method)
             try:
                 (_, receivedResponse) = sender(query, response=None, useQueue=False)
@@ -334,18 +385,24 @@ class AsyncTests(object):
         """
         Async: Custom answer
         """
-        name = 'custom.async.tests.powerdns.com.'
-        query = dns.message.make_query(name, 'A', 'IN')
+        name = "custom.async.tests.powerdns.com."
+        query = dns.message.make_query(name, "A", "IN")
 
         expectedResponse = dns.message.make_response(query)
         expectedResponse.flags |= dns.flags.RA
         expectedResponse.set_rcode(dns.rcode.FORMERR)
 
-        for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper", "sendDOQQueryWrapper"):
+        for method in (
+            "sendUDPQuery",
+            "sendTCPQuery",
+            "sendDOTQueryWrapper",
+            "sendDOHWithNGHTTP2QueryWrapper",
+            "sendDOQQueryWrapper",
+        ):
             sender = getattr(self, method)
             (_, receivedResponse) = sender(query, response=None, useQueue=False)
             self.assertTrue(receivedResponse)
-            if method == 'sendDOQQueryWrapper':
+            if method == "sendDOQQueryWrapper":
                 # dnspython sets the ID to 0
                 receivedResponse.id = expectedResponse.id
             self.assertEqual(expectedResponse, receivedResponse)
@@ -357,19 +414,15 @@ class AsyncTests(object):
         # the query is first forwarded over UDP, leading to a TC=1 answer from the
         # backend, then over TCP
 
-        for method in ("sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper"):
+        for method in ["sendDOHWithNGHTTP2QueryWrapper"]:
             sender = getattr(self, method)
-            name = 'timeout-then-accept.' + method + '.tc.async.tests.powerdns.com.'
-            query = dns.message.make_query(name, 'A', 'IN')
+            name = "timeout-then-accept." + method + ".tc.async.tests.powerdns.com."
+            query = dns.message.make_query(name, "A", "IN")
             query.id = 42
-            expectedQuery = dns.message.make_query(name, 'A', 'IN', use_edns=True, payload=4096)
+            expectedQuery = dns.message.make_query(name, "A", "IN", use_edns=True, payload=4096)
             expectedQuery.id = 42
             response = dns.message.make_response(query)
-            rrset = dns.rrset.from_text(name,
-                                        3600,
-                                        dns.rdataclass.IN,
-                                        dns.rdatatype.A,
-                                        '127.0.0.1')
+            rrset = dns.rrset.from_text(name, 3600, dns.rdataclass.IN, dns.rdatatype.A, "127.0.0.1")
             response.answer.append(rrset)
 
             # first response is a TC=1
@@ -395,14 +448,14 @@ class AsyncTests(object):
             self.assertEqual(expectedQuery, receivedQuery)
             self.checkQueryEDNSWithoutECS(expectedQuery, receivedQuery)
 
-@unittest.skipIf('SKIP_DOH_TESTS' in os.environ, 'DNS over HTTPS tests are disabled')
+
+@unittest.skipIf("SKIP_DOH_TESTS" in os.environ, "DNS over HTTPS tests are disabled")
 class TestAsyncFFI(DNSDistTest, AsyncTests):
     _config_template = """
     newServer{address="127.0.0.1:%d", pool={'', 'cache'}}
     newServer{address="127.0.0.1:%d", pool="tcp-only", tcpOnly=true }
 
     addTLSLocal("127.0.0.1:%d", "%s", "%s", { provider="openssl" })
-    addDOHLocal("127.0.0.1:%d", "%s", "%s", {"/"}, {library="h2o"})
     addDOHLocal("127.0.0.1:%d", "%s", "%s", {"/"}, {library="nghttp2"})
     addDOQLocal("127.0.0.1:%d", "%s", "%s")
 
@@ -478,7 +531,7 @@ class TestAsyncFFI(DNSDistTest, AsyncTests):
       print('in passQueryToAsyncFilter')
       local timeout = 500 -- 500 ms
 
-      local queryPtr = C.dnsdist_ffi_dnsquestion_get_header(dq)
+      local queryPtr = C.dnsdist_ffi_dnsquestion_get_data(dq)
       local querySize = C.dnsdist_ffi_dnsquestion_get_len(dq)
 
       -- we need to take a copy, as we can no longer touch that data after calling set_async
@@ -496,7 +549,7 @@ class TestAsyncFFI(DNSDistTest, AsyncTests):
       print('in passResponseToAsyncFilter')
       local timeout = 500 -- 500 ms
 
-      local responsePtr = C.dnsdist_ffi_dnsquestion_get_header(dr)
+      local responsePtr = C.dnsdist_ffi_dnsquestion_get_data(dr)
       local responseSize = C.dnsdist_ffi_dnsquestion_get_len(dr)
 
       -- we need to take a copy, as we can no longer touch that data after calling set_async
@@ -515,6 +568,8 @@ class TestAsyncFFI(DNSDistTest, AsyncTests):
       collectgarbage()
     end
 
+    addExitCallback(atExit)
+
     -- this only matters for tests actually reaching the backend
     addAction('tcp-only.async.tests.powerdns.com', PoolAction('tcp-only', false))
     addAction('cache.async.tests.powerdns.com', PoolAction('cache', false))
@@ -524,17 +579,31 @@ class TestAsyncFFI(DNSDistTest, AsyncTests):
     """
     _asyncResponderSocketPath = asyncResponderSocketPath
     _dnsdistSocketPath = dnsdistSocketPath
-    _config_params = ['_testServerPort', '_testServerPort', '_tlsServerPort', '_serverCert', '_serverKey', '_dohWithH2OServerPort', '_serverCert', '_serverKey', '_dohWithNGHTTP2ServerPort', '_serverCert', '_serverKey', '_doqServerPort', '_serverCert', '_serverKey', '_asyncResponderSocketPath', '_dnsdistSocketPath']
+    _config_params = [
+        "_testServerPort",
+        "_testServerPort",
+        "_tlsServerPort",
+        "_serverCert",
+        "_serverKey",
+        "_dohWithNGHTTP2ServerPort",
+        "_serverCert",
+        "_serverKey",
+        "_doqServerPort",
+        "_serverCert",
+        "_serverKey",
+        "_asyncResponderSocketPath",
+        "_dnsdistSocketPath",
+    ]
     _verboseMode = True
 
-@unittest.skipIf('SKIP_DOH_TESTS' in os.environ, 'DNS over HTTPS tests are disabled')
+
+@unittest.skipIf("SKIP_DOH_TESTS" in os.environ, "DNS over HTTPS tests are disabled")
 class TestAsyncLua(DNSDistTest, AsyncTests):
     _config_template = """
     newServer{address="127.0.0.1:%d", pool={'', 'cache'}}
     newServer{address="127.0.0.1:%d", pool="tcp-only", tcpOnly=true }
 
     addTLSLocal("127.0.0.1:%d", "%s", "%s", { provider="openssl" })
-    addDOHLocal("127.0.0.1:%d", "%s", "%s", {"/"}, {library="h2o"})
     addDOHLocal("127.0.0.1:%d", "%s", "%s", {"/"}, {library="nghttp2"})
     addDOQLocal("127.0.0.1:%d", "%s", "%s")
 
@@ -604,7 +673,7 @@ class TestAsyncLua(DNSDistTest, AsyncTests):
       local timeout = 500 -- 500 ms
 
       local buffer = dq:getContent()
-      local id = dq.dh:getID()
+      local id = dq:getHeader():getID()
       dq:suspend(asyncID, id, timeout)
       asyncResponderEndpoint:send(buffer)
 
@@ -616,7 +685,7 @@ class TestAsyncLua(DNSDistTest, AsyncTests):
       local timeout = 500 -- 500 ms
 
       local buffer = dr:getContent()
-      local id = dr.dh:getID()
+      local id = dr:getHeader():getID()
       dr:suspend(asyncID, id, timeout)
       asyncResponderEndpoint:send(buffer)
 
@@ -628,6 +697,8 @@ class TestAsyncLua(DNSDistTest, AsyncTests):
       collectgarbage()
     end
 
+    addExitCallback(atExit)
+
     -- this only matters for tests actually reaching the backend
     addAction('tcp-only.async.tests.powerdns.com', PoolAction('tcp-only', false))
     addAction('cache.async.tests.powerdns.com', PoolAction('cache', false))
@@ -637,5 +708,19 @@ class TestAsyncLua(DNSDistTest, AsyncTests):
     """
     _asyncResponderSocketPath = asyncResponderSocketPath
     _dnsdistSocketPath = dnsdistSocketPath
-    _config_params = ['_testServerPort', '_testServerPort', '_tlsServerPort', '_serverCert', '_serverKey', '_dohWithH2OServerPort', '_serverCert', '_serverKey', '_dohWithNGHTTP2ServerPort', '_serverCert', '_serverKey', '_doqServerPort', '_serverCert', '_serverKey', '_asyncResponderSocketPath', '_dnsdistSocketPath']
+    _config_params = [
+        "_testServerPort",
+        "_testServerPort",
+        "_tlsServerPort",
+        "_serverCert",
+        "_serverKey",
+        "_dohWithNGHTTP2ServerPort",
+        "_serverCert",
+        "_serverKey",
+        "_doqServerPort",
+        "_serverCert",
+        "_serverKey",
+        "_asyncResponderSocketPath",
+        "_dnsdistSocketPath",
+    ]
     _verboseMode = True

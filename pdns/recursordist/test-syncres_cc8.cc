@@ -20,7 +20,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_denial_nowrap)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("example.org."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -69,7 +69,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_denial_wrap_case_1)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("example.org."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -105,7 +105,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_denial_wrap_case_2)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("example.org."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -141,7 +141,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_denial_only_one_nsec)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("example.org."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -177,7 +177,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_root_nxd_denial)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -222,7 +222,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_ancestor_nxqtype_denial)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -273,8 +273,8 @@ BOOST_AUTO_TEST_CASE(test_nsec_ds_denial_from_child)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("org."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
-  generateKeyMaterial(DNSName("example.org."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -305,7 +305,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_insecure_delegation_denial)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -347,7 +347,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_insecure_delegation_denial_soa)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -362,7 +362,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_insecure_delegation_denial_soa)
    * NSEC3 RR.
    */
   /*
-    The RRSIG from "." denies the existence of any type at a except NS and SOA.
+    The RRSIG from "." denies the existence of any type at "a" except NS and SOA.
     NS has to be set since it is proving an insecure delegation, but SOA should NOT!
   */
   addNSECRecordToLW(DNSName("a."), DNSName("b."), {QType::NS, QType::SOA}, 600, records);
@@ -387,7 +387,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_nxqtype_cname)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("powerdns.com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("powerdns.com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -416,7 +416,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_nxqtype_ds)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("powerdns.com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("powerdns.com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -451,7 +451,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_nxqtype_cname)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("powerdns.com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("powerdns.com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -480,7 +480,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_nxdomain_denial_missing_wildcard)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("powerdns.com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("powerdns.com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -508,7 +508,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_nxdomain_denial_missing_wildcard)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("powerdns.com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("powerdns.com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -548,17 +548,17 @@ BOOST_AUTO_TEST_CASE(test_nsec_expanded_wildcard_proof)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("example.org."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
   sortedRecords_t recordContents;
   vector<shared_ptr<const RRSIGRecordContent>> signatureContents;
 
-  /* proves that a.example.com does exist, and has been generated from a wildcard (see the RRSIG below) */
+  /* proves that b.example.com does NOT exist, and the answer has been generated from a wildcard (see the RRSIG below) */
   addNSECRecordToLW(DNSName("a.example.org."), DNSName("d.example.org"), {QType::A, QType::TXT, QType::RRSIG, QType::NSEC}, 600, records);
   recordContents.insert(records.at(0).getContent());
-  addRRSIG(keys, records, DNSName("example.org."), 300, false, boost::none, DNSName("example.org."));
+  addRRSIG(keys, records, DNSName("example.org."), 300, false);
   signatureContents.push_back(getRR<RRSIGRecordContent>(records.at(1)));
   records.clear();
 
@@ -570,8 +570,39 @@ BOOST_AUTO_TEST_CASE(test_nsec_expanded_wildcard_proof)
 
   /* This is an expanded wildcard proof, meaning that it does prove that the exact name
      does not exist so the wildcard can apply */
-  dState denialState = getDenial(denialMap, DNSName("a.example.org."), QType(0).getCode(), false, false, std::nullopt, false, /* normally retrieved from the RRSIG's d_labels */ 2);
+  dState denialState = getDenial(denialMap, DNSName("b.example.org."), QType(0).getCode(), false, false, std::nullopt, false, /* normally retrieved from the RRSIG's d_labels */ 2);
   BOOST_CHECK_EQUAL(denialState, dState::NXDOMAIN);
+}
+
+BOOST_AUTO_TEST_CASE(test_nsec_expanded_wildcard_proof_missing_next_closer)
+{
+  initSR(true);
+
+  testkeysset_t keys;
+  generateKeyMaterial(DNSName("example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
+
+  vector<DNSRecord> records;
+
+  sortedRecords_t recordContents;
+  vector<shared_ptr<const RRSIGRecordContent>> signatureContents;
+
+  /* proves that a.b.example.com does not exist, and the answer has been generated from a wildcard (see the RRSIG below) */
+  addNSECRecordToLW(DNSName("b.example.org."), DNSName("c.example.org"), {QType::A, QType::TXT, QType::RRSIG, QType::NSEC}, 600, records);
+  recordContents.insert(records.at(0).getContent());
+  addRRSIG(keys, records, DNSName("example.org."), 300, false);
+  signatureContents.push_back(getRR<RRSIGRecordContent>(records.at(1)));
+  records.clear();
+
+  ContentSigPair pair;
+  pair.records = recordContents;
+  pair.signatures = signatureContents;
+  cspmap_t denialMap;
+  denialMap[std::pair(DNSName("b.example.org."), QType::NSEC)] = pair;
+
+  /* This is an expanded wildcard proof, meaning that it does prove that the exact name
+     does not exist so the wildcard might apply EXCEPT the next closer does exist! */
+  dState denialState = getDenial(denialMap, DNSName("a.b.example.org."), QType(0).getCode(), false, false, std::nullopt, false, /* normally retrieved from the RRSIG's d_labels */ 2);
+  BOOST_CHECK_EQUAL(denialState, dState::NXQTYPE);
 }
 
 BOOST_AUTO_TEST_CASE(test_nsec_wildcard_with_cname)
@@ -579,7 +610,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_wildcard_with_cname)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("example.org."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -645,7 +676,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_wildcard_with_cname)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("example.org."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -723,7 +754,7 @@ BOOST_AUTO_TEST_CASE(test_nsec_ent_denial)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("powerdns.com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("powerdns.com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -782,8 +813,8 @@ BOOST_AUTO_TEST_CASE(test_nsec_denial_invalid_signer)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("powerdns.com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
-  generateKeyMaterial(DNSName("sub.powerdns.com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("powerdns.com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("sub.powerdns.com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -819,8 +850,8 @@ BOOST_AUTO_TEST_CASE(test_nsec3_denial_invalid_signer)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("example.org."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
-  generateKeyMaterial(DNSName("sub.example.org."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("sub.example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -875,7 +906,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_ancestor_nxqtype_denial)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -955,7 +986,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_denial_too_many_iterations)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -985,7 +1016,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_many_labels_between_name_and_closest_encloser)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("powerdns.com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("powerdns.com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -1047,7 +1078,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_insecure_delegation_denial)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -1089,7 +1120,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_insecure_delegation_denial_soa)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -1104,7 +1135,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_insecure_delegation_denial_soa)
    * NSEC3 RR.
    */
   /*
-    The RRSIG from "." denies the existence of any type at a except NS and SOA.
+    The RRSIG from "." denies the existence of any type at "a" except NS and SOA.
     NS has to be set since it is proving an insecure delegation, but SOA should NOT!
   */
   addNSEC3UnhashedRecordToLW(DNSName("a."), DNSName("."), "whatever", {QType::NS, QType::SOA}, 600, records);
@@ -1129,7 +1160,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_ent_opt_out)
   initSR();
 
   testkeysset_t keys;
-  generateKeyMaterial(DNSName("."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
 
   vector<DNSRecord> records;
 
@@ -1141,7 +1172,7 @@ BOOST_AUTO_TEST_CASE(test_nsec3_ent_opt_out)
    * A recently discovered corner case (see RFC Errata ID 3441 [Err3441])
    * shows that not only those delegations remain insecure but also the
    * empty non-terminal space that is derived from those delegations.
-  */
+   */
   /*
     We have a NSEC3 proving that was.here does exist, and a second
     one proving that ent.was.here. does not,
@@ -1178,6 +1209,73 @@ BOOST_AUTO_TEST_CASE(test_nsec3_ent_opt_out)
   BOOST_CHECK_EQUAL(denialState, dState::OPTOUT);
 }
 
+BOOST_AUTO_TEST_CASE(test_nsec3_apex_hash_label_parent_impersonation)
+{
+  initSR();
+
+  const std::string salt = "deadbeef";
+  const unsigned int nbIterations = 10;
+
+  DNSName tld("com.");
+  DNSName unrelatedDomain("unrelated-domain.com.");
+  DNSName victim("victim.com.");
+  // compute the hash of the TLD domain
+  std::string hashedTLD = hashQNameWithSalt(salt, nbIterations, tld);
+  DNSName attackDomain(DNSName(hashedTLD) + tld);
+
+  testkeysset_t keys;
+  generateKeyMaterial(tld, DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
+  generateKeyMaterial(attackDomain, DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
+
+  cspmap_t denialMap;
+  vector<DNSRecord> records;
+
+  {
+    sortedRecords_t recordContents;
+    vector<shared_ptr<const RRSIGRecordContent>> signatureContents;
+    addNSEC3RecordToLW(attackDomain, hashedTLD, salt, nbIterations, {QType::NS, QType::SOA, QType::RRSIG}, 600, records);
+
+    recordContents.insert(records.at(0).getContent());
+    addRRSIG(keys, records, attackDomain, 300);
+    signatureContents.push_back(getRR<RRSIGRecordContent>(records.at(1)));
+
+    ContentSigPair pair;
+    pair.records = recordContents;
+    pair.signatures = signatureContents;
+    denialMap[std::pair(records.at(0).d_name, records.at(0).d_type)] = pair;
+    records.clear();
+  }
+
+  /* also include one legit NSEC3 from the tld zone, that does not prove
+     that the victim domain does not exist but gets us past the !nsec3Seen
+     gate of our validation code, reaching the closest encloser chase
+  */
+
+  {
+    sortedRecords_t recordContents;
+    vector<shared_ptr<const RRSIGRecordContent>> signatureContents;
+    addNSEC3NarrowRecordToLW(unrelatedDomain, tld, {QType::RRSIG, QType::NSEC3}, 600, records, nbIterations);
+
+    recordContents.insert(records.at(0).getContent());
+    addRRSIG(keys, records, tld, 300);
+    signatureContents.push_back(getRR<RRSIGRecordContent>(records.at(1)));
+
+    ContentSigPair pair;
+    pair.records = recordContents;
+    pair.signatures = signatureContents;
+    denialMap[std::pair(records.at(0).d_name, records.at(0).d_type)] = pair;
+    records.clear();
+  }
+
+  OptLog log;
+  log = {std::string(__PRETTY_FUNCTION__), timeval{}, getLogger()};
+
+  pdns::validation::ValidationContext validationContext;
+  validationContext.d_nsec3IterationsRemainingQuota = 100U;
+  /* this NSEC3 is not valid to deny the existence of a sibling domain since it is from the child zone */
+  BOOST_CHECK_EQUAL(getDenial(denialMap, victim, QType::A, false, true, validationContext, log), dState::NODENIAL);
+}
+
 BOOST_AUTO_TEST_CASE(test_dnssec_rrsig_negcache_validity)
 {
   std::unique_ptr<SyncRes> sr;
@@ -1191,14 +1289,14 @@ BOOST_AUTO_TEST_CASE(test_dnssec_rrsig_negcache_validity)
 
   auto luaconfsCopy = g_luaconfs.getCopy();
   luaconfsCopy.dsAnchors.clear();
-  generateKeyMaterial(g_rootdnsname, DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
-  generateKeyMaterial(DNSName("com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(g_rootdnsname, DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
+  generateKeyMaterial(DNSName("com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
   g_luaconfs.setState(luaconfsCopy);
 
   size_t queriesCount = 0;
   const time_t fixedNow = sr->getNow().tv_sec;
 
-  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, boost::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
+  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, std::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
     queriesCount++;
 
     DNSName auth = domain;
@@ -1211,8 +1309,8 @@ BOOST_AUTO_TEST_CASE(test_dnssec_rrsig_negcache_validity)
       setLWResult(res, RCode::NoError, true, false, true);
       addRecordToLW(res, domain, QType::SOA, "pdns-public-ns1.powerdns.com. pieter\\.lexis.powerdns.com. 2017032301 10800 3600 604800 3600", DNSResourceRecord::AUTHORITY, 3600);
       addRRSIG(keys, res->d_records, domain, 300);
-      addNSECRecordToLW(domain, DNSName("z."), {QType::NSEC, QType::RRSIG}, 600, res->d_records);
-      addRRSIG(keys, res->d_records, domain, 1, false, boost::none, boost::none, fixedNow);
+      addNSECRecordToLW(domain, DNSName("z") + domain, {QType::NSEC, QType::RRSIG}, 600, res->d_records);
+      addRRSIG(keys, res->d_records, domain, 1, false, std::nullopt, std::nullopt, fixedNow);
       return LWResult::Result::Success;
     }
 
@@ -1259,14 +1357,14 @@ BOOST_AUTO_TEST_CASE(test_dnssec_rrsig_negcache_bogus_validity)
 
   auto luaconfsCopy = g_luaconfs.getCopy();
   luaconfsCopy.dsAnchors.clear();
-  generateKeyMaterial(g_rootdnsname, DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
-  generateKeyMaterial(DNSName("com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(g_rootdnsname, DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
+  generateKeyMaterial(DNSName("com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
   g_luaconfs.setState(luaconfsCopy);
 
   size_t queriesCount = 0;
   const time_t fixedNow = sr->getNow().tv_sec;
 
-  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, boost::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
+  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, std::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
     queriesCount++;
 
     DNSName auth = domain;
@@ -1331,14 +1429,14 @@ BOOST_AUTO_TEST_CASE(test_dnssec_rrsig_cache_validity)
 
   auto luaconfsCopy = g_luaconfs.getCopy();
   luaconfsCopy.dsAnchors.clear();
-  generateKeyMaterial(g_rootdnsname, DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
-  generateKeyMaterial(DNSName("com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(g_rootdnsname, DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
+  generateKeyMaterial(DNSName("com."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
   g_luaconfs.setState(luaconfsCopy);
 
   size_t queriesCount = 0;
   const time_t tnow = sr->getNow().tv_sec;
 
-  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, boost::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
+  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, std::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
     queriesCount++;
 
     DNSName auth = domain;
@@ -1350,7 +1448,7 @@ BOOST_AUTO_TEST_CASE(test_dnssec_rrsig_cache_validity)
     {
       setLWResult(res, RCode::NoError, true, false, true);
       addRecordToLW(res, domain, QType::A, targetAddr.toString(), DNSResourceRecord::ANSWER, 3600);
-      addRRSIG(keys, res->d_records, domain, 1, false, boost::none, boost::none, tnow);
+      addRRSIG(keys, res->d_records, domain, 1, false, std::nullopt, std::nullopt, tnow);
       return LWResult::Result::Success;
     }
 
@@ -1367,10 +1465,10 @@ BOOST_AUTO_TEST_CASE(test_dnssec_rrsig_cache_validity)
   /* check that the entry has not been cached for longer than the RRSIG validity */
   const ComboAddress who;
   vector<DNSRecord> cached;
-  vector<std::shared_ptr<const RRSIGRecordContent>> signatures;
-  BOOST_REQUIRE_EQUAL(g_recCache->get(tnow, target, QType(QType::A), MemRecursorCache::RequireAuth, &cached, who, boost::none, &signatures), 1);
+  MemRecursorCache::SigRecs signatures;
+  BOOST_REQUIRE_EQUAL(g_recCache->get(tnow, target, QType(QType::A), MemRecursorCache::RequireAuth, &cached, who, MemRecursorCache::NOTAG, &signatures), 1);
   BOOST_REQUIRE_EQUAL(cached.size(), 1U);
-  BOOST_REQUIRE_EQUAL(signatures.size(), 1U);
+  BOOST_REQUIRE_EQUAL(signatures->size(), 1U);
   BOOST_CHECK_EQUAL((cached[0].d_ttl - tnow), 1);
 
   /* again, to test the cache */
@@ -1401,12 +1499,12 @@ BOOST_AUTO_TEST_CASE(test_dnssec_validation_from_cache_secure)
 
   auto luaconfsCopy = g_luaconfs.getCopy();
   luaconfsCopy.dsAnchors.clear();
-  generateKeyMaterial(g_rootdnsname, DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
+  generateKeyMaterial(g_rootdnsname, DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
   g_luaconfs.setState(luaconfsCopy);
 
   size_t queriesCount = 0;
 
-  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, boost::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
+  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, std::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
     queriesCount++;
 
     if (type == QType::DS || type == QType::DNSKEY) {
@@ -1472,7 +1570,7 @@ BOOST_AUTO_TEST_CASE(test_dnssec_validation_from_cache_insecure)
 
   size_t queriesCount = 0;
 
-  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, boost::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
+  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, std::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
     queriesCount++;
 
     if (type == QType::DS || type == QType::DNSKEY) {
@@ -1533,12 +1631,12 @@ BOOST_AUTO_TEST_CASE(test_dnssec_validation_from_cache_bogus)
 
   auto luaconfsCopy = g_luaconfs.getCopy();
   luaconfsCopy.dsAnchors.clear();
-  generateKeyMaterial(g_rootdnsname, DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
+  generateKeyMaterial(g_rootdnsname, DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
   g_luaconfs.setState(luaconfsCopy);
 
   size_t queriesCount = 0;
 
-  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, boost::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
+  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, std::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
     queriesCount++;
 
     if (type == QType::DS || type == QType::DNSKEY) {
@@ -1621,12 +1719,12 @@ BOOST_AUTO_TEST_CASE(test_dnssec_validation_from_cache_secure_any)
 
   auto luaconfsCopy = g_luaconfs.getCopy();
   luaconfsCopy.dsAnchors.clear();
-  generateKeyMaterial(g_rootdnsname, DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
+  generateKeyMaterial(g_rootdnsname, DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys, luaconfsCopy.dsAnchors);
   g_luaconfs.setState(luaconfsCopy);
 
   size_t queriesCount = 0;
 
-  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, boost::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
+  sr->setAsyncCallback([&](const ComboAddress& /* ip */, const DNSName& domain, int type, bool /* doTCP */, bool /* sendRDQuery */, int /* EDNS0Level */, struct timeval* /* now */, std::optional<Netmask>& /* srcmask */, const ResolveContext& /* context */, LWResult* res, bool* /* chained */) {
     queriesCount++;
 
     if (type == QType::DS || type == QType::DNSKEY) {
@@ -1676,6 +1774,20 @@ BOOST_AUTO_TEST_CASE(test_dnssec_validation_from_cache_secure_any)
 
   ret.clear();
   /* third one _does_ require validation */
+  sr->setDNSSECValidationRequested(true);
+  MemRecursorCache::s_maxRRSetSize = 1;
+  BOOST_CHECK_THROW(sr->beginResolve(target, QType(QType::ANY), QClass::IN, ret), ImmediateServFailException);
+  // BOOST_CHECK_EQUAL(res, RCode::NoError);
+  // BOOST_CHECK_EQUAL(sr->getValidationState(), vState::Secure);
+  // BOOST_REQUIRE_EQUAL(ret.size(), 2U);
+  // for (const auto& record : ret) {
+  //   BOOST_CHECK(record.d_type == QType::A || record.d_type == QType::AAAA || record.d_type == QType::RRSIG);
+  // }
+  BOOST_CHECK_EQUAL(queriesCount, 2U);
+
+  ret.clear();
+  /* next one _does_ require validation */
+  MemRecursorCache::s_limitQTypeAny = false;
   sr->setDNSSECValidationRequested(true);
   res = sr->beginResolve(target, QType(QType::ANY), QClass::IN, ret);
   BOOST_CHECK_EQUAL(res, RCode::NoError);

@@ -3,10 +3,10 @@ Cache
 
 Endpoints
 ---------
-.. openapi:: swagger/authoritative-api-swagger.yaml
+.. openapi:: openapi/authoritative-api-openapi.yaml
   :paths: /servers/{server_id}/cache/flush
+  :examples:
 
 Objects
 -------
-.. openapi:: swagger/authoritative-api-swagger.yaml
-  :definitions: CacheFlushResult
+.. json:schema:: CacheFlushResult

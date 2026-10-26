@@ -25,6 +25,7 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <thread>
+#include <variant>
 
 #include "ext/json11/json11.hpp"
 #include <yahttp/yahttp.hpp>
@@ -36,13 +37,16 @@
 #include "dnsdist-configuration.hh"
 #include "dnsdist-dynblocks.hh"
 #include "dnsdist-dynbpf.hh"
+#include "dnsdist-ebpf.hh"
 #include "dnsdist-frontend.hh"
 #include "dnsdist-healthchecks.hh"
 #include "dnsdist-lua.hh"
+#include "dnsdist-lua-types.hh"
 #include "dnsdist-metrics.hh"
 #include "dnsdist-prometheus.hh"
 #include "dnsdist-rings.hh"
 #include "dnsdist-rule-chains.hh"
+#include "dnsdist-rules.hh"
 #include "dnsdist-web.hh"
 #include "dolog.hh"
 #include "gettime.hh"
@@ -96,6 +100,10 @@ std::map<std::string, MetricDefinition> MetricDefinitionStorage::metrics{
   {"latency-doq-avg1000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 1000 packets received over DoQ")},
   {"latency-doq-avg10000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 10000 packets received over DoQ")},
   {"latency-doq-avg1000000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 1000000 packets received over DoQ")},
+  {"latency-doh3-avg100", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 100 packets received over DoH3")},
+  {"latency-doh3-avg1000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 1000 packets received over DoH3")},
+  {"latency-doh3-avg10000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 10000 packets received over DoH3")},
+  {"latency-doh3-avg1000000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 1000000 packets received over DoH3")},
   {"uptime", MetricDefinition(PrometheusMetricType::gauge, "Uptime of the dnsdist process in seconds")},
   {"real-memory-usage", MetricDefinition(PrometheusMetricType::gauge, "Current memory usage in bytes")},
   {"noncompliant-queries", MetricDefinition(PrometheusMetricType::counter, "Number of queries dropped as non-compliant")},
@@ -158,6 +166,7 @@ std::string getConfig()
     out << "API requires authentication: " << (config.d_apiRequiresAuthentication ? "yes" : "no") << endl;
     out << "Dashboard requires authentication: " << (config.d_dashboardRequiresAuthentication ? "yes" : "no") << endl;
     out << "Statistics require authentication: " << (config.d_statsRequireAuthentication ? "yes" : "no") << endl;
+    out << "Add instance to Prometheus labels: " << (config.d_prometheusAddInstanceLabel ? "yes" : "no") << endl;
     out << "Password: " << (config.d_webPassword ? "set" : "unset") << endl;
     out << "API key: " << (config.d_webAPIKey ? "set" : "unset") << endl;
     out << "API writable: " << (config.d_apiReadWrite ? "yes" : "no") << endl;
@@ -171,15 +180,16 @@ std::string getConfig()
 class WebClientConnection
 {
 public:
-  WebClientConnection(const ComboAddress& client, int socketDesc) :
+  WebClientConnection(const ComboAddress& client, int socketDesc, const Logr::Logger& logger) :
     d_client(client), d_socket(socketDesc)
   {
     if (!s_connManager.registerConnection()) {
       throw std::runtime_error("Too many concurrent web client connections");
     }
+    d_logger = logger.withValues("client.address", Logging::Loggable(client));
   }
   WebClientConnection(WebClientConnection&& rhs) noexcept :
-    d_client(rhs.d_client), d_socket(std::move(rhs.d_socket))
+    d_logger(std::move(rhs.d_logger)), d_client(rhs.d_client), d_socket(std::move(rhs.d_socket))
   {
   }
   WebClientConnection(const WebClientConnection&) = delete;
@@ -188,6 +198,7 @@ public:
   {
     d_client = rhs.d_client;
     d_socket = std::move(rhs.d_socket);
+    d_logger = std::move(rhs.d_logger);
     return *this;
   }
 
@@ -208,12 +219,18 @@ public:
     return d_client;
   }
 
+  [[nodiscard]] const Logr::Logger& getLogger() const
+  {
+    return *d_logger;
+  }
+
 private:
+  std::shared_ptr<Logr::Logger> d_logger;
   ComboAddress d_client;
   Socket d_socket;
 };
 
-bool addMetricDefinition(const dnsdist::prometheus::PrometheusMetricDefinition& def)
+bool addMetricDefinition([[maybe_unused]] const dnsdist::prometheus::PrometheusMetricDefinition& def)
 {
 #ifndef DISABLE_PROMETHEUS
   return MetricDefinitionStorage::addMetricDefinition(def);
@@ -223,23 +240,29 @@ bool addMetricDefinition(const dnsdist::prometheus::PrometheusMetricDefinition& 
 }
 
 #ifndef DISABLE_WEB_CONFIG
-static bool apiWriteConfigFile(const string& filebasename, const string& content)
+static bool apiWriteConfigFile(const string& filebasename, const string& content, const Logr::Logger& logger)
 {
   const auto& runtimeConfig = dnsdist::configuration::getCurrentRuntimeConfiguration();
   if (!runtimeConfig.d_apiReadWrite) {
-    warnlog("Not writing content to %s since the API is read-only", filebasename);
+    SLOG(warnlog("Not writing content to %s since the API is read-only", filebasename),
+         logger.info(Logr::Warning, "Not writing content to file since the API is read-only", "path", Logging::Loggable(filebasename)));
     return false;
   }
 
   if (runtimeConfig.d_apiConfigDirectory.empty()) {
-    vinfolog("Not writing content to %s since the API configuration directory is not set", filebasename);
+    VERBOSESLOG(infolog("Not writing content to %s since the API configuration directory is not set", filebasename),
+                logger.info(Logr::Info, "Not writing content to file since the API configuration directory is not set", "path", Logging::Loggable(filebasename)));
+
     return false;
   }
 
   string filename = runtimeConfig.d_apiConfigDirectory + "/" + filebasename + ".conf";
   ofstream ofconf(filename.c_str());
   if (!ofconf) {
-    errlog("Could not open configuration fragment file '%s' for writing: %s", filename, stringerror());
+    int saved = errno;
+    SLOG(errlog("Could not open configuration fragment file '%s' for writing: %s", filename, stringerror(saved)),
+         logger.error(Logr::Error, saved, "Could not open configuration fragment file for writing", "path", Logging::Loggable(filebasename)));
+
     return false;
   }
   ofconf << "-- Generated by the REST API, DO NOT EDIT" << endl;
@@ -248,7 +271,7 @@ static bool apiWriteConfigFile(const string& filebasename, const string& content
   return true;
 }
 
-static void apiSaveACL(const NetmaskGroup& nmg)
+static void apiSaveACL(const NetmaskGroup& nmg, const Logr::Logger& logger)
 {
   auto aclEntries = nmg.toStringVector();
 
@@ -261,7 +284,7 @@ static void apiSaveACL(const NetmaskGroup& nmg)
   }
 
   string content = "setACL({" + acl + "})";
-  apiWriteConfigFile("acl", content);
+  apiWriteConfigFile("acl", content, logger);
 }
 #endif /* DISABLE_WEB_CONFIG */
 
@@ -299,6 +322,8 @@ static bool checkWebPassword(const YaHTTP::Request& req, const std::shared_ptr<c
     stringtok(cparts, plain, ":");
 
     if (cparts.size() == 2) {
+      // if you are reading this, yes, allowing access when no password
+      // has been set is intended.
       if (password) {
         return password->matches(cparts.at(1));
       }
@@ -314,35 +339,38 @@ static bool isAnAPIRequest(const YaHTTP::Request& req)
   return req.url.path.find("/api/") == 0;
 }
 
-static bool isAnAPIRequestAllowedWithWebAuth(const YaHTTP::Request& req)
-{
-  return req.url.path == "/api/v1/servers/localhost";
-}
-
-static bool isAStatsRequest(const YaHTTP::Request& req)
+static bool isAMetricsRequest(const YaHTTP::Request& req)
 {
   return req.url.path == "/jsonstat" || req.url.path == "/metrics";
+}
+
+static bool isADashboardMetricsRequest(const YaHTTP::Request& req)
+{
+  return req.url.path == "/jsonstat" || req.url.path == "/api/v1/servers/localhost";
 }
 
 static bool handleAuthorization(const YaHTTP::Request& req)
 {
   const auto& config = dnsdist::configuration::getCurrentRuntimeConfiguration();
 
-  if (isAStatsRequest(req)) {
+  if (isADashboardMetricsRequest(req)) {
+    if (checkWebPassword(req, config.d_webPassword, config.d_dashboardRequiresAuthentication)) {
+      return true;
+    }
+  }
+
+  if (isAMetricsRequest(req)) {
     if (config.d_statsRequireAuthentication) {
       /* Access to the stats is allowed for both API and Web users */
-      return checkAPIKey(req, config.d_webAPIKey) || checkWebPassword(req, config.d_webPassword, config.d_dashboardRequiresAuthentication);
+      return checkAPIKey(req, config.d_webAPIKey)
+        || checkWebPassword(req, config.d_webPassword, true);
     }
     return true;
   }
 
   if (isAnAPIRequest(req)) {
     /* Access to the API requires a valid API key */
-    if (!config.d_apiRequiresAuthentication || checkAPIKey(req, config.d_webAPIKey)) {
-      return true;
-    }
-
-    return isAnAPIRequestAllowedWithWebAuth(req) && checkWebPassword(req, config.d_webPassword, config.d_dashboardRequiresAuthentication);
+    return !config.d_apiRequiresAuthentication || checkAPIKey(req, config.d_webAPIKey);
   }
 
   return checkWebPassword(req, config.d_webPassword, config.d_dashboardRequiresAuthentication);
@@ -378,9 +406,10 @@ static void handleCORS(const YaHTTP::Request& req, YaHTTP::Response& resp)
 {
   const auto origin = req.headers.find("Origin");
   if (origin != req.headers.end()) {
+    const auto& config = dnsdist::configuration::getCurrentRuntimeConfiguration();
     if (req.method == "OPTIONS") {
       /* Pre-flight request */
-      if (dnsdist::configuration::getCurrentRuntimeConfiguration().d_apiReadWrite) {
+      if (config.d_apiReadWrite) {
         resp.headers["Access-Control-Allow-Methods"] = "GET, PUT";
       }
       else {
@@ -389,10 +418,13 @@ static void handleCORS(const YaHTTP::Request& req, YaHTTP::Response& resp)
       resp.headers["Access-Control-Allow-Headers"] = "Authorization, X-API-Key";
     }
 
-    resp.headers["Access-Control-Allow-Origin"] = origin->second;
+    if (config.d_webServerAllowCrossOriginRequests) {
+      resp.headers["Access-Control-Allow-Origin"] = origin->second;
+      resp.headers["Vary"] = "Origin"; // prevents cached data to be used for a different Origin
 
-    if (isAStatsRequest(req) || isAnAPIRequestAllowedWithWebAuth(req)) {
-      resp.headers["Access-Control-Allow-Credentials"] = "true";
+      if (isAMetricsRequest(req) || isADashboardMetricsRequest(req)) {
+        resp.headers["Access-Control-Allow-Credentials"] = "true";
+      }
     }
   }
 }
@@ -454,20 +486,72 @@ static json11::Json::array someResponseRulesToJson(const std::vector<T>& someRes
 
 #ifndef DISABLE_PROMETHEUS
 template <typename T>
-static void addRulesToPrometheusOutput(std::ostringstream& output, const std::vector<T>& rules)
+static void addRulesToPrometheusOutput(std::ostringstream& output, const std::vector<T>& rules, const std::string instanceLabelWithComma)
 {
   for (const auto& entry : rules) {
     std::string identifier = !entry.d_name.empty() ? entry.d_name : boost::uuids::to_string(entry.d_id);
-    output << "dnsdist_rule_hits{id=\"" << identifier << "\"} " << entry.d_rule->d_matches << "\n";
+    output << "dnsdist_rule_hits{id=\"" << identifier << "\"" << instanceLabelWithComma << "} " << entry.d_rule->d_matches << "\n";
   }
 }
 
-static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
+template <class T>
+static void addHistogramToPrometheusOutput(std::ostringstream& output, const T& container, const std::string& metricName, const std::string& label)
+{
+  const std::string latency_label_prefix{label.empty() ? "{" : (label.substr(0, label.size() - 1) + ",")};
+  uint64_t amount = 0;
+  amount += container.latency0_1;
+  output << metricName << "_bucket" << latency_label_prefix << "le=\"1\"} " << amount << "\n";
+  amount += container.latency1_10;
+  output << metricName << "_bucket" << latency_label_prefix << "le=\"10\"} " << amount << "\n";
+  amount += container.latency10_50;
+  output << metricName << "_bucket" << latency_label_prefix << "le=\"50\"} " << amount << "\n";
+  amount += container.latency50_100;
+  output << metricName << "_bucket" << latency_label_prefix << "le=\"100\"} " << amount << "\n";
+  amount += container.latency100_1000;
+  output << metricName << "_bucket" << latency_label_prefix << "le=\"1000\"} " << amount << "\n";
+  amount += container.latencySlow;
+  output << metricName << "_bucket" << latency_label_prefix << "le=\"+Inf\"} " << amount << "\n";
+
+  output << metricName << "_sum" << label << " " << container.latencySum << "\n";
+  output << metricName << "_count" << label << " " << container.latencyCount << "\n";
+}
+
+static std::string escapePrometheusLabelValue(const std::string& labelValue)
+{
+  /* "label_value can be any sequence of UTF-8 characters, but the backslash (\), double-quote ("),
+      and line feed (\n) characters have to be escaped as \\, \", and \n, respectively." */
+  std::string result;
+  result.reserve(labelValue.size());
+  for (char val : labelValue) {
+    switch (val) {
+    case '"':
+      result += "\\\"";
+      break;
+    case '\\':
+      result += "\\\\";
+      break;
+    case '\n':
+      result += "\\n";
+      break;
+    default:
+      result += val;
+      break;
+    }
+  }
+  return result;
+}
+
+static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
 {
   handleCORS(req, resp);
   resp.status = 200;
 
   std::ostringstream output;
+  std::string instanceLabel; // MUST be empty when instance label is not requested
+  {
+    const auto& rtc = dnsdist::configuration::getCurrentRuntimeConfiguration();
+    instanceLabel = rtc.d_prometheusAddInstanceLabel ? "instance=\"" + rtc.d_server_id + "\"" : "";
+  }
   static const std::set<std::string> metricBlacklist = {"special-memory-usage", "latency-count", "latency-sum"};
   {
     auto entries = dnsdist::metrics::g_stats.entries.read_lock();
@@ -481,13 +565,15 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
 
       MetricDefinition metricDetails;
       if (!s_metricDefinitions.getMetricDetails(metricName, metricDetails)) {
-        vinfolog("Do not have metric details for %s", metricName);
+        VERBOSESLOG(infolog("Do not have metric details for %s", metricName),
+                    logger.info(Logr::Info, "Missing details for this metric", "dnsdist.metric.name", Logging::Loggable(metricName)));
         continue;
       }
 
       const std::string prometheusTypeName = s_metricDefinitions.getPrometheusStringMetricType(metricDetails.prometheusType);
       if (prometheusTypeName.empty()) {
-        vinfolog("Unknown Prometheus type for %s", metricName);
+        VERBOSESLOG(infolog("Unknown Prometheus type for %s", metricName),
+                    logger.info(Logr::Info, "Unknown Prometheus type", "dnsdist.metric.name", Logging::Loggable(metricName)));
         continue;
       }
 
@@ -498,6 +584,20 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
       }
       else {
         prometheusMetricName = metricDetails.customName;
+      }
+
+      if (!entry.d_labels.empty() || !instanceLabel.empty()) {
+        prometheusMetricName += "{";
+        if (!entry.d_labels.empty()) {
+          prometheusMetricName += entry.d_labels;
+          if (!instanceLabel.empty()) {
+            prometheusMetricName += ",";
+          }
+        }
+        if (!instanceLabel.empty()) {
+          prometheusMetricName += instanceLabel;
+        }
+        prometheusMetricName += "}";
       }
 
       // for these we have the help and types encoded in the sources
@@ -524,23 +624,16 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
     }
   }
 
+  std::string instanceLabelPlusComma;
+  std::string instanceLabelPlusBrackets;
+  if (!instanceLabel.empty()) {
+    instanceLabelPlusComma = "," + instanceLabel;
+    instanceLabelPlusBrackets = "{" + instanceLabel + "}";
+  }
   // Latency histogram buckets
   output << "# HELP dnsdist_latency Histogram of responses by latency (in milliseconds)\n";
   output << "# TYPE dnsdist_latency histogram\n";
-  uint64_t latency_amounts = dnsdist::metrics::g_stats.latency0_1;
-  output << "dnsdist_latency_bucket{le=\"1\"} " << latency_amounts << "\n";
-  latency_amounts += dnsdist::metrics::g_stats.latency1_10;
-  output << "dnsdist_latency_bucket{le=\"10\"} " << latency_amounts << "\n";
-  latency_amounts += dnsdist::metrics::g_stats.latency10_50;
-  output << "dnsdist_latency_bucket{le=\"50\"} " << latency_amounts << "\n";
-  latency_amounts += dnsdist::metrics::g_stats.latency50_100;
-  output << "dnsdist_latency_bucket{le=\"100\"} " << latency_amounts << "\n";
-  latency_amounts += dnsdist::metrics::g_stats.latency100_1000;
-  output << "dnsdist_latency_bucket{le=\"1000\"} " << latency_amounts << "\n";
-  latency_amounts += dnsdist::metrics::g_stats.latencySlow; // Should be the same as latency_count
-  output << "dnsdist_latency_bucket{le=\"+Inf\"} " << latency_amounts << "\n";
-  output << "dnsdist_latency_sum " << dnsdist::metrics::g_stats.latencySum << "\n";
-  output << "dnsdist_latency_count " << dnsdist::metrics::g_stats.latencyCount << "\n";
+  addHistogramToPrometheusOutput(output, dnsdist::metrics::g_stats, "dnsdist_latency", instanceLabelPlusBrackets);
 
   const string statesbase = "dnsdist_server_";
 
@@ -607,6 +700,11 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
   output << "# TYPE " << statesbase << "healthcheckfailuresmismatch "     << "counter"                                                                              << "\n";
   output << "# HELP " << statesbase << "healthcheckfailuresinvalid "      << "Number of health check attempts where the DNS response was invalid"                   << "\n";
   output << "# TYPE " << statesbase << "healthcheckfailuresinvalid "      << "counter"                                                                              << "\n";
+  output << "# HELP " << statesbase << "healthchecklatency "              << "Latency of the last successful health check attempt, in milliseconds"                 << "\n";
+  output << "# TYPE " << statesbase << "healthchecklatency "              << "gauge"                                                                                << "\n";
+  // Backend latency histogram buckets
+  output << "# HELP " << statesbase << "healthchecklatency_histo "        << "Histogram of the latency of the successful health check attempts, in milliseconds"    << "\n";
+  output << "# TYPE " << statesbase << "healthchecklatency_histo "        << "histogram"                                                                            << "\n";
 
   for (const auto& state : dnsdist::configuration::getCurrentRuntimeConfiguration().d_backends) {
     string serverName;
@@ -618,10 +716,10 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
       serverName = state->getName();
     }
 
-    boost::replace_all(serverName, ".", "_");
+    std::replace(serverName.begin(), serverName.end(), '.', '_');
 
-    const std::string label = boost::str(boost::format(R"({server="%1%",address="%2%"})")
-                                         % serverName % state->d_config.remote.toStringWithPort());
+    const std::string label = boost::str(boost::format(R"({server="%1%",address="%2%"%3%})")
+                                         % serverName % state->d_config.remote.toStringWithPort() % (instanceLabel.empty() ? "" : instanceLabelPlusComma));
 
     output << statesbase << "status"                           << label << " " << (state->isUp() ? "1" : "0")            << "\n";
     output << statesbase << "queries"                          << label << " " << state->queries.load()                  << "\n";
@@ -655,7 +753,11 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
     output << statesbase << "healthcheckfailurestimeout"       << label << " " << state->d_healthCheckMetrics.d_timeOuts << "\n";
     output << statesbase << "healthcheckfailuresnetwork"       << label << " " << state->d_healthCheckMetrics.d_networkErrors << "\n";
     output << statesbase << "healthcheckfailuresmismatch"      << label << " " << state->d_healthCheckMetrics.d_mismatchErrors << "\n";
-    output << statesbase << "healthcheckfailuresinvalid"        << label << " " << state->d_healthCheckMetrics.d_invalidResponseErrors << "\n";
+    output << statesbase << "healthcheckfailuresinvalid"       << label << " " << state->d_healthCheckMetrics.d_invalidResponseErrors << "\n";
+    output << statesbase << "healthchecklatency"               << label << " " << state->d_healthCheckLatency / 1000.0   << "\n";
+
+    // Health-check latency histogram
+    addHistogramToPrometheusOutput(output, state->d_healthCheckLatencyHisto, statesbase + "healthchecklatency_histo", label);
   }
 
   const string frontsbase = "dnsdist_frontend_";
@@ -675,6 +777,14 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
   output << "# TYPE " << frontsbase << "tcpclienttimeouts " << "counter" << "\n";
   output << "# HELP " << frontsbase << "tcpdownstreamtimeouts " << "Amount of TCP connections terminated by a timeout while reading from the backend" << "\n";
   output << "# TYPE " << frontsbase << "tcpdownstreamtimeouts " << "counter" << "\n";
+  output << "# HELP " << frontsbase << "tcpdiedduringprocessing " << "Amount of TCP connections terminated by an internal error during processing" << "\n";
+  output << "# TYPE " << frontsbase << "tcpdiedduringprocessing " << "counter" << "\n";
+  output << "# HELP " << frontsbase << "tcpbadalpn " << "Amount of TCP connections terminated because the client did not send the expected ALPN" << "\n";
+  output << "# TYPE " << frontsbase << "tcpbadalpn " << "counter" << "\n";
+  output << "# HELP " << frontsbase << "tcpbadproxyprotocol " << "Amount of TCP connections terminated because the client send an invalid Proxy Protocol payload" << "\n";
+  output << "# TYPE " << frontsbase << "tcpbadproxyprotocol " << "counter" << "\n";
+  output << "# HELP " << frontsbase << "tcpmaxdurationreached " << "Amount of TCP connections terminated because the connection reached its maximum configured duration" << "\n";
+  output << "# TYPE " << frontsbase << "tcpmaxdurationreached " << "counter" << "\n";
   output << "# HELP " << frontsbase << "tcpcurrentconnections " << "Amount of current incoming TCP connections from clients" << "\n";
   output << "# TYPE " << frontsbase << "tcpcurrentconnections " << "gauge" << "\n";
   output << "# HELP " << frontsbase << "tcpmaxconcurrentconnections " << "Maximum number of concurrent incoming TCP connections from clients" << "\n";
@@ -683,6 +793,8 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
   output << "# TYPE " << frontsbase << "tcpavgqueriesperconnection " << "gauge" << "\n";
   output << "# HELP " << frontsbase << "tcpavgconnectionduration " << "The average duration of a TCP connection (ms)" << "\n";
   output << "# TYPE " << frontsbase << "tcpavgconnectionduration " << "gauge" << "\n";
+  output << "# HELP " << frontsbase << "tcpavgreadios " << "The average number of read IO operations per query over a TCP connection" << "\n";
+  output << "# TYPE " << frontsbase << "tcpavgreadios " << "gauge" << "\n";
   output << "# HELP " << frontsbase << "tlsqueries " << "Number of queries received by dnsdist over TLS, by TLS version" << "\n";
   output << "# TYPE " << frontsbase << "tlsqueries " << "counter" << "\n";
   output << "# HELP " << frontsbase << "tlsnewsessions " << "Amount of new TLS sessions negotiated" << "\n";
@@ -713,8 +825,8 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
       threadNumber = dupPair.first->second;
       ++(dupPair.first->second);
     }
-    const std::string label = boost::str(boost::format(R"({frontend="%1%",proto="%2%",thread="%3%"} )")
-                                         % frontName % proto % threadNumber);
+    const std::string label = boost::str(boost::format(R"({frontend="%1%",proto="%2%",thread="%3%"%4%} )")
+                                         % frontName % proto % threadNumber % (instanceLabel.empty() ? "" : instanceLabelPlusComma));
 
     output << frontsbase << "queries" << label << front->queries.load() << "\n";
     output << frontsbase << "noncompliantqueries" << label << front->nonCompliantQueries.load() << "\n";
@@ -725,39 +837,44 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
       output << frontsbase << "tcpgaveup" << label << front->tcpGaveUp.load() << "\n";
       output << frontsbase << "tcpclienttimeouts" << label << front->tcpClientTimeouts.load() << "\n";
       output << frontsbase << "tcpdownstreamtimeouts" << label << front->tcpDownstreamTimeouts.load() << "\n";
+      output << frontsbase << "tcpdiedduringprocessing" << label << front->tcpDiedDuringProcessing.load() << "\n";
+      output << frontsbase << "tcpbadalpn" << label << front->tcpBadALPN.load() << "\n";
+      output << frontsbase << "tcpbadproxyprotocol" << label << front->tcpBadProxyProtocol.load() << "\n";
+      output << frontsbase << "tcpmaxdurationreached" << label << front->tcpMaxDurationReached.load() << "\n";
       output << frontsbase << "tcpcurrentconnections" << label << front->tcpCurrentConnections.load() << "\n";
       output << frontsbase << "tcpmaxconcurrentconnections" << label << front->tcpMaxConcurrentConnections.load() << "\n";
       output << frontsbase << "tcpavgqueriesperconnection" << label << front->tcpAvgQueriesPerConnection.load() << "\n";
       output << frontsbase << "tcpavgconnectionduration" << label << front->tcpAvgConnectionDuration.load() << "\n";
+      output << frontsbase << "tcpavgreadios" << label << front->tcpAvgIOsPerConnection << "\n";
       if (front->hasTLS()) {
         output << frontsbase << "tlsnewsessions" << label << front->tlsNewSessions.load() << "\n";
         output << frontsbase << "tlsresumptions" << label << front->tlsResumptions.load() << "\n";
         output << frontsbase << "tlsunknownticketkeys" << label << front->tlsUnknownTicketKey.load() << "\n";
         output << frontsbase << "tlsinactiveticketkeys" << label << front->tlsInactiveTicketKey.load() << "\n";
 
-        output << frontsbase << "tlsqueries{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",tls="tls10"} )" << front->tls10queries.load() << "\n";
-        output << frontsbase << "tlsqueries{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",tls="tls11"} )" << front->tls11queries.load() << "\n";
-        output << frontsbase << "tlsqueries{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",tls="tls12"} )" << front->tls12queries.load() << "\n";
-        output << frontsbase << "tlsqueries{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",tls="tls13"} )" << front->tls13queries.load() << "\n";
-        output << frontsbase << "tlsqueries{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",tls="unknown"} )" << front->tlsUnknownqueries.load() << "\n";
+        output << frontsbase << "tlsqueries{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",tls="tls10"} )" << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << front->tls10queries.load() << "\n";
+        output << frontsbase << "tlsqueries{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",tls="tls11"} )" << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << front->tls11queries.load() << "\n";
+        output << frontsbase << "tlsqueries{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",tls="tls12"} )" << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << front->tls12queries.load() << "\n";
+        output << frontsbase << "tlsqueries{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",tls="tls13"} )" << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << front->tls13queries.load() << "\n";
+        output << frontsbase << "tlsqueries{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",tls="unknown"} )" << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << front->tlsUnknownqueries.load() << "\n";
 
         const TLSErrorCounters* errorCounters = nullptr;
         if (front->tlsFrontend != nullptr) {
           errorCounters = &front->tlsFrontend->d_tlsCounters;
         }
         else if (front->dohFrontend != nullptr) {
-          errorCounters = &front->dohFrontend->d_tlsContext.d_tlsCounters;
+          errorCounters = &front->dohFrontend->d_tlsContext->d_tlsCounters;
         }
 
         if (errorCounters != nullptr) {
-          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",error="dhKeyTooSmall"} )" << errorCounters->d_dhKeyTooSmall << "\n";
-          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",error="inappropriateFallBack"} )" << errorCounters->d_inappropriateFallBack << "\n";
-          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",error="noSharedCipher"} )" << errorCounters->d_noSharedCipher << "\n";
-          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",error="unknownCipherType"} )" << errorCounters->d_unknownCipherType << "\n";
-          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",error="unknownKeyExchangeType"} )" << errorCounters->d_unknownKeyExchangeType << "\n";
-          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",error="unknownProtocol"} )" << errorCounters->d_unknownProtocol << "\n";
-          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",error="unsupportedEC"} )" << errorCounters->d_unsupportedEC << "\n";
-          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << R"(",error="unsupportedProtocol"} )" << errorCounters->d_unsupportedProtocol << "\n";
+          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << R"(",error="dhKeyTooSmall"} )" << errorCounters->d_dhKeyTooSmall << "\n";
+          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << R"(",error="inappropriateFallBack"} )" << errorCounters->d_inappropriateFallBack << "\n";
+          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << R"(",error="noSharedCipher"} )" << errorCounters->d_noSharedCipher << "\n";
+          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << R"(",error="unknownCipherType"} )" << errorCounters->d_unknownCipherType << "\n";
+          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << R"(",error="unknownKeyExchangeType"} )" << errorCounters->d_unknownKeyExchangeType << "\n";
+          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << R"(",error="unknownProtocol"} )" << errorCounters->d_unknownProtocol << "\n";
+          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << R"(",error="unsupportedEC"} )" << errorCounters->d_unsupportedEC << "\n";
+          output << frontsbase << "tlshandshakefailures{frontend=\"" << frontName << "\",proto=\"" << proto << "\",thread=\"" << threadNumber << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << R"(",error="unsupportedProtocol"} )" << errorCounters->d_unsupportedProtocol << "\n";
         }
       }
     }
@@ -784,14 +901,14 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
 #ifdef HAVE_DNS_OVER_HTTPS
   std::map<std::string,uint64_t> dohFrontendDuplicates;
   for(const auto& doh : dnsdist::getDoHFrontends()) {
-    const string frontName = doh->d_tlsContext.d_addr.toStringWithPort();
+    const string frontName = doh->d_tlsContext->d_addr.toStringWithPort();
     uint64_t threadNumber = 0;
     auto dupPair = frontendDuplicates.emplace(frontName, 1);
     if (!dupPair.second) {
       threadNumber = dupPair.first->second;
       ++(dupPair.first->second);
     }
-    const std::string addrlabel = boost::str(boost::format(R"(frontend="%1%",thread="%2%")") % frontName % threadNumber);
+    const std::string addrlabel = boost::str(boost::format(R"(frontend="%1%",thread="%2%"%3%)") % frontName % threadNumber % (instanceLabel.empty() ? "" : instanceLabelPlusComma));
     const std::string label = "{" + addrlabel + "} ";
 
     output << frontsbase << "http_connects" << label << doh->d_httpconnects << "\n";
@@ -855,13 +972,13 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
     if (poolName.empty()) {
       poolName = "_default_";
     }
-    const string label = "{pool=\"" + poolName + "\"}";
-    const std::shared_ptr<ServerPool> pool = entry.second;
-    output << "dnsdist_pool_servers" << label << " " << pool->countServers(false) << "\n";
-    output << "dnsdist_pool_active_servers" << label << " " << pool->countServers(true) << "\n";
+    const string label = "{pool=\"" + poolName + "\"" + (instanceLabel.empty() ? "" : instanceLabelPlusComma) + "}";
+    const auto& pool = entry.second;
+    output << "dnsdist_pool_servers" << label << " " << pool.countServers(false) << "\n";
+    output << "dnsdist_pool_active_servers" << label << " " << pool.countServers(true) << "\n";
 
-    if (pool->packetCache != nullptr) {
-      const auto& cache = pool->packetCache;
+    if (pool.packetCache != nullptr) {
+      const auto& cache = pool.packetCache;
 
       output << cachebase << "cache_size"              <<label << " " << cache->getMaxEntries()       << "\n";
       output << cachebase << "cache_entries"           <<label << " " << cache->getEntriesCount()     << "\n";
@@ -881,11 +998,11 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
   const auto& chains = dnsdist::configuration::getCurrentRuntimeConfiguration().d_ruleChains;
   for (const auto& chainDescription : dnsdist::rules::getRuleChainDescriptions()) {
     const auto& chain = dnsdist::rules::getRuleChain(chains, chainDescription.identifier);
-    addRulesToPrometheusOutput(output, chain);
+    addRulesToPrometheusOutput(output, chain, instanceLabelPlusComma);
   }
   for (const auto& chainDescription : dnsdist::rules::getResponseRuleChainDescriptions()) {
     const auto& chain = dnsdist::rules::getResponseRuleChain(chains, chainDescription.identifier);
-    addRulesToPrometheusOutput(output, chain);
+    addRulesToPrometheusOutput(output, chain, instanceLabelPlusComma);
   }
 
 #ifndef DISABLE_DYNBLOCKS
@@ -894,7 +1011,7 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
   auto topNetmasksByReason = DynBlockMaintenance::getHitsForTopNetmasks();
   for (const auto& entry : topNetmasksByReason) {
     for (const auto& netmask : entry.second) {
-      output << "dnsdist_dynblocks_nmg_top_offenders_hits_per_second{reason=\"" << entry.first << "\",netmask=\"" << netmask.first.toString() << "\"} " << netmask.second << "\n";
+      output << "dnsdist_dynblocks_nmg_top_offenders_hits_per_second{reason=\"" << entry.first << "\",netmask=\"" << netmask.first.toString() << "\"" << (instanceLabel.empty() ? "" : instanceLabelPlusComma) <<"} " << netmask.second << "\n";
     }
   }
 
@@ -903,17 +1020,17 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
   auto topSuffixesByReason = DynBlockMaintenance::getHitsForTopSuffixes();
   for (const auto& entry : topSuffixesByReason) {
     for (const auto& suffix : entry.second) {
-      output << "dnsdist_dynblocks_smt_top_offenders_hits_per_second{reason=\"" << entry.first << "\",suffix=\"" << suffix.first.toString() << "\"} " << suffix.second << "\n";
+      output << "dnsdist_dynblocks_smt_top_offenders_hits_per_second{reason=\"" << entry.first << "\",suffix=\"" << escapePrometheusLabelValue(suffix.first.toString()) << "\"" << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << "} " << suffix.second << "\n";
     }
   }
 #endif /* DISABLE_DYNBLOCKS */
 
   output << "# HELP dnsdist_info " << "Info from dnsdist, value is always 1" << "\n";
   output << "# TYPE dnsdist_info " << "gauge" << "\n";
-  output << "dnsdist_info{version=\"" << VERSION << "\"} " << "1" << "\n";
+  output << "dnsdist_info{version=\"" << VERSION << "\"" << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << "} " << "1" << "\n";
 
   resp.body = output.str();
-  resp.headers["Content-Type"] = "text/plain";
+  resp.headers["Content-Type"] = "text/plain; version=0.0.4";
   // clang-format on
 }
 #endif /* DISABLE_PROMETHEUS */
@@ -926,6 +1043,9 @@ static void addStatsToJSONObject(Json::object& obj)
   for (const auto& entry : *entries) {
     if (entry.d_name == "special-memory-usage") {
       continue; // Too expensive for get-all
+    }
+    if (!entry.d_labels.empty()) {
+      continue; // Skip labeled metrics to prevent duplicates
     }
     if (const auto& val = std::get_if<pdns::stat_t*>(&entry.d_value)) {
       obj.emplace(entry.d_name, (double)(*val)->load());
@@ -940,8 +1060,9 @@ static void addStatsToJSONObject(Json::object& obj)
 }
 
 #ifndef DISABLE_BUILTIN_HTML
-static void handleJSONStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
+static void handleJSONStats(const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
 {
+  (void)logger;
   handleCORS(req, resp);
   resp.status = 200;
 
@@ -1058,10 +1179,10 @@ static void handleJSONStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
 static void addServerToJSON(Json::array& servers, int identifier, const std::shared_ptr<DownstreamState>& backend)
 {
   string status;
-  if (backend->d_config.availability == DownstreamState::Availability::Up) {
+  if (backend->d_config.d_availability == DownstreamState::Availability::Up) {
     status = "UP";
   }
-  else if (backend->d_config.availability == DownstreamState::Availability::Down) {
+  else if (backend->d_config.d_availability == DownstreamState::Availability::Down) {
     status = "DOWN";
   }
   else {
@@ -1081,7 +1202,7 @@ static void addServerToJSON(Json::array& servers, int identifier, const std::sha
     {"state", status},
     {"protocol", backend->getProtocol().toPrettyString()},
     {"qps", (double)backend->queryLoad},
-    {"qpsLimit", (double)backend->qps.getRate()},
+    {"qpsLimit", static_cast<double>(backend->getQPSLimit())},
     {"outstanding", (double)backend->outstanding},
     {"reuseds", (double)backend->reuseds},
     {"weight", (double)backend->d_config.d_weight},
@@ -1113,10 +1234,11 @@ static void addServerToJSON(Json::array& servers, int identifier, const std::sha
     {"healthCheckFailuresNetwork", (double)(backend->d_healthCheckMetrics.d_networkErrors)},
     {"healthCheckFailuresMismatch", (double)(backend->d_healthCheckMetrics.d_mismatchErrors)},
     {"healthCheckFailuresInvalid", (double)(backend->d_healthCheckMetrics.d_invalidResponseErrors)},
+    {"healthCheckLatency", (double)(backend->d_healthCheckLatency / 1000.0)},
     {"dropRate", (double)backend->dropRate}};
 
   /* sending a latency for a DOWN server doesn't make sense */
-  if (backend->d_config.availability == DownstreamState::Availability::Down) {
+  if (backend->d_config.d_availability == DownstreamState::Availability::Down) {
     server["latency"] = nullptr;
     server["tcpLatency"] = nullptr;
   }
@@ -1124,8 +1246,9 @@ static void addServerToJSON(Json::array& servers, int identifier, const std::sha
   servers.emplace_back(std::move(server));
 }
 
-static void handleStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
+static void handleStats(const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
 {
+  (void)logger;
   handleCORS(req, resp);
   resp.status = 200;
 
@@ -1161,6 +1284,10 @@ static void handleStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
       {"tcpGaveUp", (double)front->tcpGaveUp.load()},
       {"tcpClientTimeouts", (double)front->tcpClientTimeouts},
       {"tcpDownstreamTimeouts", (double)front->tcpDownstreamTimeouts},
+      {"tcpDiedDuringProcessing", (double)front->tcpDiedDuringProcessing},
+      {"tcpBadALPN", (double)front->tcpBadALPN},
+      {"tcpBadProxyProtocol", (double)front->tcpBadProxyProtocol},
+      {"tcpMaxDurationReached", (double)front->tcpMaxDurationReached},
       {"tcpCurrentConnections", (double)front->tcpCurrentConnections},
       {"tcpMaxConcurrentConnections", (double)front->tcpMaxConcurrentConnections},
       {"tcpAvgQueriesPerConnection", (double)front->tcpAvgQueriesPerConnection},
@@ -1180,7 +1307,7 @@ static void handleStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
       errorCounters = &front->tlsFrontend->d_tlsCounters;
     }
     else if (front->dohFrontend != nullptr) {
-      errorCounters = &front->dohFrontend->d_tlsContext.d_tlsCounters;
+      errorCounters = &front->dohFrontend->d_tlsContext->d_tlsCounters;
     }
     if (errorCounters != nullptr) {
       frontend["tlsHandshakeFailuresDHKeyTooSmall"] = (double)errorCounters->d_dhKeyTooSmall;
@@ -1204,7 +1331,7 @@ static void handleStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
     for (const auto& doh : dohFrontends) {
       dohs.emplace_back(Json::object{
         {"id", num++},
-        {"address", doh->d_tlsContext.d_addr.toStringWithPort()},
+        {"address", doh->d_tlsContext->d_addr.toStringWithPort()},
         {"http-connects", (double)doh->d_httpconnects},
         {"http1-queries", (double)doh->d_http1Stats.d_nbQueries},
         {"http2-queries", (double)doh->d_http2Stats.d_nbQueries},
@@ -1236,11 +1363,11 @@ static void handleStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
     const auto& localPools = dnsdist::configuration::getCurrentRuntimeConfiguration().d_pools;
     pools.reserve(localPools.size());
     for (const auto& pool : localPools) {
-      const auto& cache = pool.second->packetCache;
+      const auto& cache = pool.second.packetCache;
       Json::object entry{
         {"id", num++},
         {"name", pool.first},
-        {"serversCount", (double)pool.second->countServers(false)},
+        {"serversCount", (double)pool.second.countServers(false)},
         {"cacheSize", (double)(cache ? cache->getMaxEntries() : 0)},
         {"cacheEntries", (double)(cache ? cache->getEntriesCount() : 0)},
         {"cacheHits", (double)(cache ? cache->getHits() : 0)},
@@ -1327,8 +1454,9 @@ static void handleStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
   resp.body = Json(responseObject).dump();
 }
 
-static void handlePoolStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
+static void handlePoolStats(const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
 {
+  (void)logger;
   handleCORS(req, resp);
   const auto poolName = req.getvars.find("name");
   if (poolName == req.getvars.end()) {
@@ -1347,10 +1475,10 @@ static void handlePoolStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
   }
 
   const auto& pool = poolIt->second;
-  const auto& cache = pool->packetCache;
+  const auto& cache = pool.packetCache;
   Json::object entry{
     {"name", poolName->second},
-    {"serversCount", (double)pool->countServers(false)},
+    {"serversCount", (double)pool.countServers(false)},
     {"cacheSize", (double)(cache ? cache->getMaxEntries() : 0)},
     {"cacheEntries", (double)(cache ? cache->getEntriesCount() : 0)},
     {"cacheHits", (double)(cache ? cache->getHits() : 0)},
@@ -1364,7 +1492,7 @@ static void handlePoolStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
 
   Json::array servers;
   int num = 0;
-  for (const auto& server : *pool->getServers()) {
+  for (const auto& server : pool.getServers()) {
     addServerToJSON(servers, num, server.second);
     num++;
   }
@@ -1377,8 +1505,9 @@ static void handlePoolStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
   resp.body = my_json.dump();
 }
 
-static void handleStatsOnly(const YaHTTP::Request& req, YaHTTP::Response& resp)
+static void handleStatsOnly(const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
 {
+  (void)logger;
   handleCORS(req, resp);
   resp.status = 200;
 
@@ -1416,8 +1545,9 @@ static void handleStatsOnly(const YaHTTP::Request& req, YaHTTP::Response& resp)
 }
 
 #ifndef DISABLE_WEB_CONFIG
-static void handleConfigDump(const YaHTTP::Request& req, YaHTTP::Response& resp)
+static void handleConfigDump(const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
 {
+  (void)logger;
   handleCORS(req, resp);
   resp.status = 200;
 
@@ -1466,7 +1596,7 @@ static void handleConfigDump(const YaHTTP::Request& req, YaHTTP::Response& resp)
   resp.headers["Content-Type"] = "application/json";
 }
 
-static void handleAllowFrom(const YaHTTP::Request& req, YaHTTP::Response& resp)
+static void handleAllowFrom(const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
 {
   handleCORS(req, resp);
 
@@ -1493,11 +1623,13 @@ static void handleAllowFrom(const YaHTTP::Request& req, YaHTTP::Response& resp)
         }
 
         if (resp.status == 200) {
-          infolog("Updating the ACL via the API to %s", nmg.toString());
+          SLOG(infolog("Updating the ACL via the API to %s", nmg.toString()),
+               logger.info(Logr::Info, "Updating the ACL via the API", "acl", Logging::Loggable(nmg)));
+
           dnsdist::configuration::updateRuntimeConfiguration([&nmg](dnsdist::configuration::RuntimeConfiguration& config) {
             config.d_ACL = nmg;
           });
-          apiSaveACL(nmg);
+          apiSaveACL(nmg, logger);
         }
       }
       else {
@@ -1522,8 +1654,9 @@ static void handleAllowFrom(const YaHTTP::Request& req, YaHTTP::Response& resp)
 #endif /* DISABLE_WEB_CONFIG */
 
 #ifndef DISABLE_WEB_CACHE_MANAGEMENT
-static void handleCacheManagement(const YaHTTP::Request& req, YaHTTP::Response& resp)
+static void handleCacheManagement(const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
 {
+  (void)logger;
   handleCORS(req, resp);
 
   resp.headers["Content-Type"] = "application/json";
@@ -1570,7 +1703,7 @@ static void handleCacheManagement(const YaHTTP::Request& req, YaHTTP::Response& 
     type = QType::chartocode(expungeType->second.c_str());
   }
 
-  std::shared_ptr<ServerPool> pool;
+  std::optional<ServerPool> pool;
   try {
     pool = getPool(poolName->second);
   }
@@ -1636,7 +1769,7 @@ static void addRingEntryToList(const struct timespec& now, Json::array& list, co
   list.emplace_back(std::move(tmp));
 }
 
-static void handleRings(const YaHTTP::Request& req, YaHTTP::Response& resp)
+static void handleRings(const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
 {
   handleCORS(req, resp);
 
@@ -1649,7 +1782,8 @@ static void handleRings(const YaHTTP::Request& req, YaHTTP::Response& resp)
       maxNumberOfQueries = pdns::checked_stoi<size_t>(maxQueries->second);
     }
     catch (const std::exception& exp) {
-      vinfolog("Error parsing the 'maxQueries' value from rings HTTP GET query: %s", exp.what());
+      VERBOSESLOG(infolog("Error parsing the 'maxQueries' value from rings HTTP GET query: %s", exp.what()),
+                  logger.error(Logr::Info, exp.what(), "Error parsing the 'maxQueries' value from rings HTTP GET query"));
     }
   }
 
@@ -1659,7 +1793,8 @@ static void handleRings(const YaHTTP::Request& req, YaHTTP::Response& resp)
       maxNumberOfResponses = pdns::checked_stoi<size_t>(maxResponses->second);
     }
     catch (const std::exception& exp) {
-      vinfolog("Error parsing the 'maxResponses' value from rings HTTP GET query: %s", exp.what());
+      VERBOSESLOG(infolog("Error parsing the 'maxResponses' value from rings HTTP GET query: %s", exp.what()),
+                  logger.error(Logr::Info, exp.what(), "Error parsing the 'maxResponses' value from rings HTTP GET query"));
     }
   }
 
@@ -1670,9 +1805,7 @@ static void handleRings(const YaHTTP::Request& req, YaHTTP::Response& resp)
   size_t numberOfResponses = 0;
   Json::array queries;
   Json::array responses;
-  struct timespec now
-  {
-  };
+  struct timespec now{};
   gettime(&now);
 
   for (const auto& shard : g_rings.d_shards) {
@@ -1704,21 +1837,24 @@ static void handleRings(const YaHTTP::Request& req, YaHTTP::Response& resp)
   resp.headers["Content-Type"] = "application/json";
 }
 
-using WebHandler = std::function<void(const YaHTTP::Request&, YaHTTP::Response&)>;
-struct WebHandlerContext
-{
-  WebHandler d_handler;
-  bool d_isLua{false};
-};
+using BuiltinWebHandler = std::function<void(const YaHTTP::Request&, YaHTTP::Response&, const Logr::Logger& logger)>;
+using LuaWebHandler = std::function<void(const YaHTTP::Request&, YaHTTP::Response&)>;
+using WebHandler = std::variant<BuiltinWebHandler, LuaWebHandler>;
 
-static SharedLockGuarded<std::unordered_map<std::string, WebHandlerContext>> s_webHandlers;
+static SharedLockGuarded<std::unordered_map<std::string, WebHandler>> s_webHandlers;
 
-void registerWebHandler(const std::string& endpoint, WebHandler handler, bool isLua = false);
+void registerWebHandler(const std::string& endpoint, LuaWebHandler handler);
 
-void registerWebHandler(const std::string& endpoint, WebHandler handler, bool isLua)
+void registerWebHandler(const std::string& endpoint, LuaWebHandler handler)
 {
   auto handlers = s_webHandlers.write_lock();
-  (*handlers)[endpoint] = WebHandlerContext{std::move(handler), isLua};
+  (*handlers)[endpoint] = WebHandler{std::move(handler)};
+}
+
+static void registerWebHandler(const std::string& endpoint, BuiltinWebHandler handler)
+{
+  auto handlers = s_webHandlers.write_lock();
+  (*handlers)[endpoint] = WebHandler{std::move(handler)};
 }
 
 void clearWebHandlers()
@@ -1729,16 +1865,18 @@ void clearWebHandlers()
 #ifndef DISABLE_BUILTIN_HTML
 #include "htmlfiles.h"
 
-static void redirectToIndex(const YaHTTP::Request& req, YaHTTP::Response& resp)
+static void redirectToIndex([[maybe_unused]] const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
 {
+  (void)logger;
   const string charset = "; charset=utf-8";
   resp.body.assign(s_urlmap.at("index.html"));
   resp.headers["Content-Type"] = "text/html" + charset;
   resp.status = 200;
 }
 
-static void handleBuiltInFiles(const YaHTTP::Request& req, YaHTTP::Response& resp)
+static void handleBuiltInFiles(const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
 {
+  (void)logger;
   if (req.url.path.empty()) {
     resp.status = 404;
     return;
@@ -1803,7 +1941,8 @@ static void connectionThread(WebClientConnection&& conn)
 {
   setThreadName("dnsdist/webConn");
 
-  vinfolog("Webserver handling connection from %s", conn.getClient().toStringWithPort());
+  VERBOSESLOG(infolog("Webserver handling connection from %s", conn.getClient().toStringWithPort()),
+              conn.getLogger().info(Logr::Info, "Webserver handling connection"));
 
   try {
     YaHTTP::AsyncRequestLoader yarl;
@@ -1851,7 +1990,8 @@ static void connectionThread(WebClientConnection&& conn)
     else if (!handleAuthorization(req)) {
       auto header = req.headers.find("authorization");
       if (header != req.headers.end()) {
-        vinfolog("HTTP Request \"%s\" from %s: Web Authentication failed", req.url.path, conn.getClient().toStringWithPort());
+        VERBOSESLOG(infolog("HTTP Request \"%s\" from %s: Web Authentication failed", req.url.path, conn.getClient().toStringWithPort()),
+                    conn.getLogger().info(Logr::Info, "Web authentication failed for HTTP Request", "url", Logging::Loggable(req.url.path)));
       }
       resp.status = 401;
       resp.body = "<h1>Unauthorized</h1>";
@@ -1861,22 +2001,22 @@ static void connectionThread(WebClientConnection&& conn)
       resp.status = 405;
     }
     else {
-      std::optional<WebHandlerContext> handlerCtx{std::nullopt};
+      std::optional<WebHandler> handler{std::nullopt};
       {
         auto handlers = s_webHandlers.read_lock();
         const auto webHandlersIt = handlers->find(req.url.path);
         if (webHandlersIt != handlers->end()) {
-          handlerCtx = webHandlersIt->second;
+          handler = webHandlersIt->second;
         }
       }
 
-      if (handlerCtx) {
-        if (handlerCtx->d_isLua) {
+      if (handler) {
+        if (const auto* luaHandler = std::get_if<LuaWebHandler>(&*handler)) {
           auto lua = g_lua.lock();
-          handlerCtx->d_handler(req, resp);
+          (*luaHandler)(req, resp);
         }
-        else {
-          handlerCtx->d_handler(req, resp);
+        else if (const auto* builtinHandler = std::get_if<BuiltinWebHandler>(&*handler)) {
+          (*builtinHandler)(req, resp, conn.getLogger());
         }
       }
       else {
@@ -1890,13 +2030,16 @@ static void connectionThread(WebClientConnection&& conn)
     writen2(conn.getSocket().getHandle(), done.c_str(), done.size());
   }
   catch (const YaHTTP::ParseError& e) {
-    vinfolog("Webserver thread died with parse error exception while processing a request from %s: %s", conn.getClient().toStringWithPort(), e.what());
+    VERBOSESLOG(infolog("Webserver thread died with parse error exception while processing a request from %s: %s", conn.getClient().toStringWithPort(), e.what()),
+                conn.getLogger().error(Logr::Info, e.what(), "Webserver thread died with parse error exception while processing a request"));
   }
   catch (const std::exception& e) {
-    vinfolog("Webserver thread died with exception while processing a request from %s: %s", conn.getClient().toStringWithPort(), e.what());
+    VERBOSESLOG(infolog("Webserver thread died with exception while processing a request from %s: %s", conn.getClient().toStringWithPort(), e.what()),
+                conn.getLogger().error(Logr::Info, e.what(), "Webserver thread died with exception while processing a request"));
   }
   catch (...) {
-    vinfolog("Webserver thread died with exception while processing a request from %s", conn.getClient().toStringWithPort());
+    VERBOSESLOG(infolog("Webserver thread died with exception while processing a request from %s", conn.getClient().toStringWithPort()),
+                conn.getLogger().info(Logr::Info, "Webserver thread died with exception while processing a request"));
   }
 }
 
@@ -1905,39 +2048,44 @@ void setMaxConcurrentConnections(size_t max)
   s_connManager.setMaxConcurrentConnections(max);
 }
 
-void WebserverThread(Socket sock)
+void WebserverThread(ComboAddress listeningAddress, Socket sock)
 {
   setThreadName("dnsdist/webserv");
-  //coverity[auto_causes_copy]
-  const auto local = *dnsdist::configuration::getCurrentRuntimeConfiguration().d_webServerAddress;
-  infolog("Webserver launched on %s", local.toStringWithPort());
+  auto serverLogger = dnsdist::logging::getTopLogger("webserver")->withValues("network.local.address", Logging::Loggable(listeningAddress));
+  SLOG(infolog("Webserver launched on %s", listeningAddress.toStringWithPort()),
+       serverLogger->info(Logr::Info, "Webserver launched"));
 
   {
     const auto& config = dnsdist::configuration::getCurrentRuntimeConfiguration();
     if (!config.d_webPassword && config.d_dashboardRequiresAuthentication) {
-      warnlog("Webserver launched on %s without a password set!", local.toStringWithPort());
+      SLOG(warnlog("Webserver launched on %s without a password set, this will grant access without authentication to any client allowed by the webserver ACL!", listeningAddress.toStringWithPort()),
+           serverLogger->info(Logr::Info, "Webserver launched without a password set, this will grant access without authentication to any client allowed by the webserver ACL!"));
     }
   }
 
   for (;;) {
     try {
-      ComboAddress remote(local);
+      ComboAddress remote(listeningAddress);
       int fileDesc = SAccept(sock.getHandle(), remote);
+      dnsdist::configuration::refreshLocalRuntimeConfiguration();
 
       if (!isClientAllowedByACL(remote)) {
-        vinfolog("Connection to webserver from client %s is not allowed, closing", remote.toStringWithPort());
+        VERBOSESLOG(infolog("Connection to webserver from client %s is not allowed, closing", remote.toStringWithPort()),
+                    serverLogger->info(Logr::Info, "Connection to webserver is not allowed by ACL, closing", "client.address", Logging::Loggable(remote)));
         close(fileDesc);
         continue;
       }
 
-      WebClientConnection conn(remote, fileDesc);
-      vinfolog("Got a connection to the webserver from %s", remote.toStringWithPort());
+      WebClientConnection conn(remote, fileDesc, *serverLogger);
+      VERBOSESLOG(infolog("Got a connection to the webserver from %s", remote.toStringWithPort()),
+                  conn.getLogger().info(Logr::Info, "Got a connection to the webserver"));
 
       std::thread connThr(connectionThread, std::move(conn));
       connThr.detach();
     }
     catch (const std::exception& e) {
-      vinfolog("Had an error accepting new webserver connection: %s", e.what());
+      VERBOSESLOG(infolog("Had an error accepting new webserver connection: %s", e.what()),
+                  serverLogger->error(Logr::Info, e.what(), "Had an error accepting new webserver connection"));
     }
   }
 }

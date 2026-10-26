@@ -19,17 +19,30 @@ all the changes in database schemas as shown in the :doc:`upgrade documentation 
 .. warning::
   Once the relevant ``backend-dnssec`` switch has been set,
   stricter rules apply for filling out the database! The short version is:
-  run ``pdnsutil rectify-all-zones``, even those not secured with DNSSEC!
+  run ``pdnsutil zone rectify-all`` (``pdnsutil rectify-all-zones`` prior to
+  version 5.0), even those not secured with DNSSEC!
   For more information, see the :ref:`generic-sql-handling-dnssec-signed-zones`.
 
 To deliver a correctly signed zone with the :ref:`dnssec-pdnsutil-dnssec-defaults`, invoke:
 
 .. code-block:: shell
 
+    pdnsutil zone secure ZONE
+
+or, prior to version 5.0:
+
+.. code-block:: shell
+
     pdnsutil secure-zone ZONE
 
 To view the DS records for this zone (to transfer to the parent zone),
-run
+run:
+
+.. code-block:: shell
+
+    pdnsutil zone show ZONE
+
+or, prior to version 5.0:
 
 .. code-block:: shell
 
@@ -37,6 +50,14 @@ run
 
 For a more traditional setup with a KSK and a ZSK, use the following
 sequence of commands:
+
+.. code-block:: shell
+
+    pdnsutil zone add-key ZONE ksk 2048 active rsasha256
+    pdnsutil zone add-key ZONE zsk 1024 active rsasha256
+    pdnsutil zone add-key ZONE zsk 1024 inactive rsasha256
+
+or, prior to version 5.0:
 
 .. code-block:: shell
 
@@ -65,7 +86,8 @@ without changes. In such cases, signing happens externally to PowerDNS,
 possibly via OpenDNSSEC, ldns-sign or dnssec-sign.
 
 PowerDNS needs to know if a zone should receive DNSSEC processing. To
-configure, run ``pdnsutil set-presigned ZONE``.
+configure, run ``pdnsutil zone set-presigned ZONE`` (``pdnsutil set-presigned
+ZONE`` prior to version 5.0).
 
 If you import presigned zones into your database, please do not import
 the NSEC or NSEC3 records. PowerDNS will synthesize these itself.
@@ -74,31 +96,38 @@ Putting them in the database might cause duplicate records in responses.
 automatically.
 
 .. warning::
-  Right now, you will also need to configure NSEC(3) settings
-  for pre-signed zones using ``pdnsutil set-nsec3``. Default is NSEC, in
+  Right now, you will also need to configure NSEC/NSEC3 settings
+  for pre-signed zones using ``pdnsutil zone set-nsec3`` (``pdnsutil set-nsec3``
+  prior to version 5.0). Default is NSEC, in
   which case no further configuration is necessary.
 
 From existing DNSSEC non-PowerDNS setups, live signing
 ------------------------------------------------------
 
-The ``pdnsutil`` tool features the option to import zone keys in the
+The :doc:`pdnsutil <pdnsutil>` tool features the option to import zone keys in the
 industry standard private key format, version 1.2. To import an existing
 KSK, use
 
 .. code-block:: shell
 
+    pdnsutil zone import-key ZONE FILENAME ksk
+
+or, prior to version 5.0:
+
+.. code-block:: shell
+
     pdnsutil import-zone-key ZONE FILENAME ksk
 
-replace 'ksk' by 'zsk' for a Zone Signing Key.
+replace ``ksk`` with ``zsk`` for a Zone Signing Key.
 
 If all keys are imported using this tool, a zone will serve mostly
 identical records to before, with the important change that the RRSIG
 inception dates will be different.
 
 .. note::
-  Within PowerDNS, the 'algorithm' for RSASHA1 keys is modulated
-  based on the NSEC3 setting. So if an algorithm=7 key is imported in a
-  zone with no configured NSEC3, it will appear as algorithm 5!
+  Within PowerDNS, the ``algorithm`` for RSASHA1 keys is modulated
+  based on the NSEC3 setting. So if an ``algorithm=7`` key is imported in a
+  zone with no configured NSEC3, it will appear as ``algorithm 5``!
 
 Secure transfers
 ----------------

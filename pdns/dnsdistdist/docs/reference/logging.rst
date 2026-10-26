@@ -5,7 +5,7 @@ There are some functions to create log output.
 
 .. function:: errlog(line)
 
-  Writes a error line.
+  Writes an error line.
 
   :param str line: The line to write.
 
@@ -24,8 +24,6 @@ There are some functions to create log output.
   :param str line: The line to write.
 
 .. function:: vinfolog(line)
-
-  .. versionadded:: 1.8.0
 
   Writes an info line if dnsdist is running in verbose (debug) mode.
 

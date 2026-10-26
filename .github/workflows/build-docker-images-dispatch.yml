@@ -35,40 +35,49 @@ on:
 permissions: # least privileges, see https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
   contents: read
   actions: read
+  # This is used to complete the identity challenge
+  # with sigstore/fulcio when running outside of PRs.
+  id-token: write
 
 jobs:
   prepare:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       image-tag: ${{ steps.get-image-tag.outputs.tag }}
       image-name: ${{ steps.get-image-metadata.outputs.name }}
       image-description: ${{ steps.get-image-metadata.outputs.description }}
+      image-timestamp: ${{ steps.get-image-timestamp.outputs.timestamp }}
+    env:
+      INPUT_REF: ${{ inputs.ref }}
+      PRODUCT: ${{ inputs.product }}
     steps:
       - run: |
-          echo '${{ inputs.ref }}' | egrep -qq '^auth-.*|^rec-.*|^dnsdist-.*' && tag=$(echo '${{ inputs.ref }}' | cut -d '-' -f 2-)
+          echo "${INPUT_REF}" | egrep -qq '^auth-.*|^rec-.*|^dnsdist-.*' && tag=$(echo "${INPUT_REF}" | cut -d '-' -f 2-)
           echo "tag=$tag" >> $GITHUB_OUTPUT
         id: get-image-tag
       - run: |
-          if $(echo '${{ inputs.ref }}' | egrep -qq '^auth-.*|^rec-.*|^dnsdist-.*'); then
-            echo "version=$(echo '${{ inputs.ref }}' | cut -d '-' -f 2 | awk -F'.' '{print $1$2}')" >> $GITHUB_ENV
-            echo "branch=$(echo '${{ inputs.ref }}' | cut -d '-' -f 2- | awk -F'.' '{print "v"$1"."$2".x"}')" >> $GITHUB_ENV
+          if $(echo "${INPUT_REF}" | egrep -qq '^auth-.*|^rec-.*|^dnsdist-.*'); then
+            echo "version=$(echo "${INPUT_REF}" | cut -d '-' -f 2 | awk -F'.' '{print $1$2}')" >> $GITHUB_ENV
+            echo "branch=$(echo "${INPUT_REF}" | cut -d '-' -f 2- | awk -F'.' '{print "v"$1"."$2".x"}')" >> $GITHUB_ENV
           else
-            echo "version=$(echo '${{ inputs.ref }}' | tr '/' '-')" >> $GITHUB_ENV
-            echo "branch=${{ inputs.ref }}" >> $GITHUB_ENV
+            echo "version=$(echo "${INPUT_REF}" | tr '/' '-')" >> $GITHUB_ENV
+            echo "branch=${INPUT_REF}" >> $GITHUB_ENV
           fi
       - run: |
-          if $(echo '${{ inputs.product }}'| grep -qq auth); then
-            echo '${{ inputs.ref }}' | egrep -qq '^auth-.*' && description='PowerDNS Authoritative Server '$branch || description='EXPERIMENTAL pdns auth image'
+          if $(echo "$PRODUCT"| grep -qq auth); then
+            echo "${INPUT_REF}" | egrep -qq '^auth-.*' && description='PowerDNS Authoritative Server '$branch || description='EXPERIMENTAL pdns auth image'
             echo "name=pdns-auth-$version" >> $GITHUB_OUTPUT
-          elif (echo '${{ inputs.product }}'| grep -qq recursor); then
-            echo '${{ inputs.ref }}' | egrep -qq '^rec-.*' && description='PowerDNS Recursor '$branch || description='EXPERIMENTAL pdns recursor image'
+          elif (echo "$PRODUCT"| grep -qq recursor); then
+            echo "${INPUT_REF}" | egrep -qq '^rec-.*' && description='PowerDNS Recursor '$branch || description='EXPERIMENTAL pdns recursor image'
             echo "name=pdns-recursor-$version" >> $GITHUB_OUTPUT
           else
-            echo '${{ inputs.ref }}' | egrep -qq '^dnsdist-.*' && description='PowerDNS DNSDist '$branch || description='EXPERIMENTAL dnsdist image'
+            echo "${INPUT_REF}" | egrep -qq '^dnsdist-.*' && description='PowerDNS DNSDist '$branch || description='EXPERIMENTAL dnsdist image'
             echo "name=dnsdist-$version" >> $GITHUB_OUTPUT
           fi
           echo "description=$description" >> $GITHUB_OUTPUT
         id: get-image-metadata
+      - run: echo "timestamp=$(date -u +"%Y%m%d%H%M")" >> $GITHUB_OUTPUT
+        id: get-image-timestamp
 
   call-build-docker-image:
     uses: PowerDNS/pdns/.github/workflows/build-docker-images.yml@master
@@ -80,6 +89,7 @@ jobs:
       image-tags: |-
         latest
         ${{ needs.prepare.outputs.image-tag }}
+        ${{ needs.prepare.outputs.image-tag }}-${{ needs.prepare.outputs.image-timestamp }}
       image-description: ${{ needs.prepare.outputs.image-description }}
       platforms: ${{ inputs.platforms }}
       build-args: ${{ inputs.build-args }}

@@ -2,12 +2,22 @@ Remote Backend
 ==============
 
 * Native: Yes
-* Master: Yes\*
-* Slave: Yes\*
-* Superslave: Yes\*
+* Primary: Yes\*
+* Secondary: Yes\*
+* Producer: No
+* Consumer: No
+* Autosecondary: Yes\*
+* DNS Update: No
 * DNSSEC: Yes\*
+* Disabled data: No
+* Comments: No
+* Search: Yes\*
+* Views: No
+* API: Read-Write
+* :ref:`Multiple instances <setting-launch>`: Yes
 * Zone caching: Yes\*
-* Multiple instances: Yes
+* Module name: remote
+* Launch: ``remote``
 
 \* If provided by the responder (your script).
 
@@ -19,15 +29,24 @@ connector.
 Important notices
 -----------------
 
-There is a breaking change on v4.0 and later. Before version 4.0, the
-DNS names passed in queries were without trailing dot, after version 4.0
-the DNS names are sent with trailing dot. F.ex. example.org is now sent
-as example.org.
+Broken networks with IPv6 suffixes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 In some (broken) network setups, the IP addresses provided in the
 request (when this is an IPv6 address) may be suffixed with a ``%`` and
 the name of the network interface (e.g. ``%eth1``). Keep this in mind
 when checking the IP addresses.
+
+Breaking changes from pre v4.0 to v4.0+
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Before version 4.0, the DNS names passed in queries were sent without a trailing
+dot, after version 4.0 the DNS names are always sent with trailing dot, e.g.
+example.org is now sent as example.org.
+
+For the :ref:`remote-lookup` method, the priority field was required before 4.0.
+After 4.0, priority is added to content. This applies to any resource record which
+uses priority, for example SRV or MX.
 
 Compiling
 ---------
@@ -109,7 +128,7 @@ parameters: endpoint, timeout (default 2000ms)
     remote-connection-string=zeromq:endpoint=ipc:///tmp/tmp.sock
 
 0MQ connector implements a REQ/REP RPC model. Please see
-http://zeromq.org/ for more information.
+https://zeromq.org/ for more information.
 
 .. _remote-api:
 
@@ -130,7 +149,7 @@ Replies
 ^^^^^^^
 
 You **must** always reply with JSON hash with at least one key,
-'result'. This must be boolean false if the query failed. Otherwise it
+'result'. This must be boolean false if the query failed. Otherwise, it
 must conform to the expected result. For HTTP connector, to signal bare
 success, you can just reply with HTTP 200 OK, and omit any output. This
 will result in same outcome as sending {"result":true}.
@@ -144,10 +163,11 @@ Methods
 Methods required for different features
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 :Always required: ``initialize``, ``lookup``
-:Master operation: ``list``, ``getUpdatedMasters``, ``setNotified``
-:Slave operation: ``getUnfreshSlaveInfos``, ``startTransaction``, ``commitTransaction``, ``abortTransaction``, ``feedRecord``, ``setFresh``
-:DNSSEC operation (live-signing): ``getDomainKeys``, ``getBeforeAndAfterNamesAbsolute``
+:Primary operation: ``list``, ``getUpdatedMasters``, ``setNotified``
+:Secondary operation: ``getUnfreshSlaveInfos``, ``startTransaction``, ``commitTransaction``, ``abortTransaction``, ``feedRecord``, ``setFresh``
+:DNSSEC operation (live-signing): ``getBeforeAndAfterNamesAbsolute``, ``getDomainKeys``, ``removeDomainKey``, ``addDomainKey``, ``activateDomainKey``, ``deactivateDomainKey``, ``publishDomainKey``, ``unpublishDomainKey``, ``getTSIGKey``, ``setTSIGKey``, ``deleteTSIGKey``, ``getTSIGKeys``
 :Filling the Zone Cache: ``getAllDomains``
+:HTTP API specific: ``APILookup``
 
 ``initialize``
 ~~~~~~~~~~~~~~
@@ -155,7 +175,7 @@ Methods required for different features
 Called to initialize the backend. This is not called for HTTP connector.
 You should do your initializations here.
 
--  Mandatory: Yes (except HTTP connector)
+-  Mandatory: yes (except HTTP connector)
 -  Parameters: all parameters in connection string
 -  Reply: true on success / false on failure
 
@@ -182,14 +202,12 @@ Response:
 This method is used to do the basic query. You can omit auth, but if you
 are using DNSSEC this can lead into trouble.
 
--  Mandatory: Yes
+-  Mandatory: yes
 -  Parameters: qtype, qname, zone_id
 -  Optional parameters: remote, local, real-remote
+   - real-remote is a CIDR-netmask
 -  Reply: array of ``qtype,qname,content,ttl,domain_id,scopeMask,auth``
 -  Optional values: domain_id, scopeMask and auth
--  Note: priority field is required before 4.0, after 4.0 priority is
-   added to content. This applies to any resource record which uses
-   priority, for example SRV or MX.
 
 Example JSON/RPC
 ''''''''''''''''
@@ -198,7 +216,7 @@ Query:
 
 .. code-block:: json
 
-    {"method":"lookup", "parameters":{"qtype":"ANY", "qname":"www.example.com.", "remote":"192.0.2.24", "local":"192.0.2.1", "real-remote":"192.0.2.24", "zone-id":-1}}
+    {"method":"lookup", "parameters":{"qtype":"ANY", "qname":"www.example.com.", "remote":"192.0.2.24", "local":"192.0.2.1", "real-remote":"192.0.2.0/24", "zone-id":-1}}
 
 Response:
 
@@ -216,7 +234,7 @@ Query:
     GET /dnsapi/lookup/www.example.com./ANY HTTP/1.1
     X-RemoteBackend-remote: 192.0.2.24
     X-RemoteBackend-local: 192.0.2.1
-    X-RemoteBackend-real-remote: 192.0.2.24
+    X-RemoteBackend-real-remote: 192.0.2.0/24
     X-RemoteBackend-zone-id: -1
 
 Response:
@@ -228,14 +246,28 @@ Response:
 
     {"result":[{"qtype":"A", "qname":"www.example.com", "content":"203.0.113.2", "ttl": 60}]}
 
+``APILookup``
+~~~~~~~~~~~~~
+
+This method is similar to :ref:`remote-lookup`, but also returns disabled
+records. It allows for an extra optional parameter, ``include_disabled`` which,
+if present and set to false, will only return non-disabled records (in which
+case, the behaviour is equivalent to the ``lookup`` method).
+
+-  Mandatory: no (required if the HTTP API is to be used)
+-  Parameters: qtype, qname, zone_id
+-  Optional parameters: remote, local, real-remote, include_disabled
+-  Reply: array of ``qtype,qname,content,ttl,domain_id,scopeMask,auth,disabled``
+-  Optional values: scopeMask and auth
+
 ``list``
 ~~~~~~~~
 
-Lists all records for the zonename. If you are running dnssec, you
-should take care of setting auth to appropriate value, otherwise things
+Lists all records for the zonename. If you are running DNSSEC, you
+should take care of setting auth to appropriate value; otherwise, things
 can go wrong.
 
--  Mandatory: No (Gives AXFR support)
+-  Mandatory: no (gives AXFR support)
 -  Parameters: zonename, domain_id
 -  Optional parameters: domain_id
 -  Reply: array of ``qtype,qname,content,ttl,domain_id,scopeMask,auth``
@@ -260,7 +292,7 @@ Response (split into lines for ease of reading)
       {"qtype":"MX", "qname":"example.com", "content":"10 mx1.example.com.", "ttl": 60},
       {"qtype":"A", "qname":"www.example.com", "content":"203.0.113.2", "ttl": 60},
       {"qtype":"A", "qname":"ns1.example.com", "content":"192.0.2.2", "ttl": 60},
-      {"qtype":"A", "qname":"mx1.example.com", "content":"192.0.2.3", "ttl": 60} 
+      {"qtype":"A", "qname":"mx1.example.com", "content":"192.0.2.3", "ttl": 60}
     ]}
 
 Example HTTP/RPC
@@ -317,7 +349,7 @@ Query:
 
 ::
 
-    /dnsapi/getbeforeandafternamesabsolute/0/www.example.com
+    /dnsapi/getbeforeandafternamesabsolute/0/www.
 
 Response:
 
@@ -329,7 +361,7 @@ Response:
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 Returns the value(s) for variable kind for zone name. You **must**
-always return something, if there are no values, you shall return empty
+always return something, if there are no values, you shall return an empty
 set.
 
 *  Mandatory: yes
@@ -374,10 +406,10 @@ Response:
 
 Returns the value(s) for variable kind for zone name. Most commonly it's
 one of NSEC3PARAM, PRESIGNED, SOA-EDIT. Can be others, too. You **must**
-always return something, if there are no values, you shall return empty
+always return something, if there are no values, you shall return an empty
 array.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: name, kind
 -  Reply: array of strings
 
@@ -421,7 +453,7 @@ Replaces the value(s) on domain name for variable kind to string(s) on
 array value. The old value is discarded. Value can be an empty array,
 which can be interpreted as deletion request.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: name, kind, value
 -  Reply: true on success, false on failure
 
@@ -448,7 +480,7 @@ Query:
 .. code-block:: http
 
     PATCH /dnsapi/setdomainmetadata/example.com/PRESIGNED HTTP/1.1
-    Content-Type: application/x-www-form-urlencoded 
+    Content-Type: application/x-www-form-urlencoded
     Content-Length: 12
 
     value[]=YES&
@@ -535,7 +567,7 @@ Response:
 
 Adds key into local storage. See :ref:`remote-getdomainkeys` for more information.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: name, key=\ ``<flags,active,published,content>``, id
 -  Reply: true for success, false for failure
 
@@ -599,7 +631,7 @@ Response:
 
 Removes key id from domain name.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: name, id
 -  Reply: true for success, false for failure
 
@@ -641,7 +673,7 @@ Response:
 
 Activates key id for domain name.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: name, id
 -  Reply: true for success, false for failure
 
@@ -683,7 +715,7 @@ Response:
 
 Deactivates key id for domain name.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: name, id
 -  Reply: true for success, false for failure
 
@@ -725,7 +757,7 @@ Response:
 
 Publish key id for domain name.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: name, id
 -  Reply: true for success, false for failure
 
@@ -768,7 +800,7 @@ Response:
 
 Unpublish key id for domain name.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: name, id
 -  Reply: true for success, false for failure
 
@@ -811,8 +843,8 @@ Response:
 
 Retrieves the key needed to sign AXFR.
 
--  Mandatory: No
--  Parameters: name
+-  Mandatory: no
+-  Parameters: name, optional algorithm
 -  Reply: algorithm, content
 
 Example JSON/RPC
@@ -848,6 +880,96 @@ Response:
 
     {"result":{"algorithm":"hmac-md5","content":"kp4/24gyYsEzbuTVJRUMoqGFmN3LYgVDzJ/3oRSP7ys="}}
 
+``setTSIGKey``
+~~~~~~~~~~~~~~
+
+Registers a TSIG key.
+
+-  Mandatory: no
+-  Parameters: name, algorithm, content
+-  Reply: true on success / false on failure
+
+Example JSON/RPC
+''''''''''''''''
+
+Query:
+
+.. code-block:: json
+
+    {"method":"settsigkey","parameters":{"name":"example.com.","algorithm":"hmac-md5","content":"kp4/24gyYsEzbuTVJRUMoqGFmN3LYgVDzJ/3oRSP7ys="}}
+
+Response:
+
+.. code-block:: json
+
+    {"result":true}
+
+``deleteTSIGKey``
+~~~~~~~~~~~~~~~~~
+
+Deletes a TSIG key.
+
+-  Mandatory: no
+-  Parameters: name, optional algorithm
+-  Reply: true on success / false on failure
+
+Example JSON/RPC
+''''''''''''''''
+
+Query:
+
+.. code-block:: json
+
+    {"method":"deletetsigkey","parameters":{"name":"example.com.","algorithm":"hmac-md5"}}
+
+Response:
+
+.. code-block:: json
+
+    {"result":true}
+
+``getTSIGKeys``
+~~~~~~~~~~~~~~~
+
+Retrieves the list of all available TSIG keys.
+
+-  Mandatory: no
+-  Parameters: none
+-  Reply: list of keys (name, algorithm, content)
+
+Example JSON/RPC
+''''''''''''''''
+
+Query:
+
+.. code-block:: json
+
+    {"method":"gettsigkeys","parameters":{}}
+
+Response:
+
+.. code-block:: json
+
+    {"result":{"name":"example.com.","algorithm":"hmac-md5","content":"kp4/24gyYsEzbuTVJRUMoqGFmN3LYgVDzJ/3oRSP7ys="}}
+
+Example HTTP/RPC
+''''''''''''''''
+
+Query:
+
+.. code-block:: http
+
+    GET /dnsapi/gettsigkeys HTTP/1.1
+
+Response:
+
+.. code-block:: http
+
+    HTTP/1.1 200 OK
+    Content-Type: text/javascript; charset=utf-8
+
+    {"result":{"name":"example.com.","algorithm":"hmac-md5","content":"kp4/24gyYsEzbuTVJRUMoqGFmN3LYgVDzJ/3oRSP7ys="}}
+
 ``getDomainInfo``
 ~~~~~~~~~~~~~~~~~
 
@@ -857,7 +979,7 @@ Everything else will default to something. Default values: serial:0,
 kind:NATIVE, id:-1, notified_serial:-1, last_check:0, masters: [].
 Masters, if present, must be array of strings.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: name
 -  Reply: zone
 -  Optional values: serial, kind, id, notified_serial, last_check,
@@ -894,14 +1016,14 @@ Response:
     HTTP/1.1 200 OK
     content-Type: text/javascript: charset=utf-8
 
-    {"result":{id:1,"zone":"example.com","kind":"NATIVE","serial":2002010100}}
+    {"result":{"id":1,"zone":"example.com","kind":"NATIVE","serial":2002010100}}
 
 ``setNotified``
 ~~~~~~~~~~~~~~~
 
 Updates last notified serial for the domain id. Any errors are ignored.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: id, serial
 -  Reply: true for success, false for failure
 
@@ -945,9 +1067,9 @@ Response:
 ``isMaster``
 ~~~~~~~~~~~~
 
-Determines whether given IP is master for given domain name.
+Determines whether given IP is primary for given domain name.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: name,ip
 -  Reply: true for success, false for failure.
 
@@ -987,14 +1109,14 @@ Response:
 ``superMasterBackend``
 ~~~~~~~~~~~~~~~~~~~~~~
 
-Creates new domain with given record(s) as master servers. IP address is
+Creates new domain with given record(s) as primary servers. IP address is
 the address where notify is received from. nsset is array of NS resource
 records.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: ip,domain,nsset,account
 -  Reply: true for success, false for failure. can also return
-   account=>name of account< and nameserver.
+   ``account`` = ``name of account`` and nameserver.
 
 Example JSON/RPC
 ''''''''''''''''
@@ -1053,7 +1175,7 @@ Alternative response
 Creates new domain. This method is called when NOTIFY is received and
 you are superslaving.
 
- - Mandatory: No
+ - Mandatory: no
  - Parameters: ip, domain
  - Optional parameters: nameserver, account
  - Reply: true for success, false for failure
@@ -1099,7 +1221,7 @@ Response:
 This method replaces a given resource record with new set. The new qtype
 can be different from the old.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: domain_id, qname, qtype, rrset
 -  Reply: true for success, false for failure
 
@@ -1146,7 +1268,7 @@ Response:
 Asks to feed new record into system. If startTransaction was called,
 trxId identifies a transaction. It is not always called by PowerDNS.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: rr, trxid
 -  Reply: true for success, false for failure
 
@@ -1192,13 +1314,14 @@ Response:
 ``feedEnts``
 ~~~~~~~~~~~~
 
-This method is used by pdnsutil rectify-zone to populate missing
+This method is used by ``pdnsutil zone rectify`` (``pdnsutil rectify-zone``
+prior to version 5.0) to populate missing
 non-terminals. This is used when you have, say, record like
 _sip._upd.example.com, but no _udp.example.com. PowerDNS requires
 that there exists a non-terminal in between, and this instructs you to
 add one. If startTransaction is called, trxid identifies a transaction.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: nonterm, trxid
 -  Reply: true for success, false for failure
 
@@ -1245,7 +1368,7 @@ Response:
 Same as :ref:`remote-feedents`, but provides NSEC3 hashing
 parameters. Note that salt is BYTE value, and can be non-readable text.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: trxid, domain_id, domain, times, salt, narrow, nonterm
 -  Reply: true for success, false for failure
 
@@ -1292,7 +1415,7 @@ Response:
 Starts a new transaction. Transaction ID is chosen for you. Used to
 identify f.ex. AXFR transfer.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: domain_id, domain, trxid
 -  Reply: true for success, false for failure
 
@@ -1339,7 +1462,7 @@ Response:
 Signals successful transfer and asks to commit data into permanent
 storage.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: trxid
 -  Reply: true for success, false for failure
 
@@ -1383,7 +1506,7 @@ Response:
 
 Signals failed transaction, and that you should rollback any changes.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: trxid
 -  Reply: true for success, false for failure
 
@@ -1428,7 +1551,7 @@ Response:
 Asks you to calculate a new serial based on the given data and update
 the serial.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: domain,sd
 -  Reply: true for success, false for failure
 
@@ -1473,7 +1596,7 @@ Response:
 ~~~~~~~~~~~~~~~~~~~~
 
 Can be used to send arbitrary commands to your backend using
-:doc:`../dnssec/pdnsutil`.
+:doc:`../manpages/pdnsutil.1`.
 
 -  Mandatory: no
 -  Parameters: query
@@ -1605,7 +1728,7 @@ Response:
 ``getUpdatedMasters``
 ~~~~~~~~~~~~~~~~~~~~~
 
-Used to find out any updates to master domains. This is used to trigger notifications in master mode.
+Used to find out any updates to primary domains. This is used to trigger notifications in primary mode.
 
 -  Mandatory: no
 -  Parameters: none
@@ -1647,7 +1770,7 @@ Response:
 ``getUnfreshSlaveInfos``
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Used to find out if slave zones need checking of the master's SOA Serial.
+Used to find out if primary zones need checking of the primary's SOA Serial.
 
 -  Mandatory: no
 -  Parameters: none
@@ -1689,10 +1812,10 @@ Response:
 ``setFresh``
 ~~~~~~~~~~~~
 
-Called when a slave freshness check succeeded. This does not indicate the
-zone was updated on the master.
+Called when a primary freshness check succeeded. This does not indicate the
+zone was updated on the primary.
 
--  Mandatory: No
+-  Mandatory: no
 -  Parameters: id
 -  Reply: true for success, false for failure
 
@@ -1742,10 +1865,10 @@ Query:
 
 .. code-block:: json
 
-    { 
+    {
       "method": "lookup",
       "parameters": {
-         "qname": "example.com", 
+         "qname": "example.com",
          "qtype": "SOA",
          "zone_id": "-1"
       }
@@ -1756,10 +1879,10 @@ Reply:
 .. code-block:: json
 
     {
-      "result": 
-       [ 
+      "result":
+       [
          { "qtype": "SOA",
-           "qname": "example.com", 
+           "qname": "example.com",
            "content": "dns1.icann.org. hostmaster.icann.org. 2012080849 7200 3600 1209600 3600",
            "ttl": 3600,
            "domain_id": -1

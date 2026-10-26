@@ -36,13 +36,10 @@
 #include <netinet/in.h>
 #include <iostream>
 #include <sstream>
-#include <sys/types.h>
 #include <csignal>
 
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
-#include <boost/algorithm/string.hpp> 
 #include <thread>
 
 #include "misc.hh"
@@ -59,6 +56,7 @@ extern StatBag S;
 
 DynListener::g_funkdb_t DynListener::s_funcdb;
 DynListener::g_funk_t* DynListener::s_restfunc;
+std::string DynListener::s_exitfuncname;
 
 DynListener::~DynListener()
 {
@@ -66,28 +64,23 @@ DynListener::~DynListener()
     unlink(d_socketname.c_str());
 }
 
-void DynListener::createSocketAndBind(int family, struct sockaddr*local, size_t len)
+void DynListener::createSocketAndBind(SockaddrWrapper& wrap)
 {
-  d_s=socket(family, SOCK_STREAM,0);
+  d_s = socket(wrap.sin4.sin_family, SOCK_STREAM, 0);
   setCloseOnExec(d_s);
 
   if(d_s < 0) {
-    if (family == AF_UNIX)
-      g_log<<Logger::Error<<"Unable to create control socket at '"<<((struct sockaddr_un*)local)->sun_path<<"', reason: "<<stringerror()<<endl;
-    else
-      g_log<<Logger::Error<<"Unable to create control socket on '"<<((ComboAddress *)local)->toStringWithPort()<<"', reason: "<<stringerror()<<endl;
+    SLOG(g_log<<Logger::Error<<"Unable to create control socket on '"<<wrap.toStringWithPort()<<"', reason: "<<stringerror()<<endl,
+         d_slog->error(Logr::Error, errno, "Unable to create control socket", "socket", Logging::Loggable(wrap.toStringWithPort())));
     exit(1);
   }
   
-  int tmp=1;
-  if(setsockopt(d_s,SOL_SOCKET,SO_REUSEADDR,(char*)&tmp,sizeof tmp)<0)
-    throw PDNSException(string("Setsockopt failed on control socket: ")+stringerror());
+  setReuseAddr(d_s);
     
-  if(bind(d_s, local, len) < 0) {
-    if (family == AF_UNIX)
-      g_log<<Logger::Critical<<"Unable to bind to control socket at '"<<((struct sockaddr_un*)local)->sun_path<<"', reason: "<<stringerror()<<endl;
-    else
-      g_log<<Logger::Critical<<"Unable to bind to control socket on '"<<((ComboAddress *)local)->toStringWithPort()<<"', reason: "<<stringerror()<<endl;
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  if(bind(d_s, reinterpret_cast<const struct sockaddr*>(&wrap), wrap.getSocklen()) < 0) {
+    SLOG(g_log<<Logger::Critical<<"Unable to bind to control socket on '"<<wrap.toStringWithPort()<<"', reason: "<<stringerror()<<endl,
+         d_slog->error(Logr::Critical, errno, "Unable to bind to control socket", "socket", Logging::Loggable(wrap.toStringWithPort())));
     exit(1);
   }
 }
@@ -104,7 +97,8 @@ bool DynListener::testLive(const string& fname)
   }
 
   if (makeUNsockaddr(fname, &addr)) {
-    g_log<<Logger::Critical<<"Unable to open controlsocket, path '"<<fname<<"' is not a valid UNIX socket path."<<endl;
+    SLOG(g_log<<Logger::Critical<<"Unable to open controlsocket, path '"<<fname<<"' is not a valid UNIX socket path."<<endl,
+         d_slog->info(Logr::Critical, "Unable to open control socket, for it is not a valid UNIX socket path", "path", Logging::Loggable(fname)));
     exit(1);
   }
 
@@ -116,64 +110,70 @@ bool DynListener::testLive(const string& fname)
 void DynListener::listenOnUnixDomain(const string& fname)
 {
   if(testLive(fname)) {
-    g_log<<Logger::Critical<<"Previous controlsocket '"<<fname<<"' is in use"<<endl;
+    SLOG(g_log<<Logger::Critical<<"Previous controlsocket '"<<fname<<"' is in use"<<endl,
+         d_slog->info(Logr::Critical, "Previous control socket is in use", "path", Logging::Loggable(fname)));
     exit(1);
   }
   int err=unlink(fname.c_str());
   if(err < 0 && errno!=ENOENT) {
-    g_log<<Logger::Critical<<"Unable to remove (previous) controlsocket at '"<<fname<<"': "<<stringerror()<<endl;
+    SLOG(g_log<<Logger::Critical<<"Unable to remove (previous) controlsocket at '"<<fname<<"': "<<stringerror()<<endl,
+         d_slog->error(Logr::Critical, errno, "Unable to remove (previous) control socket", "path", Logging::Loggable(fname)));
     exit(1);
   }
 
   struct sockaddr_un local;
   if (makeUNsockaddr(fname, &local)) {
-    g_log<<Logger::Critical<<"Unable to bind to controlsocket, path '"<<fname<<"' is not a valid UNIX socket path."<<endl;
+    SLOG(g_log<<Logger::Critical<<"Unable to bind to controlsocket, path '"<<fname<<"' is not a valid UNIX socket path."<<endl,
+         d_slog->info(Logr::Critical, "Unable to bind to control socket, for it is not a valid UNIX socket path", "path", Logging::Loggable(fname)));
     exit(1);
   }
+
+  SockaddrWrapper wrap(&local);
   
-  createSocketAndBind(AF_UNIX, (struct sockaddr*)& local, sizeof(local));
-  d_socketname=fname;
-  if(!arg()["setgid"].empty()) {
-    if(chmod(fname.c_str(),0660)<0)
-      g_log<<Logger::Error<<"Unable to change group access mode of controlsocket at '"<<fname<<"', reason: "<<stringerror()<<endl;
-    if(chown(fname.c_str(),static_cast<uid_t>(-1), strToGID(arg()["setgid"]))<0)
-      g_log<<Logger::Error<<"Unable to change group ownership of controlsocket at '"<<fname<<"', reason: "<<stringerror()<<endl;
-  }
-  
+  createSocketAndBind(wrap);
+  wrap.tightenSocketPermissions(d_slog, ::arg()["setgid"]);
+
   listen(d_s, 10);
   
-  g_log<<Logger::Warning<<"Listening on controlsocket in '"<<fname<<"'"<<endl;
+  d_socketname=fname;
+  SLOG(g_log<<Logger::Warning<<"Listening on controlsocket in '"<<fname<<"'"<<endl,
+       d_slog->info(Logr::Warning, "Listening on control socket", "path", Logging::Loggable(fname)));
   d_nonlocal=true;
 }
 
 void DynListener::listenOnTCP(const ComboAddress& local)
 {
-  if (local.isIPv4()) {
-    createSocketAndBind(AF_INET, (struct sockaddr*)& local, local.getSocklen());
-  } else if (local.isIPv6()) {
-    createSocketAndBind(AF_INET6, (struct sockaddr*)& local, local.getSocklen());
-  }
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  SockaddrWrapper wrap(reinterpret_cast<const struct sockaddr*>(&local), local.getSocklen());
+  
+  createSocketAndBind(wrap);
+
   listen(d_s, 10);
 
   d_socketaddress=local;
-  g_log<<Logger::Warning<<"Listening on controlsocket on '"<<local.toStringWithPort()<<"'"<<endl;
+  SLOG(g_log<<Logger::Warning<<"Listening on controlsocket on '"<<local.toStringWithPort()<<"'"<<endl,
+       d_slog->info(Logr::Warning, "Listening on control socket", "socket", Logging::Loggable(local.toStringWithPort())));
+ 
   d_nonlocal=true;
 
   if(!::arg()["tcp-control-range"].empty()) {
     d_tcprange.toMasks(::arg()["tcp-control-range"]);
-    g_log<<Logger::Warning<<"Only allowing TCP control from: "<<d_tcprange.toString()<<endl;
+    SLOG(g_log<<Logger::Warning<<"Only allowing TCP control from: "<<d_tcprange.toString()<<endl,
+         d_slog->info(Logr::Warning, "Only allowing TCP control from", "source", Logging::Loggable(d_tcprange)));
   }
 }
 
 
-DynListener::DynListener(const ComboAddress& local) :
+DynListener::DynListener(Logr::log_t slog, const ComboAddress& local) :
   d_tcp(true)
 {
+  d_slog = slog;
   listenOnTCP(local);
 }
 
-DynListener::DynListener(const string &progname)
+DynListener::DynListener(Logr::log_t slog, const string &progname)
 {
+  d_slog = slog;
 
   if(!progname.empty()) {
     string socketname = ::arg()["socket-dir"];
@@ -188,10 +188,13 @@ DynListener::DynListener(const string &progname)
     socketname += "/";
     cleanSlashes(socketname);
     
-    if(!mkdir(socketname.c_str(),0700)) // make /var directory, if needed
-      g_log<<Logger::Warning<<"Created local state directory '"<<socketname<<"'"<<endl;
+    if(mkdir(socketname.c_str(),0700) == 0) { // make /var directory, if needed
+      SLOG(g_log<<Logger::Warning<<"Created local state directory '"<<socketname<<"'"<<endl,
+           d_slog->info(Logr::Warning, "Created local state directory", "path", Logging::Loggable(socketname)));
+    }
     else if(errno!=EEXIST) {
-      g_log<<Logger::Critical<<"Unable to create socket directory ("<<socketname<<") and it does not exist yet"<<endl;
+      SLOG(g_log<<Logger::Critical<<"Unable to create socket directory ("<<socketname<<") and it does not exist yet"<<endl,
+           d_slog->error(Logr::Critical, errno, "Unable to create socket directory", "path", Logging::Loggable(socketname)));
       exit(1);
     }
     
@@ -221,13 +224,16 @@ string DynListener::getLine()
     for(;;) {
       d_client = accept(d_s, reinterpret_cast<sockaddr *>(&remote), &remlen);
       if(d_client<0) {
-        if(errno!=EINTR)
-          g_log<<Logger::Error<<"Unable to accept controlsocket connection ("<<d_s<<"): "<<stringerror()<<endl;
+        if(errno!=EINTR) {
+          SLOG(g_log<<Logger::Error<<"Unable to accept controlsocket connection ("<<d_s<<"): "<<stringerror()<<endl,
+               d_slog->error(Logr::Error, errno, "Unable to accept control socket connection", "socket", Logging::Loggable(d_s)));
+        }
         continue;
       }
 
       if(d_tcp && !d_tcprange.match(&remote)) { // checks if the remote is within the permitted range.
-        g_log<<Logger::Error<<"Access denied to remote "<<remote.toString()<<" because not allowed"<<endl;
+        SLOG(g_log<<Logger::Error<<"Access denied to remote "<<remote.toString()<<" because not allowed"<<endl,
+             d_slog->info(Logr::Error, "Access denied, not within allowed range", "remote", Logging::Loggable(remote)));
         writen2(d_client, "Access denied to "+remote.toString()+"\n");
         close(d_client);
         continue;
@@ -236,14 +242,16 @@ string DynListener::getLine()
       std::shared_ptr<FILE> fp=std::shared_ptr<FILE>(fdopen(dup(d_client), "r"), fclose);
       if(d_tcp) {
         if (fgets(mesg.data(), static_cast<int>(mesg.size()), fp.get()) == nullptr) {
-          g_log<<Logger::Error<<"Unable to receive password from controlsocket ("<<d_client<<"): "<<stringerror()<<endl;
+          SLOG(g_log<<Logger::Error<<"Unable to receive password from controlsocket ("<<d_client<<"): "<<stringerror()<<endl,
+                d_slog->error(Logr::Error, errno, "Unable to receive password from control socket", "socket", Logging::Loggable(d_client)));
           close(d_client);
           continue;
         }
         string password(mesg.data());
         boost::trim(password);
-        if(password.empty() || password!=arg()["tcp-control-secret"]) {
-          g_log<<Logger::Error<<"Wrong password on TCP control socket"<<endl;
+        if(password.empty() || !constantTimeStringEquals(password, arg()["tcp-control-secret"])) {
+          SLOG(g_log<<Logger::Error<<"Wrong password on TCP control socket"<<endl,
+               d_slog->info(Logr::Error, "Wrong password on control socket"));
           writen2(d_client, "Wrong password");
 
           close(d_client);
@@ -253,14 +261,16 @@ string DynListener::getLine()
       errno=0;
       if (fgets(mesg.data(), static_cast<int>(mesg.size()), fp.get()) == nullptr) {
         if (errno) {
-          g_log<<Logger::Error<<"Unable to receive line from controlsocket ("<<d_client<<"): "<<stringerror()<<endl;
+          SLOG(g_log<<Logger::Error<<"Unable to receive line from controlsocket ("<<d_client<<"): "<<stringerror()<<endl,
+               d_slog->error(Logr::Error, errno, "Unable to receive line from control socket", "socket", Logging::Loggable(d_client)));
         }
         close(d_client);
         continue;
       }
       
       if (strlen(mesg.data()) == mesg.size()) {
-        g_log<<Logger::Error<<"Line on controlsocket ("<<d_client<<") was too long"<<endl;
+        SLOG(g_log<<Logger::Error<<"Line on controlsocket ("<<d_client<<") was too long"<<endl,
+             d_slog->info(Logr::Error, "Line too long on control socket", "socket", Logging::Loggable(d_client)));
         close(d_client);
         continue;
       }
@@ -280,7 +290,14 @@ string DynListener::getLine()
     }
 
     if (len == 0) {
-      throw PDNSException("Guardian exited - going down as well");
+      // File descriptor has been closed. We translate this into an exit
+      // request, but if it did not succeed and we are back attempting to
+      // read data, there's not much we can do but throw up.
+      static bool firstTime = true;
+      if (!firstTime) {
+        throw PDNSException("Guardian exited - going down as well");
+      }
+      firstTime = false;
     }
 
     if (static_cast<size_t>(len) == mesg.size()) {
@@ -302,7 +319,8 @@ void DynListener::sendlines(const string &l)
       ret=send(d_client, l.c_str()+sent, l.length()-sent, 0); 
 
       if(ret<0 || !ret) {
-        g_log<<Logger::Error<<"Error sending data to pdns_control: "<<stringerror()<<endl;
+        SLOG(g_log<<Logger::Error<<"Error sending data to pdns_control: "<<stringerror()<<endl,
+             d_slog->error(Logr::Error, errno, "Error sending data to pdns_control"));
         break;
       }
       sent+=ret;
@@ -314,9 +332,18 @@ void DynListener::sendlines(const string &l)
       lines.append("\n");
     lines.append(1, '\0');
     lines.append(1, '\n');
-    if((unsigned int)write(1, lines.c_str(), lines.length()) != lines.length())
-      g_log<<Logger::Error<<"Error sending data to console: "<<stringerror()<<endl;
+    if((unsigned int)write(1, lines.c_str(), lines.length()) != lines.length()) {
+      SLOG(g_log<<Logger::Error<<"Error sending data to console: "<<stringerror()<<endl,
+           d_slog->error(Logr::Error, errno, "Error sending data to console"));
+    }
   }
+}
+
+void DynListener::registerExitFunc(const string &name, g_funk_t *gf) // NOLINT(readability-identifier-length)
+{
+  g_funkwithusage_t funk = {gf, "", "quit daemon"};
+  s_exitfuncname = name;
+  s_funcdb[s_exitfuncname] = std::move(funk);
 }
 
 void DynListener::registerFunc(const string &name, g_funk_t *gf, const string &usage, const string &args)
@@ -339,6 +366,9 @@ void DynListener::theListener()
 
     for(;;) {
       string line=getLine();
+      if (line.empty()) {
+        line = s_exitfuncname;
+      }
       boost::trim_right(line);
 
       vector<string>parts;
@@ -351,39 +381,47 @@ void DynListener::theListener()
       try {
         parts[0] = toUpper( parts[0] );
         if(s_funcdb.count(parts[0]))
-          sendlines((*(s_funcdb[parts[0]].func))(parts,d_ppid));
+          sendlines((*(s_funcdb[parts[0]].func))(parts,d_ppid,d_slog));
         else if (parts[0] == "HELP")
           sendlines(getHelp());
         else if(s_restfunc)
-          sendlines((*s_restfunc)(parts,d_ppid));
+          sendlines((*s_restfunc)(parts,d_ppid,d_slog));
         else
           sendlines("Unknown command: '"+parts[0]+"'");
       }
       catch(PDNSException &AE) {
-        g_log<<Logger::Error<<"Non-fatal error in control listener command '"<<line<<"': "<<AE.reason<<endl;
+        SLOG(g_log<<Logger::Error<<"Non-fatal error in control listener command '"<<line<<"': "<<AE.reason<<endl,
+             d_slog->error(Logr::Error, AE.reason, "Non-fatal error in control listener command", "input", Logging::Loggable(line)));
       }
       catch(string &E) {
-        g_log<<Logger::Error<<"Non-fatal error 2 in control listener command '"<<line<<"': "<<E<<endl;
+        SLOG(g_log<<Logger::Error<<"Non-fatal error 2 in control listener command '"<<line<<"': "<<E<<endl,
+             d_slog->error(Logr::Error, E, "Non-fatal error 2 in control listener command", "input", Logging::Loggable(line)));
       }
       catch(std::exception& e) {
-        g_log<<Logger::Error<<"Non-fatal STL error in control listener command '"<<line<<"': "<<e.what()<<endl;
+        SLOG(g_log<<Logger::Error<<"Non-fatal STL error in control listener command '"<<line<<"': "<<e.what()<<endl,
+             d_slog->error(Logr::Error, e.what(), "Non-fatal STL error in control listener command", "input", Logging::Loggable(line)));
       }
       catch(...) {
-        g_log<<Logger::Error<<"Non-fatal error in control listener command '"<<line<<"': unknown exception occurred"<<endl;
+        SLOG(g_log<<Logger::Error<<"Non-fatal error in control listener command '"<<line<<"': unknown exception occurred"<<endl,
+             d_slog->error(Logr::Error, "unknown exception occurred", "Non-fatal error in control listener command", "input", Logging::Loggable(line)));
       }
     }
   }
   catch(PDNSException &AE) {
-    g_log<<Logger::Error<<"Fatal error in control listener: "<<AE.reason<<endl;
+    SLOG(g_log<<Logger::Error<<"Fatal error in control listener: "<<AE.reason<<endl,
+         d_slog->error(Logr::Error, AE.reason, "Fatal error in control listener"));
   }
   catch(string &E) {
-    g_log<<Logger::Error<<"Fatal error 2 in control listener: "<<E<<endl;
+    SLOG(g_log<<Logger::Error<<"Fatal error 2 in control listener: "<<E<<endl,
+         d_slog->error(Logr::Error, E, "Fatal error 2 in control listener"));
   }
   catch(std::exception& e) {
-    g_log<<Logger::Error<<"Fatal STL error in control listener: "<<e.what()<<endl;
+    SLOG(g_log<<Logger::Error<<"Fatal STL error in control listener: "<<e.what()<<endl,
+         d_slog->error(Logr::Error, e.what(), "Fatal STL error in control listener"));
   }
   catch(...) {
-    g_log<<Logger::Error<<"Fatal: unknown exception in control listener occurred"<<endl;
+    SLOG(g_log<<Logger::Error<<"Fatal: unknown exception in control listener occurred"<<endl,
+         d_slog->error(Logr::Error, "unknown exception occurred", "Fatal error in control listener"));
   }
 }
 
@@ -400,7 +438,7 @@ string DynListener::getHelp()
   {
     vector<string> parts;
     parts.push_back("HELP");
-    rest=((*s_restfunc)(parts,d_ppid));
+    rest=((*s_restfunc)(parts,d_ppid,d_slog));
     boost::split(funcs, rest, boost::is_any_of("\n"));
   }
 

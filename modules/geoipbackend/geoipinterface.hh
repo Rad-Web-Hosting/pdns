@@ -55,18 +55,18 @@ public:
   virtual bool queryCityV6(string& ret, GeoIPNetmask& gl, const string& ip) = 0;
   virtual bool queryLocation(GeoIPNetmask& gl, const string& ip,
                              double& latitude, double& longitude,
-                             boost::optional<int>& alt, boost::optional<int>& prec)
+                             std::optional<int>& alt, std::optional<int>& prec)
     = 0;
   virtual bool queryLocationV6(GeoIPNetmask& gl, const string& ip,
                                double& latitude, double& longitude,
-                               boost::optional<int>& alt, boost::optional<int>& prec)
+                               std::optional<int>& alt, std::optional<int>& prec)
     = 0;
 
   virtual ~GeoIPInterface() = default;
 
-  static unique_ptr<GeoIPInterface> makeInterface(const string& dbStr);
+  static unique_ptr<GeoIPInterface> makeInterface(Logr::log_t slog, const string& dbStr);
 
 private:
-  static unique_ptr<GeoIPInterface> makeMMDBInterface(const string& fname, const map<string, string>& opts);
+  static unique_ptr<GeoIPInterface> makeMMDBInterface(Logr::log_t slog, const string& fname, const map<string, string>& opts);
   static unique_ptr<GeoIPInterface> makeDATInterface(const string& fname, const map<string, string>& opts);
 };

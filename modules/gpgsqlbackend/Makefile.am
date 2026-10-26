@@ -4,7 +4,8 @@ pkglib_LTLIBRARIES = libgpgsqlbackend.la
 
 EXTRA_DIST = \
 	OBJECTFILES \
-	OBJECTLIBS
+	OBJECTLIBS \
+	meson.build
 
 dist_doc_DATA = \
 	schema.pgsql.sql \
@@ -19,5 +20,9 @@ libgpgsqlbackend_la_SOURCES = \
 	gpgsqlbackend.cc gpgsqlbackend.hh \
 	spgsql.cc spgsql.hh
 
+if GPGSQLBACKEND_DYNMODULE
 libgpgsqlbackend_la_LDFLAGS = -module -avoid-version
+else
+libgpgsqlbackend_la_LDFLAGS = -static -avoid-version
+endif
 libgpgsqlbackend_la_LIBADD = $(PGSQL_LIBS)

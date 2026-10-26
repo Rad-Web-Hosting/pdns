@@ -33,35 +33,34 @@
 #include <arpa/inet.h>
 
 #include <iostream>
-#include <optional>
 #include <string>
 #include <vector>
+#include <boost/optional.hpp>
+
 #include "qtype.hh"
 #include "dns.hh"
 #include "misc.hh"
 #include "utility.hh"
 #include "logger.hh"
+#include "logging.hh"
 #include "pdnsexception.hh"
 #include "dnsrecords.hh"
-
-class UeberBackend;
-class DNSSECKeeper;
 
 
 //! This class represents DNS packets, either received or to be sent.
 class DNSPacket
 {
 public:
-  DNSPacket(bool isQuery);
+  DNSPacket(Logr::log_t slog, bool isQuery);
   DNSPacket(const DNSPacket &orig) = default;
-  DNSPacket & operator=(const DNSPacket &) = default;
+  DNSPacket & operator=(const DNSPacket &) = delete;
 
   int noparse(const char *mesg, size_t len); //!< just suck the data inward
   int parse(const char *mesg, size_t len); //!< parse a raw UDP or TCP packet and suck the data inward
   const string& getString(bool throwsOnTruncation=false); //!< for serialization - just passes the whole packet. If throwsOnTruncation is set, an exception will be raised if the records are too large to fit inside a single DNS payload, instead of setting the TC bit
 
   // address & socket manipulation
-  void setRemote(const ComboAddress*, std::optional<ComboAddress> = std::nullopt);
+  void setRemote(const ComboAddress*);
   ComboAddress getRemote() const;
   ComboAddress getInnerRemote() const; // for proxy protocol
   Netmask getRealRemote() const;
@@ -80,11 +79,11 @@ public:
 
   boost::optional<ComboAddress> d_anyLocal;
 
-  Utility::sock_t getSocket() const
+  [[nodiscard]] int getSocket() const
   {
     return d_socket;
   }
-  void setSocket(Utility::sock_t sock);
+  void setSocket(int sock);
 
   // these manipulate 'd'
   void setA(bool); //!< make this packet authoritative - manipulates 'd'
@@ -111,8 +110,6 @@ public:
   unsigned int getMinTTL(); //!< returns lowest TTL of any record in the packet
   bool isEmpty(); //!< returns true if there are no rrs in the packet
 
-  vector<DNSZoneRecord*> getAPRecords(); //!< get a vector with DNSZoneRecords that need additional processing
-  vector<DNSZoneRecord*> getAnswerRecords(); //!< get a vector with DNSZoneRecords that are answers
   vector<DNSZoneRecord*> getServiceRecords(); //!< Get a vector with all Service-style (SVCB) records
   void setCompress(bool compress);
 
@@ -142,7 +139,7 @@ public:
 
   DNSName qdomain;  //!< qname of the question 4 - unsure how this is used
   DNSName qdomainwild;  //!< wildcard matched by qname, used by LuaPolicyEngine
-  DNSName qdomainzone;  //!< zone name for the answer (as reflected in SOA for negative responses), used by LuaPolicyEngine
+  ZoneName qdomainzone;  //!< zone name for the answer (as reflected in SOA for negative responses), used by LuaPolicyEngine and AXFR
   string d_peer_principal;
   const DNSName& getTSIGKeyname() const;
 
@@ -165,20 +162,24 @@ public:
 
   bool getTSIGDetails(TSIGRecordContent* tr, DNSName* keyname, uint16_t* tsigPos=nullptr) const;
   void setTSIGDetails(const TSIGRecordContent& tr, const DNSName& keyname, const string& secret, const string& previous, bool timersonly=false);
+  bool validateTSIG(const TSIGTriplet& tsigTriplet, const TSIGRecordContent& tsigContent, const std::string& previousMAC, const std::string& theirMAC, bool timersOnly) const;
   bool getTKEYRecord(TKEYRecordContent* tr, DNSName* keyname) const;
 
   vector<DNSZoneRecord>& getRRS() { return d_rrs; }
-  bool checkForCorrectTSIG(UeberBackend* B, DNSName* keyname, string* secret, TSIGRecordContent* trc) const;
 
   static uint16_t s_udpTruncationThreshold;
   static bool s_doEDNSSubnetProcessing;
   static bool s_doEDNSCookieProcessing;
-  static string s_EDNSCookieKey;
+  static LockGuarded<string> s_EDNSCookieKey;
+  static LockGuarded<std::vector<std::string>> s_OldEDNSCookieKeys;
   EDNSSubnetOpts d_eso;
 
 #ifdef ENABLE_GSS_TSIG
   void cleanupGSS(int rcode);
 #endif
+
+  Netmask d_span; // network matching this packet, when views are used
+  std::string d_view; // view matching this packet, when views are used
 
 private:
   void pasteQ(const char *question, int length); //!< set the question of this packet, useful for crafting replies
@@ -208,4 +209,6 @@ private:
   bool d_ednscookievalid{false};
   bool d_haveednssection{false};
   bool d_isQuery;
+
+  Logr::log_t d_slog;
 };

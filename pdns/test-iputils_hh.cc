@@ -71,6 +71,45 @@ BOOST_AUTO_TEST_CASE(test_ComboAddress) {
   BOOST_CHECK_THROW(ComboAddress("[::1]:-6"), PDNSException); // Port no. too low
 }
 
+BOOST_AUTO_TEST_CASE(test_SockaddrWrapper) {
+  SockaddrWrapper local("127.0.0.1", 53);
+  BOOST_CHECK_EQUAL(local.sin4.sin_family, AF_INET);
+  BOOST_CHECK_EQUAL(local.sin4.sin_port, htons(53));
+  BOOST_CHECK_EQUAL(local.sin4.sin_addr.s_addr, htonl(0x7f000001UL));
+
+  SockaddrWrapper localun("/run/pdns/http.sock", 0);
+  BOOST_CHECK_EQUAL(localun.sinun.sun_family, AF_UNIX);
+
+  SockaddrWrapper withport("213.244.168.210:53");
+  BOOST_CHECK_EQUAL(withport.sin4.sin_port, htons(53));
+
+  SockaddrWrapper withportO("213.244.168.210:53", 5300);
+  BOOST_CHECK_EQUAL(withportO.sin4.sin_port, htons(53));
+
+  withport = SockaddrWrapper("[::]:53");
+  BOOST_CHECK_EQUAL(withport.sin4.sin_port, htons(53));
+
+  withport = SockaddrWrapper("[::]:5300", 53);
+  BOOST_CHECK_EQUAL(withport.sin4.sin_port, htons(5300));
+
+  SockaddrWrapper defaultport("213.244.168.210");
+  BOOST_CHECK_EQUAL(defaultport.sin4.sin_port, htons(0));
+
+  defaultport = SockaddrWrapper("[::1]");
+  BOOST_CHECK_EQUAL(defaultport.sin4.sin_port, htons(0));
+
+  defaultport = SockaddrWrapper("::1");
+  BOOST_CHECK_EQUAL(defaultport.sin4.sin_port, htons(0));
+
+  BOOST_CHECK_THROW(SockaddrWrapper("127.0.0.1:70000"), PDNSException); // Port no. too high
+  BOOST_CHECK_THROW(SockaddrWrapper("127.0.0.1:-6"), PDNSException); // Port no. too low
+  BOOST_CHECK_THROW(SockaddrWrapper("[::1]:70000"), PDNSException); // Port no. too high
+  BOOST_CHECK_THROW(SockaddrWrapper("[::1]:-6"), PDNSException); // Port no. too low
+
+  BOOST_CHECK_THROW(SockaddrWrapper("\"\""), PDNSException);
+  BOOST_CHECK_THROW(SockaddrWrapper("''"), PDNSException);
+}
+
 BOOST_AUTO_TEST_CASE(test_ComboAddressCompare) {
   ComboAddress a, b;
   a.reset();
@@ -143,6 +182,19 @@ BOOST_AUTO_TEST_CASE(test_ComboAddressTruncate) {
   BOOST_CHECK_EQUAL(ca6.toString(), "2001::");
   ca6.truncate(8);
   BOOST_CHECK_EQUAL(ca6.toString(), "2000::");
+
+  /* truncating to 0 bits leaves no partial byte, so nothing before the address
+     may be touched */
+  ca4 = ComboAddress("130.161.252.29", 53);
+  ca4.truncate(0);
+  BOOST_CHECK_EQUAL(ca4.toString(), "0.0.0.0");
+  BOOST_CHECK_EQUAL(ca4.sin4.sin_port, htons(53));
+
+  ca6 = ComboAddress("2001:888:2000:1d::2", 53);
+  ca6.sin6.sin6_flowinfo = htonl(0x0badcafe);
+  ca6.truncate(0);
+  BOOST_CHECK_EQUAL(ca6.toString(), "::");
+  BOOST_CHECK_EQUAL(ca6.sin6.sin6_flowinfo, htonl(0x0badcafe));
 
 
   orig=ca6=ComboAddress("2001:888:2000:1d::2");
@@ -218,6 +270,16 @@ BOOST_AUTO_TEST_CASE(test_Netmask) {
   BOOST_CHECK(nmp6.match("fe80::92fb:a6ff:fe4a:51da"));
   BOOST_CHECK(!nmp6.match("fe81::92fb:a6ff:fe4a:51db"));
 
+  /* a /128 leaves no partial byte to compare, so the scope id sitting right
+     after the address must not be taken into account */
+  ComboAddress scoped("fe80::92fb:a6ff:fe4a:51da");
+  scoped.sin6.sin6_scope_id = 1;
+  Netmask nmscoped(scoped);
+  BOOST_CHECK_EQUAL(nmscoped.getBits(), 128);
+  BOOST_CHECK(nmscoped.match(scoped));
+  BOOST_CHECK(nmscoped.match("fe80::92fb:a6ff:fe4a:51da"));
+  BOOST_CHECK(!nmscoped.match("fe80::92fb:a6ff:fe4a:51db"));
+
   Netmask all("0.0.0.0/0");
   BOOST_CHECK(all.match(local) && all.match(remote));
 
@@ -260,8 +322,18 @@ BOOST_AUTO_TEST_CASE(test_Netmask) {
   BOOST_CHECK(nm1921 < nm1922);
   BOOST_CHECK(nm1922 > nm1921);
 
+  Netmask outer("20.25.0.0/16");
+  Netmask inner("20.25.4.0/24");
+  Netmask disjoint("20.24.0.0/16");
+  BOOST_CHECK(outer.match(inner.getNetwork()));
+  BOOST_CHECK(!inner.match(outer.getNetwork()));
+  BOOST_CHECK(!outer.match(disjoint.getNetwork()));
+  BOOST_CHECK(!inner.match(disjoint.getNetwork()));
+  BOOST_CHECK(!disjoint.match(inner.getNetwork()));
+  BOOST_CHECK(!disjoint.match(outer.getNetwork()));
+
   /* An empty Netmask should be larger than
-     every others. */
+     every other. */
   Netmask empty = Netmask();
   Netmask full("255.255.255.255/32");
   BOOST_CHECK(empty > all);
@@ -893,6 +965,54 @@ BOOST_AUTO_TEST_CASE(test_parseIPAndPort)
       BOOST_CHECK_EQUAL(a.toStringWithPort(), ComboAddress(t.result).toStringWithPort());
     }
   }
+}
+
+BOOST_AUTO_TEST_CASE(test_unspecified)
+{
+  struct TestParams
+  {
+    std::string str;
+    bool unspecified;
+  };
+  const std::array<TestParams, 8> tests{{
+    {"0.0.0.0:0", true},
+    {"[::]:0", true},
+    {"0.0.0.0:853", true},
+    {"[::]:853", true},
+    {"192.0.2.1:0", false},
+    {"192.0.2.1:853", false},
+    {"[2001:db8::1]:0", false},
+    {"[2001:db8::1]:853", false}
+  }};
+
+  for (const auto& test : tests) {
+    const ComboAddress address(test.str);
+    BOOST_CHECK_EQUAL(address.isUnspecified(), test.unspecified);
+  }
+}
+
+// Check the tricky case: two somewhat compatible types
+BOOST_AUTO_TEST_CASE(test_expected)
+{
+  pdns::expected<size_t, int> test(0);
+
+  test = static_cast<size_t>(1);
+  BOOST_ASSERT(test.has_value());
+  BOOST_CHECK_EQUAL(test.value(), 1U);
+
+  test = 2;
+  BOOST_ASSERT(test.has_value());
+  BOOST_CHECK_EQUAL(test.value(), 2U);
+
+  test = pdns::unexpected(3);
+  BOOST_ASSERT(!test.has_value());
+  BOOST_CHECK_EQUAL(test.error(), 3);
+
+  std::string str("foo");
+  pdns::expected<std::string, int> test1(str);
+  BOOST_ASSERT(!str.empty());
+
+  pdns::expected<std::string, int> test2("bar");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

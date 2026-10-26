@@ -66,14 +66,16 @@ unsigned int dnsdist_ffi_stat_node_get_labels_count(const dnsdist_ffi_stat_node_
 
 void dnsdist_ffi_stat_node_get_full_name_raw(const dnsdist_ffi_stat_node_t* node, const char** name, size_t* nameSize)
 {
-  const auto& storage = node->node.fullname;
-  *name = storage.c_str();
-  *nameSize = storage.size();
+  if (node->fullname.empty() && !node->node.fullname.empty()) {
+    node->fullname = node->node.fullname.toString();
+  }
+  *name = node->fullname.c_str();
+  *nameSize = node->fullname.size();
 }
 
 unsigned int dnsdist_ffi_stat_node_get_children_count(const dnsdist_ffi_stat_node_t* node)
 {
-  return node->node.children.size();
+  return node->node.getNumberOfChildren();
 }
 
 uint64_t dnsdist_ffi_stat_node_get_children_queries_count(const dnsdist_ffi_stat_node_t* node)

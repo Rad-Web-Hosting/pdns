@@ -28,7 +28,7 @@
 
 struct DomainInfo;
 
-typedef map<DNSName, pdns::SHADigest> CatalogHashMap;
+typedef map<ZoneName, pdns::SHADigest> CatalogHashMap;
 
 class CatalogInfo
 {
@@ -48,7 +48,7 @@ public:
 
   CatalogInfo() :
     d_id(0), d_type(CatalogType::None) {}
-  CatalogInfo(uint32_t id, const DNSName& zone, const std::string& options, CatalogType type)
+  CatalogInfo(uint32_t id, const ZoneName& zone, const std::string& options, CatalogType type)
   {
     d_id = id;
     d_zone = zone;
@@ -58,11 +58,12 @@ public:
   void fromJson(const std::string& json, CatalogType type);
   std::string toJson() const;
   void setType(CatalogType type) { d_type = type; }
+  void addGroup(const std::string& group) { d_group.insert(group); }
 
-  void updateHash(CatalogHashMap& hashes, const DomainInfo& di) const;
-  DNSName getUnique() const { return DNSName(toBase32Hex(hashQNameWithSalt(std::to_string(d_id), 0, d_zone))); } // salt with domain id to detect recreated zones
-  static DNSZoneRecord getCatalogVersionRecord(const DNSName& zone);
-  void toDNSZoneRecords(const DNSName& zone, vector<DNSZoneRecord>& dzrs) const;
+  static void updateCatalogHash(CatalogHashMap& hashes, const DomainInfo& di);
+  DNSName getUnique() const { return DNSName(toBase32Hex(hashQNameWithSalt(std::to_string(d_id), 0, DNSName(d_zone)))); } // salt with domain id to detect recreated zones
+  static DNSZoneRecord getCatalogVersionRecord(const ZoneName& zone);
+  void toDNSZoneRecords(const ZoneName& zone, vector<DNSZoneRecord>& dzrs) const;
 
   bool operator<(const CatalogInfo& rhs) const
   {
@@ -70,11 +71,16 @@ public:
   }
 
   uint32_t d_id;
-  DNSName d_zone, d_coo, d_unique;
+  ZoneName d_zone;
+  DNSName d_coo, d_unique;
   std::set<std::string> d_group;
   vector<ComboAddress> d_primaries;
 
 private:
   CatalogType d_type;
   json11::Json d_doc;
+
+  bool parseJson(const std::string& json, CatalogType type);
 };
+
+extern std::string g_memberCatalogGroup;

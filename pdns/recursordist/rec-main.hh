@@ -22,28 +22,23 @@
 
 #pragma once
 
-#ifdef HAVE_CONFIG_H
 #include "config.h"
-#endif
 
-#include "logger.hh"
 #include "logr.hh"
+#include "iputils.hh"
 #include "lua-recursor4.hh"
 #include "mplexer.hh"
-#include "namespaces.hh"
 #include "rec-lua-conf.hh"
 #include "rec-protozero.hh"
 #include "syncres.hh"
-#include "rec-snmp.hh"
 #include "rec_channel.hh"
-#include "threadname.hh"
 #include "recpacketcache.hh"
+#include "ratelimitedlog.hh"
+#include "remote_logger.hh"
 
 #ifdef NOD_ENABLED
 #include "nod.hh"
 #endif /* NOD_ENABLED */
-
-#include <boost/container/flat_set.hpp>
 
 extern std::shared_ptr<Logr::Logger> g_slogtcpin;
 extern std::shared_ptr<Logr::Logger> g_slogudpin;
@@ -62,31 +57,31 @@ struct DNSComboWriter
   }
 
   // The address the query is coming from
-  void setRemote(const ComboAddress& sa)
+  void setRemote(const ComboAddress& address)
   {
-    d_remote = sa;
+    d_remote = address;
   }
 
   // The address we assume the query is coming from, might be set by proxy protocol
-  void setSource(const ComboAddress& sa)
+  void setSource(const ComboAddress& address)
   {
-    d_source = sa;
+    d_source = address;
   }
 
-  void setMappedSource(const ComboAddress& sa)
+  void setMappedSource(const ComboAddress& address)
   {
-    d_mappedSource = sa;
+    d_mappedSource = address;
   }
 
-  void setLocal(const ComboAddress& sa)
+  void setLocal(const ComboAddress& address)
   {
-    d_local = sa;
+    d_local = address;
   }
 
   // The address we assume the query is sent to, might be set by proxy protocol
-  void setDestination(const ComboAddress& sa)
+  void setDestination(const ComboAddress& address)
   {
-    d_destination = sa;
+    d_destination = address;
   }
 
   void setSocket(int sock)
@@ -94,33 +89,23 @@ struct DNSComboWriter
     d_socket = sock;
   }
 
-  // get a string repesentation of the client address, including proxy info if applicable
-  string getRemote() const
-  {
-    if (d_source == d_remote) {
-      return d_source.toStringWithPort();
-    }
-    return d_source.toStringWithPort() + " (proxied by " + d_remote.toStringWithPort() + ")";
-  }
-
   std::vector<ProxyProtocolValue> d_proxyProtocolValues;
   MOADNSParser d_mdp;
   struct timeval d_now;
 
-  ComboAddress d_remote; // the address the query is coming from
+  ComboAddress d_remote; // the address from which the query is coming
   ComboAddress d_source; // the address we assume the query is coming from, might be set by proxy protocol
   ComboAddress d_local; // the address we received the query on
   ComboAddress d_destination; // the address we assume the query is sent to, might be set by proxy protocol
   ComboAddress d_mappedSource; // the source address after being mapped by table based proxy mapping
   RecEventTrace d_eventTrace;
+  pdns::trace::InitialSpanInfo d_otTrace;
   boost::uuids::uuid d_uuid;
   string d_requestorId;
   string d_deviceId;
   string d_deviceName;
-  struct timeval d_kernelTimestamp
-  {
-    0, 0
-  };
+  struct timeval d_kernelTimestamp{
+    0, 0};
   std::string d_query;
   std::unordered_set<std::string> d_policyTags;
   std::unordered_set<std::string> d_gettagPolicyTags;
@@ -133,9 +118,9 @@ struct DNSComboWriter
 
   EDNSSubnetOpts d_ednssubnet;
   shared_ptr<TCPConnection> d_tcpConnection;
-  boost::optional<uint16_t> d_extendedErrorCode{boost::none};
+  std::optional<uint16_t> d_extendedErrorCode{std::nullopt};
   string d_extendedErrorExtra;
-  boost::optional<int> d_rcode{boost::none};
+  std::optional<int> d_rcode{std::nullopt};
   int d_socket{-1};
   unsigned int d_tag{0};
   uint32_t d_qhash{0};
@@ -154,44 +139,46 @@ extern thread_local unique_ptr<FDMultiplexer> t_fdm;
 extern uint16_t g_minUdpSourcePort;
 extern uint16_t g_maxUdpSourcePort;
 extern bool g_regressionTestMode;
+struct DoneRunning
+{
+  std::mutex mutex;
+  std::condition_variable condVar;
+  std::atomic<bool> done{false};
+};
+extern DoneRunning g_doneRunning;
 
 // you can ask this class for a UDP socket to send a query from
 // this socket is not yours, don't even think about deleting it
 // but after you call 'returnSocket' on it, don't assume anything anymore
 class UDPClientSocks
 {
-  unsigned int d_numsocks;
-
 public:
-  UDPClientSocks() :
-    d_numsocks(0)
-  {
-  }
-
-  LWResult::Result getSocket(const ComboAddress& toaddr, int* fileDesc);
+  LWResult::Result getSocket(const ComboAddress& toaddr, const std::optional<pdns::AddressAndInterface>& localAddress, std::optional<pdns::Interface>& interface, int* fileDesc);
 
   // return a socket to the pool, or simply erase it
   void returnSocket(int fileDesc);
 
 private:
+  unsigned int d_numsocks{0};
   // returns -1 for errors which might go away, throws for ones that won't
-  static int makeClientSocket(int family);
+  static int makeClientSocket(int family, const std::optional<pdns::AddressAndInterface>& localAddress, std::optional<pdns::Interface>& interface);
 };
 
-enum class PaddingMode
+enum class PaddingMode : uint8_t
 {
   Always,
   PaddedQueries
 };
 
-typedef MTasker<std::shared_ptr<PacketID>, PacketBuffer, PacketIDCompare> MT_t;
-extern thread_local std::unique_ptr<MT_t> g_multiTasker; // the big MTasker
+using MT_t = MTasker<std::shared_ptr<PacketID>, PacketBuffer, PacketIDCompare>;
+extern thread_local std::unique_ptr<MT_t> t_multiTasker; // the big MTasker
 extern std::unique_ptr<RecursorPacketCache> g_packetCache;
 
 using RemoteLoggerStats_t = std::unordered_map<std::string, RemoteLoggerInterface::Stats>;
 
 extern bool g_yamlSettings;
 extern string g_yamlSettingsSuffix;
+extern LockGuarded<pdns::rust::settings::rec::Recursorsettings> g_yamlStruct;
 extern bool g_logCommonErrors;
 extern size_t g_proxyProtocolMaximumSize;
 extern std::atomic<bool> g_quiet;
@@ -217,20 +204,21 @@ extern thread_local std::shared_ptr<NetmaskGroup> t_allowFrom;
 extern thread_local std::shared_ptr<NetmaskGroup> t_allowNotifyFrom;
 extern thread_local std::shared_ptr<notifyset_t> t_allowNotifyFor;
 extern thread_local std::unique_ptr<UDPClientSocks> t_udpclientsocks;
+extern thread_local std::shared_ptr<NetmaskGroup> t_proxyProtocolACL;
+extern thread_local std::shared_ptr<std::set<ComboAddress>> t_proxyProtocolExceptions;
 extern bool g_useIncomingECS;
-extern boost::optional<ComboAddress> g_dns64Prefix;
+extern std::optional<ComboAddress> g_dns64Prefix;
 extern DNSName g_dns64PrefixReverse;
 extern uint64_t g_latencyStatSize;
-extern NetmaskGroup g_proxyProtocolACL;
-extern std::set<ComboAddress> g_proxyProtocolExceptions;
 extern std::atomic<bool> g_statsWanted;
 extern uint32_t g_disthashseed;
 extern int g_argc;
 extern char** g_argv;
-extern std::shared_ptr<SyncRes::domainmap_t> g_initialDomainMap; // new threads needs this to be setup
-extern std::shared_ptr<NetmaskGroup> g_initialAllowFrom; // new thread needs to be setup with this
-extern std::shared_ptr<NetmaskGroup> g_initialAllowNotifyFrom; // new threads need this to be setup
-extern std::shared_ptr<notifyset_t> g_initialAllowNotifyFor; // new threads need this to be setup
+extern LockGuarded<std::shared_ptr<SyncRes::domainmap_t>> g_initialDomainMap; // new threads needs this to be setup
+extern LockGuarded<std::shared_ptr<NetmaskGroup>> g_initialAllowFrom; // new thread needs to be setup with this
+extern LockGuarded<std::shared_ptr<NetmaskGroup>> g_initialAllowNotifyFrom; // new threads need this to be setup
+extern LockGuarded<std::shared_ptr<notifyset_t>> g_initialAllowNotifyFor; // new threads need this to be setup
+extern LockGuarded<std::shared_ptr<OpenTelemetryTraceConditions>> g_initialOpenTelemetryConditions; // new threads need this to be set
 extern thread_local std::shared_ptr<Regex> t_traceRegex;
 extern thread_local FDWrapper t_tracefd;
 extern string g_programname;
@@ -239,6 +227,8 @@ extern RecursorControlChannel g_rcc; // only active in the handler thread
 
 extern thread_local std::unique_ptr<ProxyMapping> t_proxyMapping;
 using ProxyMappingStats_t = std::unordered_map<Netmask, ProxyMappingCounts>;
+extern thread_local std::unique_ptr<OpenTelemetryTraceConditions> t_OTConditions;
+extern pdns::RateLimitedLog g_rateLimitedLogger;
 
 #ifdef NOD_ENABLED
 extern bool g_nodEnabled;
@@ -259,6 +249,7 @@ struct ProtobufServersInfo
   std::shared_ptr<std::vector<std::unique_ptr<RemoteLogger>>> servers;
   uint64_t generation;
   ProtobufExportConfig config;
+  mutable size_t roundRobinCounter;
 };
 extern thread_local ProtobufServersInfo t_protobufServers;
 extern thread_local ProtobufServersInfo t_outgoingProtobufServers;
@@ -275,45 +266,42 @@ extern thread_local FrameStreamServersInfo t_frameStreamServersInfo;
 extern thread_local FrameStreamServersInfo t_nodFrameStreamServersInfo;
 #endif /* HAVE_FSTRM */
 
-extern boost::container::flat_set<uint16_t> g_avoidUdpSourcePorts;
+extern std::vector<bool> g_avoidUdpSourcePorts;
 
 /* without reuseport, all listeners share the same sockets */
-typedef vector<pair<int, std::function<void(int, boost::any&)>>> deferredAdd_t;
-
-typedef map<ComboAddress, uint32_t, ComboAddress::addressOnlyLessThan> tcpClientCounts_t;
-extern thread_local std::unique_ptr<tcpClientCounts_t> t_tcpClientCounts;
+using deferredAdd_t = vector<pair<int, std::function<void(int, boost::any&)>>>;
 
 inline MT_t* getMT()
 {
-  return g_multiTasker ? g_multiTasker.get() : nullptr;
+  return t_multiTasker ? t_multiTasker.get() : nullptr;
 }
 
 /* this function is called with both a string and a vector<uint8_t> representing a packet */
 template <class T>
-static bool sendResponseOverTCP(const std::unique_ptr<DNSComboWriter>& dc, const T& packet)
+static bool sendResponseOverTCP(const std::unique_ptr<DNSComboWriter>& comboWriter, const T& packet, Logr::log_t log)
 {
-  uint8_t buf[2];
+  std::array<uint8_t, 2> buf{};
   buf[0] = packet.size() / 256;
   buf[1] = packet.size() % 256;
 
-  Utility::iovec iov[2];
-  iov[0].iov_base = (void*)buf;
+  std::array<iovec, 2> iov{};
+  iov[0].iov_base = static_cast<void*>(buf.data());
   iov[0].iov_len = 2;
-  iov[1].iov_base = (void*)&*packet.begin();
+  iov[1].iov_base = static_cast<void*>(const_cast<typename T::value_type*>(packet.data()));
   iov[1].iov_len = packet.size();
 
-  int wret = Utility::writev(dc->d_socket, iov, 2);
+  auto wret = writev(comboWriter->d_socket, iov.data(), iov.size());
   bool hadError = true;
 
   if (wret == 0) {
-    g_log << Logger::Warning << "EOF writing TCP answer to " << dc->getRemote() << endl;
+    log->info(Logr::Warning, "EOF writing TCP answer", "remote", Logging::Loggable(comboWriter->d_remote), "source", Logging::Loggable(comboWriter->d_source));
   }
   else if (wret < 0) {
     int err = errno;
-    g_log << Logger::Warning << "Error writing TCP answer to " << dc->getRemote() << ": " << strerror(err) << endl;
+    log->error(Logr::Warning, err, "Error writing TCP", "remote", Logging::Loggable(comboWriter->d_remote), "source", Logging::Loggable(comboWriter->d_source));
   }
   else if ((unsigned int)wret != 2 + packet.size()) {
-    g_log << Logger::Warning << "Oops, partial answer sent to " << dc->getRemote() << " for " << dc->d_mdp.d_qname << " (size=" << (2 + packet.size()) << ", sent " << wret << ")" << endl;
+    log->info(Logr::Warning, "Partial answer sent", "remote", Logging::Loggable(comboWriter->d_remote), "source", Logging::Loggable(comboWriter->d_source), "size", Logging::Loggable(2 + packet.size()), "sent", Logging::Loggable(wret));
   }
   else {
     hadError = false;
@@ -324,8 +312,7 @@ static bool sendResponseOverTCP(const std::unique_ptr<DNSComboWriter>& dc, const
 
 // For communicating with our threads effectively readonly after
 // startup.
-// First we have the handler thread, t_id == 0 (some other helper
-// threads like SNMP might have t_id == 0 as well) then the
+// First we have the handler thread, t_id == 0  then the
 // distributor threads if any and finally the workers
 struct RecThreadInfo
 {
@@ -342,12 +329,16 @@ struct RecThreadInfo
 public:
   static RecThreadInfo& self()
   {
-    return s_threadInfos.at(t_id);
+    auto& info = s_threadInfos.at(t_id);
+    assert(info.d_myid == t_id); // internal consistency check
+    return info;
   }
 
   static RecThreadInfo& info(unsigned int index)
   {
-    return s_threadInfos.at(index);
+    auto& info = s_threadInfos.at(index);
+    assert(info.d_myid == index);
+    return info;
   }
 
   static vector<RecThreadInfo>& infos()
@@ -357,17 +348,11 @@ public:
 
   [[nodiscard]] bool isDistributor() const
   {
-    if (t_id == 0) {
-      return false;
-    }
     return s_weDistributeQueries && listener;
   }
 
   [[nodiscard]] bool isHandler() const
   {
-    if (t_id == 0) {
-      return true;
-    }
     return handler;
   }
 
@@ -419,9 +404,22 @@ public:
     taskThread = true;
   }
 
-  static unsigned int id()
+  static unsigned int thread_local_id()
   {
+    if (t_id == TID_NOT_INITED) {
+      return 0; // backward compatibility
+    }
     return t_id;
+  }
+
+  static bool is_thread_inited()
+  {
+    return t_id != TID_NOT_INITED;
+  }
+
+  [[nodiscard]] unsigned int id() const
+  {
+    return d_myid;
   }
 
   static void setThreadId(unsigned int arg)
@@ -441,7 +439,7 @@ public:
 
   static unsigned int numTaskThreads()
   {
-    return 1;
+    return s_numTaskThreads;
   }
 
   static unsigned int numUDPWorkers()
@@ -484,6 +482,11 @@ public:
     s_numDistributorThreads = n;
   }
 
+  static void setNumTaskThreads(unsigned int n)
+  {
+    s_numTaskThreads = n;
+  }
+
   static unsigned int numRecursorThreads()
   {
     return numHandlers() + numDistributors() + numUDPWorkers() + numTCPWorkers() + numTaskThreads();
@@ -512,7 +515,7 @@ public:
     return deferredAdds;
   }
 
-  const ThreadPipeSet& getPipes() const
+  [[nodiscard]] const ThreadPipeSet& getPipes() const
   {
     return pipes;
   }
@@ -537,6 +540,22 @@ public:
     mt = theMT;
   }
 
+  static void joinThread0()
+  {
+    if (!s_threadInfos.empty()) {
+      info(0).thread.join();
+    }
+  }
+
+  static void resize(size_t size)
+  {
+    s_threadInfos.resize(size);
+    for (unsigned int i = 0; i < size; i++) {
+      s_threadInfos.at(i).d_myid = i;
+    }
+  }
+  static constexpr unsigned int TID_NOT_INITED = std::numeric_limits<unsigned int>::max();
+
 private:
   // FD corresponding to TCP sockets this thread is listening on.
   // These FDs are also in deferredAdds when we have one socket per
@@ -556,6 +575,7 @@ private:
   std::string name;
   std::thread thread;
   int exitCode{0};
+  unsigned int d_myid{TID_NOT_INITED}; // should always be equal to the thread_local tid;
 
   // handle the web server, carbon, statistics and the control channel
   bool handler{false};
@@ -574,6 +594,7 @@ private:
   static unsigned int s_numDistributorThreads;
   static unsigned int s_numUDPWorkerThreads;
   static unsigned int s_numTCPWorkerThreads;
+  static unsigned int s_numTaskThreads;
 };
 
 struct ThreadMSG
@@ -590,45 +611,48 @@ bool checkOutgoingProtobufExport(LocalStateHolder<LuaConfigItems>& luaconfsLocal
 bool checkFrameStreamExport(LocalStateHolder<LuaConfigItems>& luaconfsLocal, const FrameStreamExportConfig& config, FrameStreamServersInfo& serverInfos);
 #endif
 void getQNameAndSubnet(const std::string& question, DNSName* dnsname, uint16_t* qtype, uint16_t* qclass,
-                       bool& foundECS, EDNSSubnetOpts* ednssubnet, EDNSOptionViewMap* options);
-void protobufLogQuery(LocalStateHolder<LuaConfigItems>& luaconfsLocal, const boost::uuids::uuid& uniqueId, const ComboAddress& remote, const ComboAddress& local, const ComboAddress& mappedSource, const Netmask& ednssubnet, bool tcp, uint16_t queryID, size_t len, const DNSName& qname, uint16_t qtype, uint16_t qclass, const std::unordered_set<std::string>& policyTags, const std::string& requestorId, const std::string& deviceId, const std::string& deviceName, const std::map<std::string, RecursorLua4::MetaValue>& meta);
+                       bool& foundECS, EDNSSubnetOpts* ednssubnet, EDNSOptionViewMap* options, std::optional<uint32_t>& ednsVersion);
+void protobufLogQuery(LocalStateHolder<LuaConfigItems>& luaconfsLocal, const boost::uuids::uuid& uniqueId, const ComboAddress& remote, const ComboAddress& local, const ComboAddress& mappedSource, const Netmask& ednssubnet, bool tcp, size_t len, const DNSName& qname, uint16_t qtype, uint16_t qclass, const std::unordered_set<std::string>& policyTags, const std::string& requestorId, const std::string& deviceId, const std::string& deviceName, const std::map<std::string, RecursorLua4::MetaValue>& meta, const std::optional<uint32_t>& ednsVersion, const dnsheader& header, const pdns::trace::TraceID& traceID);
 bool isAllowNotifyForZone(DNSName qname);
 bool checkForCacheHit(bool qnameParsed, unsigned int tag, const string& data,
                       DNSName& qname, uint16_t& qtype, uint16_t& qclass,
                       const struct timeval& now,
                       string& response, uint32_t& qhash,
-                      RecursorPacketCache::OptPBData& pbData, bool tcp, const ComboAddress& source, const ComboAddress& mappedSource);
-void protobufLogResponse(pdns::ProtoZero::RecMessage& message);
-void protobufLogResponse(const struct dnsheader* header, LocalStateHolder<LuaConfigItems>& luaconfsLocal,
-                         const RecursorPacketCache::OptPBData& pbData, const struct timeval& tv,
+                      RecursorPacketCache::OptPBData& pbData, bool tcp, const ComboAddress& source, const ComboAddress& mappedSource, bool ecsFound, const EDNSSubnetOpts& edns);
+void protobufLogResponse(pdns::ProtoZero::RecMessage& message, const DNSName& name, const ComboAddress& address);
+void protobufLogResponse(const DNSName& qname, QType qtype, const struct dnsheader* header, LocalStateHolder<LuaConfigItems>& luaconfsLocal,
+                         const RecursorPacketCache::OptPBData& pbData, const struct timeval& tval,
                          bool tcp, const ComboAddress& source, const ComboAddress& destination,
                          const ComboAddress& mappedSource, const EDNSSubnetOpts& ednssubnet,
                          const boost::uuids::uuid& uniqueId, const string& requestorId, const string& deviceId,
                          const string& deviceName, const std::map<std::string, RecursorLua4::MetaValue>& meta,
                          const RecEventTrace& eventTrace,
+                         pdns::trace::InitialSpanInfo& otTrace,
                          const std::unordered_set<std::string>& policyTags);
 void requestWipeCaches(const DNSName& canon);
 void startDoResolve(void*);
 bool expectProxyProtocol(const ComboAddress& from, const ComboAddress& listenAddress);
+bool matchOTConditions(const std::unique_ptr<OpenTelemetryTraceConditions>& conditions, const ComboAddress& source);
+bool matchOTConditions(RecEventTrace& eventTrace, const std::unique_ptr<OpenTelemetryTraceConditions>& conditions, const ComboAddress& source, const DNSName& qname, QType qtype, uint16_t qid, bool edns_option_present);
 void finishTCPReply(std::unique_ptr<DNSComboWriter>&, bool hadError, bool updateInFlight);
 void checkFastOpenSysctl(bool active, Logr::log_t);
 void checkTFOconnect(Logr::log_t);
-void makeTCPServerSockets(deferredAdd_t& deferredAdds, std::set<int>& tcpSockets, Logr::log_t);
+unsigned int makeTCPServerSockets(deferredAdd_t& deferredAdds, std::set<int>& tcpSockets, Logr::log_t, bool doLog, unsigned int instances);
 void handleNewTCPQuestion(int fileDesc, FDMultiplexer::funcparam_t&);
 
-void makeUDPServerSockets(deferredAdd_t& deferredAdds, Logr::log_t);
+unsigned int makeUDPServerSockets(deferredAdd_t& deferredAdds, Logr::log_t, bool doLog, unsigned int instances);
 string doTraceRegex(FDWrapper file, vector<string>::const_iterator begin, vector<string>::const_iterator end);
 extern bool g_luaSettingsInYAML;
-void startLuaConfigDelayedThreads(const vector<RPZTrackerParams>& rpzs, uint64_t generation);
+void startLuaConfigDelayedThreads(const LuaConfigItems& luaConfig, uint64_t generation);
 void activateLuaConfig(LuaConfigItems& lci);
 unsigned int authWaitTimeMSec(const std::unique_ptr<MT_t>& mtasker);
 
-#define LOCAL_NETS "127.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 192.168.0.0/16, 172.16.0.0/12, ::1/128, fc00::/7, fe80::/10"
-#define LOCAL_NETS_INVERSE "!127.0.0.0/8, !10.0.0.0/8, !100.64.0.0/10, !169.254.0.0/16, !192.168.0.0/16, !172.16.0.0/12, !::1/128, !fc00::/7, !fe80::/10"
+static const std::string LOCAL_NETS = "127.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 192.168.0.0/16, 172.16.0.0/12, ::1/128, fc00::/7, fe80::/10";
+static const std::string LOCAL_NETS_INVERSE = "!127.0.0.0/8, !10.0.0.0/8, !100.64.0.0/10, !169.254.0.0/16, !192.168.0.0/16, !172.16.0.0/12, !::1/128, !fc00::/7, !fe80::/10";
 // Bad Nets taken from both:
 // http://www.iana.org/assignments/iana-ipv4-special-registry/iana-ipv4-special-registry.xhtml
 // and
 // http://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xhtml
 // where such a network may not be considered a valid destination
-#define BAD_NETS "0.0.0.0/8, 192.0.0.0/24, 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 240.0.0.0/4, ::/96, ::ffff:0:0/96, 100::/64, 2001:db8::/32"
-#define DONT_QUERY LOCAL_NETS ", " BAD_NETS
+static const std::string BAD_NETS = "0.0.0.0/8, 192.0.0.0/24, 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 240.0.0.0/4, ::/96, ::ffff:0:0/96, 100::/64, 2001:db8::/32";
+static const std::string DONT_QUERY = LOCAL_NETS + ", " + BAD_NETS;

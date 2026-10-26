@@ -27,6 +27,7 @@
 #include <string_view>
 
 #include "config.h"
+#include "dolog.hh"
 #include "iputils.hh"
 #include "libssl.hh"
 #include "noinitvector.hh"
@@ -35,6 +36,9 @@
 
 namespace dnsdist::doh
 {
+static constexpr uint32_t MAX_INCOMING_CONCURRENT_STREAMS{100U};
+static constexpr size_t MAX_INCOMING_HTTP_HEADERS{256U};
+
 std::optional<PacketBuffer> getPayloadFromPath(const std::string_view& path);
 }
 
@@ -43,7 +47,7 @@ struct DOHServerConfig;
 class DOHResponseMapEntry
 {
 public:
-  DOHResponseMapEntry(const std::string& regex, uint16_t status, const PacketBuffer& content, const boost::optional<std::unordered_map<std::string, std::string>>& headers) :
+  DOHResponseMapEntry(const std::string& regex, uint16_t status, const PacketBuffer& content, const std::optional<std::unordered_map<std::string, std::string>>& headers) :
     d_regex(regex), d_customHeaders(headers), d_content(content), d_status(status)
   {
     if (status >= 400 && !d_content.empty() && d_content.at(d_content.size() - 1) != 0) {
@@ -67,25 +71,26 @@ public:
     return d_content;
   }
 
-  const boost::optional<std::unordered_map<std::string, std::string>>& getHeaders() const
+  const std::optional<std::unordered_map<std::string, std::string>>& getHeaders() const
   {
     return d_customHeaders;
   }
 
 private:
   Regex d_regex;
-  boost::optional<std::unordered_map<std::string, std::string>> d_customHeaders;
+  std::optional<std::unordered_map<std::string, std::string>> d_customHeaders;
   PacketBuffer d_content;
   uint16_t d_status;
 };
 
 struct DOHFrontend
 {
-  DOHFrontend()
+  DOHFrontend() :
+    d_tlsContext(std::make_shared<TLSFrontend>(TLSFrontend::ALPN::DoH))
   {
   }
   DOHFrontend(std::shared_ptr<TLSCtx> tlsCtx) :
-    d_tlsContext(std::move(tlsCtx))
+    d_tlsContext(std::make_shared<TLSFrontend>(std::move(tlsCtx)))
   {
   }
 
@@ -95,8 +100,9 @@ struct DOHFrontend
 
   std::shared_ptr<DOHServerConfig> d_dsc{nullptr};
   std::shared_ptr<std::vector<std::shared_ptr<DOHResponseMapEntry>>> d_responsesMap;
-  TLSFrontend d_tlsContext{TLSFrontend::ALPN::DoH};
-  std::string d_serverTokens{"h2o/dnsdist"};
+  std::shared_ptr<TLSFrontend> d_tlsContext;
+  std::shared_ptr<const Logr::Logger> d_logger;
+  std::string d_serverTokens{"dnsdist"};
   std::unordered_map<std::string, std::string> d_customResponseHeaders;
   std::string d_library;
 
@@ -141,12 +147,17 @@ struct DOHFrontend
 
   time_t getTicketsKeyRotationDelay() const
   {
-    return d_tlsContext.d_tlsConfig.d_ticketsKeyRotationDelay;
+    return d_tlsContext->d_tlsConfig.d_ticketsKeyRotationDelay;
   }
 
   bool isHTTPS() const
   {
-    return !d_tlsContext.d_tlsConfig.d_certKeyPairs.empty();
+    return !d_tlsContext->d_tlsConfig.d_certKeyPairs.empty();
+  }
+
+  const Logr::Logger& getLogger() const
+  {
+    return *d_logger;
   }
 
 #ifndef HAVE_DNS_OVER_HTTPS
@@ -163,6 +174,10 @@ struct DOHFrontend
   }
 
   virtual void loadTicketsKeys(const std::string& /* keyFile */)
+  {
+  }
+
+  virtual void loadTicketsKey(const std::string& /* key */)
   {
   }
 
@@ -187,6 +202,7 @@ struct DOHFrontend
 
   virtual void rotateTicketsKey(time_t now);
   virtual void loadTicketsKeys(const std::string& keyFile);
+  virtual void loadTicketsKey(const std::string& key);
   virtual void handleTicketsKeyRotation();
   virtual std::string getNextTicketsKeyRotation() const;
   virtual size_t getTicketsKeysCount();
@@ -197,12 +213,20 @@ struct DOHFrontend
 
 struct DownstreamState;
 
+class TCPQuerySender;
+
 #ifndef HAVE_DNS_OVER_HTTPS
 struct DOHUnitInterface
 {
   virtual ~DOHUnitInterface()
   {
   }
+
+  virtual std::shared_ptr<TCPQuerySender> getQuerySender() const
+  {
+    return nullptr;
+  }
+
   static void handleTimeout(std::unique_ptr<DOHUnitInterface>)
   {
   }
@@ -223,6 +247,7 @@ struct DOHUnitInterface
   virtual const std::string& getHTTPHost() const = 0;
   virtual const std::string& getHTTPScheme() const = 0;
   virtual const std::unordered_map<std::string, std::string>& getHTTPHeaders() const = 0;
+  virtual std::shared_ptr<TCPQuerySender> getQuerySender() const = 0;
   virtual void setHTTPResponse(uint16_t statusCode, PacketBuffer&& body, const std::string& contentType = "") = 0;
   virtual void handleTimeout() = 0;
   virtual void handleUDPResponse(PacketBuffer&& response, InternalQueryState&& state, const std::shared_ptr<DownstreamState>&) = 0;
@@ -230,16 +255,16 @@ struct DOHUnitInterface
   static void handleTimeout(std::unique_ptr<DOHUnitInterface> unit)
   {
     if (unit) {
-      unit->handleTimeout();
-      unit.release();
+      auto* ptr = unit.release();
+      ptr->handleTimeout();
     }
   }
 
   static void handleUDPResponse(std::unique_ptr<DOHUnitInterface> unit, PacketBuffer&& response, InternalQueryState&& state, const std::shared_ptr<DownstreamState>& ds)
   {
     if (unit) {
-      unit->handleUDPResponse(std::move(response), std::move(state), ds);
-      unit.release();
+      auto* ptr = unit.release();
+      ptr->handleUDPResponse(std::move(response), std::move(state), ds);
     }
   }
 

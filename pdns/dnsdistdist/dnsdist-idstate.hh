@@ -21,17 +21,33 @@
  */
 #pragma once
 
+#include <cstdint>
+#include <ctime>
+#include <memory>
+#include <optional>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "config.h"
 #include "dnscrypt.hh"
+#include "dnsdist-configuration.hh"
+#include "dnsdist-edns.hh"
 #include "dnsname.hh"
+#include "dnsdist-logging.hh"
 #include "dnsdist-protocols.hh"
 #include "ednsextendederror.hh"
 #include "gettime.hh"
 #include "iputils.hh"
 #include "noinitvector.hh"
+#include "dnsdist-opentelemetry.hh"
 #include "uuid-utils.hh"
+
+#ifndef DISABLE_PROTOBUF
+#include "dnsdist-protobuf.hh"
+#include "remote_logger.hh"
+#endif
 
 struct ClientState;
 struct DOHUnitInterface;
@@ -79,10 +95,8 @@ struct StopWatch
     return d_start;
   }
 
-  struct timespec d_start
-  {
-    0, 0
-  };
+  struct timespec d_start{
+    0, 0};
 
 private:
   struct timespec getCurrentTime() const
@@ -109,6 +123,42 @@ struct InternalQueryState
     std::string d_requestorID;
   };
 
+  /**
+   * @brief Returns the Tracer, but only if OpenTelemetry tracing is globally enabled
+   *
+   * @return
+   */
+  std::shared_ptr<pdns::trace::dnsdist::Tracer>& getTracer()
+  {
+#ifdef DISABLE_PROTOBUF
+    return d_OTTracer;
+#else
+    if ((d_OTTracingEnabledInConfiguration && !*d_OTTracingEnabledInConfiguration) || d_OTTracer != nullptr) {
+      return d_OTTracer;
+    }
+    if (dnsdist::configuration::getCurrentRuntimeConfiguration().d_openTelemetryTracing) {
+      // OpenTelemetry tracing is enabled, but we don't have a tracer yet
+      d_OTTracingEnabledInConfiguration = true;
+      d_OTTracer = pdns::trace::dnsdist::Tracer::getTracer();
+      d_OTTracer->setScopeSpanName("dnsdist/queryFromFrontend");
+    }
+    else {
+      d_OTTracingEnabledInConfiguration = false;
+    }
+    return d_OTTracer;
+#endif
+  }
+
+  /**
+   * @brief Returns a Tracer::Closer, but only if OpenTelemetry tracing is needed
+   *
+   * @return
+   */
+  std::optional<pdns::trace::dnsdist::Tracer::Closer> getCloser([[maybe_unused]] const std::string_view& name, [[maybe_unused]] const SpanID& parentSpanID);
+  std::optional<pdns::trace::dnsdist::Tracer::Closer> getCloser([[maybe_unused]] const std::string_view& name, [[maybe_unused]] const std::string_view& parentSpanName);
+  std::optional<pdns::trace::dnsdist::Tracer::Closer> getCloser([[maybe_unused]] const std::string_view& name);
+  std::optional<pdns::trace::dnsdist::Tracer::Closer> getRulesCloser([[maybe_unused]] const std::string_view& ruleName, [[maybe_unused]] const std::string& ruleType);
+
   InternalQueryState()
   {
     origDest.sin4.sin_family = 0;
@@ -119,6 +169,7 @@ struct InternalQueryState
 
   InternalQueryState(const InternalQueryState& orig) = delete;
   InternalQueryState& operator=(const InternalQueryState& orig) = delete;
+  ~InternalQueryState();
 
   bool isXSK() const noexcept
   {
@@ -131,8 +182,13 @@ struct InternalQueryState
 
   InternalQueryState partialCloneForXFR() const;
 
-  boost::optional<Netmask> subnet{boost::none}; // 40
+  std::shared_ptr<const Logr::Logger> getLogger(std::shared_ptr<const Logr::Logger> parent = nullptr) const;
+
+  std::optional<Netmask> subnet{std::nullopt}; // 40
   std::string poolName; // 32
+#if !defined(DISABLE_PROTOBUF)
+  std::string d_rawProtobufContent; // protobuf-encoded content to add to protobuf messages // 32
+#endif /* DISABLE_PROTOBUF */
   ComboAddress origRemote; // 28
   ComboAddress origDest; // 28
   ComboAddress hopRemote;
@@ -142,13 +198,21 @@ struct InternalQueryState
   PacketBuffer xskPacketHeader; // 24
 #endif /* HAVE_XSK */
   StopWatch queryRealTime{true}; // 24
+private:
+  std::shared_ptr<pdns::trace::dnsdist::Tracer> d_OTTracer{nullptr};
+
+public:
   std::shared_ptr<DNSDistPacketCache> packetCache{nullptr}; // 16
   std::unique_ptr<DNSCryptQuery> dnsCryptQuery{nullptr}; // 8
   std::unique_ptr<QTag> qTag{nullptr}; // 8
   std::unique_ptr<PacketBuffer> d_packet{nullptr}; // Initial packet, so we can restart the query from the response path if needed // 8
   std::unique_ptr<ProtoBufData> d_protoBufData{nullptr};
-  std::unique_ptr<EDNSExtendedError> d_extendedError{nullptr};
-  boost::optional<uint32_t> tempFailureTTL{boost::none}; // 8
+#ifndef DISABLE_PROTOBUF
+  std::vector<std::pair<std::string, std::shared_ptr<RemoteLoggerInterface>>> delayedResponseMsgs;
+  std::vector<std::shared_ptr<RemoteLoggerInterface>> ottraceLoggers;
+#endif
+  std::unique_ptr<std::vector<dnsdist::edns::SetExtendedDNSErrorOperation>> d_extendedErrors{nullptr};
+  std::optional<uint32_t> tempFailureTTL{std::nullopt}; // 8
   ClientState* cs{nullptr}; // 8
   std::unique_ptr<DOHUnitInterface> du; // 8
   size_t d_proxyProtocolPayloadSize{0}; // 8
@@ -157,8 +221,8 @@ struct InternalQueryState
   int32_t d_streamID{-1}; // 4
   uint32_t cacheKey{0}; // 4
   uint32_t cacheKeyNoECS{0}; // 4
-  // DoH-only */
-  uint32_t cacheKeyUDP{0}; // 4
+  // DoH-only: if we received a TC=1 answer, we had to retry over TCP and thus we need the TCP cache key */
+  uint32_t cacheKeyTCP{0}; // 4
   uint32_t ttlCap{0}; // cap the TTL _after_ inserting into the packet cache // 4
   int backendFD{-1}; // 4
   int delayMsec{0};
@@ -169,14 +233,38 @@ struct InternalQueryState
   uint16_t origFlags{0}; // 2
   uint16_t cacheFlags{0}; // DNS flags as sent to the backend // 2
   uint16_t udpPayloadSize{0}; // Max UDP payload size from the query // 2
+  uint16_t sendTraceParentToDownstreamID{0}; // Whether or not to add a TRACEPARENT EDNS option to downstreams, set to non-0 for the EDNS Option ID
+  std::optional<bool> dnssecOK;
+#ifndef DISABLE_PROTOBUF
+  std::optional<bool> d_OTTracingEnabledInConfiguration; // Whether OpenTelemetry tracing is enabled in the configuration. This prevents having to check the configuration several times for the same query
+#endif /* DISABLE_PROTOBUF */
   dnsdist::Protocol protocol; // 1
+  uint8_t restartCount{0}; // 1
   bool ednsAdded{false};
   bool ecsAdded{false};
   bool skipCache{false};
-  bool dnssecOK{false};
   bool useZeroScope{false};
   bool forwardedOverUDP{false};
   bool selfGenerated{false};
+  bool cacheHit{false};
+  bool staleCacheHit{false};
+  bool tracingEnabled{false}; // Whether or not Open Telemetry tracing is enabled for this query
+  bool rulesAppliedToQuery{false}; // Whether applyRulesToQuery has been called for the query, used to determine if we need to trace
+  struct rulesAppliedToQuerySetter
+  {
+    rulesAppliedToQuerySetter(bool& pastProcessRules) :
+      d_rulesAppliedToQuery(pastProcessRules)
+    {
+      d_rulesAppliedToQuery = false;
+    }
+    ~rulesAppliedToQuerySetter()
+    {
+      d_rulesAppliedToQuery = true;
+    }
+
+  private:
+    bool& d_rulesAppliedToQuery;
+  };
 };
 
 struct IDState
@@ -219,14 +307,14 @@ struct IDState
        the 'outstanding' counters, which should only be increased when we are picking
        an empty state, and not when reusing ;
        For DoH, though, we have dynamically allocated a DOHUnit object that needs to
-       be freed, as well as internal objects internals to libh2o.
+       be freed, as well as internal objects.
      - one of the UDP receiver threads receiving a response from a backend, picking
        the corresponding state and sending the response to the client ;
      - the 'healthcheck' thread scanning the states to actively discover timeouts,
        mostly to keep some counters like the 'outstanding' one sane.
 
      We have two flags:
-     - inUse tells us if there currently is a in-flight query whose state is stored
+     - inUse tells us if there currently is an in-flight query whose state is stored
        in this state
      - locked tells us whether someone currently owns the state, so no-one else can touch
        it

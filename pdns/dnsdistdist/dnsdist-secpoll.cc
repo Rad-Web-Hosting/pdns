@@ -49,59 +49,60 @@ static std::string getFirstTXTAnswer(const std::string& answer)
     throw std::runtime_error("Looking for a TXT record in an answer smaller than the DNS header");
   }
 
-  const dnsheader_aligned dh(answer.data());
-  PacketReader pr(answer);
-  uint16_t qdcount = ntohs(dh->qdcount);
-  uint16_t ancount = ntohs(dh->ancount);
+  const dnsheader_aligned dnsHeader(answer.data());
+  PacketReader reader(answer);
+  uint16_t qdcount = ntohs(dnsHeader->qdcount);
+  uint16_t ancount = ntohs(dnsHeader->ancount);
 
   DNSName rrname;
-  uint16_t rrtype;
-  uint16_t rrclass;
+  uint16_t rrtype{};
+  uint16_t rrclass{};
 
   size_t idx = 0;
   /* consume qd */
-  for(; idx < qdcount; idx++) {
-    rrname = pr.getName();
-    rrtype = pr.get16BitInt();
-    rrclass = pr.get16BitInt();
-    (void) rrtype;
-    (void) rrclass;
+  for (; idx < qdcount; idx++) {
+    rrname = reader.getName();
+    rrtype = reader.get16BitInt();
+    rrclass = reader.get16BitInt();
+    (void)rrtype;
+    (void)rrclass;
   }
 
   /* parse AN */
   for (idx = 0; idx < ancount; idx++) {
     string blob;
-    struct dnsrecordheader ah;
-    rrname = pr.getName();
-    pr.getDnsrecordheader(ah);
+    dnsrecordheader answerHeader{};
+    rrname = reader.getName();
+    reader.getDnsrecordheader(answerHeader);
 
-    if (ah.d_type == QType::TXT) {
+    if (answerHeader.d_type == QType::TXT) {
       string txt;
-      pr.xfrText(txt);
+      reader.xfrText(txt);
 
       return txt;
     }
-    else {
-      pr.xfrBlob(blob);
-    }
+    reader.xfrBlob(blob);
   }
 
   throw std::runtime_error("No TXT record in answer");
 }
 
-static std::string getSecPollStatus(const std::string& queriedName, int timeout=2)
+static std::string getSecPollStatus(const Logr::Logger& logger, const std::string& queriedName, int timeout = 2)
 {
-  const auto verbose = dnsdist::configuration::getCurrentRuntimeConfiguration().d_verbose;
-
   const DNSName sentName(queriedName);
   std::vector<uint8_t> packet;
-  DNSPacketWriter pw(packet, sentName, QType::TXT);
-  pw.getHeader()->id = dnsdist::getRandomDNSID();
-  pw.getHeader()->rd = 1;
+  DNSPacketWriter writer(packet, sentName, QType::TXT);
+  writer.getHeader()->id = dnsdist::getRandomDNSID();
+  writer.getHeader()->rd = 1;
 
   const auto& resolversForStub = getResolvers("/etc/resolv.conf");
 
-  for(const auto& dest : resolversForStub) {
+  if (resolversForStub.empty()) {
+    throw std::runtime_error("No resolver to query to check for Security Status update");
+  }
+
+  for (const auto& dest : resolversForStub) {
+    const auto resolverLogger = logger.withValues("network.peer.address", Logging::Loggable(dest));
     Socket sock(dest.sin4.sin_family, SOCK_DGRAM);
     sock.setNonBlocking();
     sock.connect(dest);
@@ -110,71 +111,63 @@ static std::string getSecPollStatus(const std::string& queriedName, int timeout=
     string reply;
     int ret = waitForData(sock.getHandle(), timeout, 0);
     if (ret < 0) {
-      if (verbose) {
-        warnlog("Error while waiting for the secpoll response from stub resolver %s: %d", dest.toString(), ret);
-      }
+      VERBOSESLOG(warnlog("Error while waiting for the secpoll response from stub resolver %s: %d", dest.toString(), ret),
+                  resolverLogger->error(Logr::Warning, ret, "Error while waiting for the security status polling response from stub resolver"));
       continue;
     }
-    else if (ret == 0) {
-      if (verbose) {
-        warnlog("Timeout while waiting for the secpoll response from stub resolver %s", dest.toString());
-      }
+    if (ret == 0) {
+      VERBOSESLOG(warnlog("Timeout while waiting for the secpoll response from stub resolver %s", dest.toString()),
+                  resolverLogger->info(Logr::Warning, "Timeout while waiting for the security status polling response from stub resolver"));
       continue;
     }
 
     try {
       sock.read(reply);
     }
-    catch(const std::exception& e) {
-      if (verbose) {
-        warnlog("Error while reading for the secpoll response from stub resolver %s: %s", dest.toString(), e.what());
-      }
+    catch (const std::exception& exp) {
+      VERBOSESLOG(warnlog("Error while reading for the secpoll response from stub resolver %s: %s", dest.toString(), exp.what()),
+                  resolverLogger->error(Logr::Warning, exp.what(), "Error while reading the security status polling response from stub resolver"));
       continue;
     }
 
     if (reply.size() <= sizeof(struct dnsheader)) {
-      if (verbose) {
-        warnlog("Too short answer of size %d received from the secpoll stub resolver %s", reply.size(), dest.toString());
-      }
+      VERBOSESLOG(warnlog("Too short answer of size %d received from the secpoll stub resolver %s", reply.size(), dest.toString()),
+                  resolverLogger->info(Logr::Warning, "Security status polling response received from the stub resolver is too small", "dns.response.size", Logging::Loggable(reply.size())));
       continue;
     }
 
-    struct dnsheader d;
-    memcpy(&d, reply.c_str(), sizeof(d));
-    if (d.id != pw.getHeader()->id) {
-      if (verbose) {
-        warnlog("Invalid ID (%d / %d) received from the secpoll stub resolver %s", d.id, pw.getHeader()->id, dest.toString());
-      }
+    dnsheader dnsHeader{};
+    memcpy(&dnsHeader, reply.c_str(), sizeof(dnsHeader));
+    if (dnsHeader.id != writer.getHeader()->id) {
+      VERBOSESLOG(warnlog("Invalid ID (%d / %d) received from the secpoll stub resolver %s", dnsHeader.id, writer.getHeader()->id, dest.toString()),
+                  resolverLogger->info(Logr::Warning, "Invalid ID in security status polling response received from the stub resolver", "dns.response.size", Logging::Loggable(reply.size()), "dns.response.id", Logging::Loggable(dnsHeader.id), "dns.query.id", Logging::Loggable(writer.getHeader()->id)));
       continue;
     }
 
-    if (d.rcode != RCode::NoError) {
-      if (verbose) {
-        warnlog("Response code '%s' received from the secpoll stub resolver %s for '%s'", RCode::to_s(d.rcode), dest.toString(), queriedName);
-      }
+    if (dnsHeader.rcode != RCode::NoError) {
+      VERBOSESLOG(warnlog("Response code '%s' received from the secpoll stub resolver %s for '%s'", RCode::to_s(dnsHeader.rcode), dest.toString(), queriedName),
+                  resolverLogger->info(Logr::Warning, "Non-zero response code in status polling response received from the stub resolver", "dns.response.size", Logging::Loggable(reply.size()), "dns.response.id", Logging::Loggable(dnsHeader.id), "dns.response.code", Logging::Loggable(RCode::to_s(dnsHeader.rcode))));
 
       /* no need to try another resolver if the domain does not exist */
-      if (d.rcode == RCode::NXDomain) {
-        throw std::runtime_error("Unable to get a valid Security Status update");
+      if (dnsHeader.rcode == RCode::NXDomain) {
+        throw std::runtime_error("Unable to get a valid Security Status update, domain does not exist");
       }
       continue;
     }
 
-    if (ntohs(d.qdcount) != 1 || ntohs(d.ancount) != 1) {
-      if (verbose) {
-        warnlog("Invalid answer (qdcount %d / ancount %d) received from the secpoll stub resolver %s", ntohs(d.qdcount), ntohs(d.ancount), dest.toString());
-      }
+    if (ntohs(dnsHeader.qdcount) != 1 || ntohs(dnsHeader.ancount) != 1) {
+      VERBOSESLOG(warnlog("Invalid answer (qdcount %d / ancount %d) received from the secpoll stub resolver %s", ntohs(dnsHeader.qdcount), ntohs(dnsHeader.ancount), dest.toString()),
+                  resolverLogger->info(Logr::Warning, "Invalid status polling response received from the stub resolver", "dns.response.size", Logging::Loggable(reply.size()), "dns.response.id", Logging::Loggable(dnsHeader.id), "dns.response.qdcount", Logging::Loggable(ntohs(dnsHeader.qdcount)), "dns.response.ancount", Logging::Loggable(ntohs(dnsHeader.ancount))));
       continue;
     }
 
-    uint16_t receivedType;
-    uint16_t receivedClass;
+    uint16_t receivedType{};
+    uint16_t receivedClass{};
     DNSName receivedName(reply.c_str(), reply.size(), sizeof(dnsheader), false, &receivedType, &receivedClass);
 
     if (receivedName != sentName || receivedType != QType::TXT || receivedClass != QClass::IN) {
-      if (verbose) {
-        warnlog("Invalid answer, either the qname (%s / %s), qtype (%s / %s) or qclass (%s / %s) does not match, received from the secpoll stub resolver %s", receivedName, sentName, QType(receivedType).toString(), QType(QType::TXT).toString(), QClass(receivedClass).toString(), QClass::IN.toString(), dest.toString());
-      }
+      VERBOSESLOG(warnlog("Invalid answer, either the qname (%s / %s), qtype (%s / %s) or qclass (%s / %s) does not match, received from the secpoll stub resolver %s", receivedName, sentName, QType(receivedType).toString(), QType(QType::TXT).toString(), QClass(receivedClass).toString(), QClass::IN.toString(), dest.toString()),
+                  resolverLogger->info(Logr::Warning, "Invalid status polling response received from the stub resolver, either the name, type or qclass does not match", "dns.response.size", Logging::Loggable(reply.size()), "dns.response.id", Logging::Loggable(dnsHeader.id), "dns.response.name", Logging::Loggable(receivedName), "dns.response.type", Logging::Loggable(receivedType), "dns.response.class", Logging::Loggable(receivedClass)));
       continue;
     }
 
@@ -189,59 +182,67 @@ namespace dnsdist::secpoll
 void doSecPoll(const std::string& suffix)
 {
   static bool s_secPollDone{false};
+  constexpr std::string_view pkgv(PACKAGEVERSION);
+  const bool releaseVersion = std::count(pkgv.begin(), pkgv.end(), '.') == 2;
 
   if (suffix.empty()) {
     return;
   }
 
-  const std::string pkgv(PACKAGEVERSION);
-  bool releaseVersion = std::count(pkgv.begin(), pkgv.end(), '.') == 2;
-  const std::string version = "dnsdist-" + pkgv;
+  const std::string version = std::string("dnsdist-") + std::string(pkgv);
   std::string queriedName = version.substr(0, 63) + ".security-status." + suffix;
 
   if (*queriedName.rbegin() != '.') {
     queriedName += '.';
   }
 
-  boost::replace_all(queriedName, "+", "_");
-  boost::replace_all(queriedName, "~", "_");
+  std::replace(queriedName.begin(), queriedName.end(), '+', '_');
+  std::replace(queriedName.begin(), queriedName.end(), '~', '_');
+
+  auto logger = dnsdist::logging::getTopLogger("security-status-polling")->withValues("version", Logging::Loggable(pkgv), "dns.query.name", Logging::Loggable(queriedName));
 
   try {
-    std::string status = getSecPollStatus(queriedName);
-    pair<string, string> split = splitField(unquotify(status), ' ');
+    const std::string status = getSecPollStatus(*logger, queriedName);
+    const std::pair<string, string> split = splitField(unquotify(status), ' ');
 
-    int securityStatus = std::stoi(split.first);
-    std::string securityMessage = split.second;
+    const auto securityStatus = pdns::checked_stoi<uint8_t>(split.first);
+    const std::string& securityMessage = split.second;
 
     if (securityStatus == 1 && !s_secPollDone) {
-      infolog("Polled security status of version %s at startup, no known issues reported: %s", std::string(VERSION), securityMessage);
+      SLOG(infolog("Polled security status of version %s at startup, no known issues reported: %s", std::string(VERSION), securityMessage),
+           logger->info(Logr::Info, "Polled security status at startup, no known issues reported", "message", Logging::Loggable(securityMessage), "status", Logging::Loggable(securityStatus)));
     }
     if (securityStatus == 2) {
-      errlog("PowerDNS DNSDist Security Update Recommended: %s", securityMessage);
+      SLOG(errlog("PowerDNS DNSDist Security Update Recommended: %s", securityMessage),
+           logger->error(Logr::Error, securityMessage, "PowerDNS DNSDist Security Update Recommended", "status", Logging::Loggable(securityStatus)));
     }
-    else if(securityStatus == 3) {
-      errlog("PowerDNS DNSDist Security Update Mandatory: %s", securityMessage);
+    else if (securityStatus == 3) {
+      SLOG(errlog("PowerDNS DNSDist Security Update Mandatory: %s", securityMessage),
+           logger->error(Logr::Error, securityMessage, "PowerDNS DNSDist Security Update Mandatory", "status", Logging::Loggable(securityStatus)));
     }
 
     dnsdist::metrics::g_stats.securityStatus = securityStatus;
     s_secPollDone = true;
     return;
   }
-  catch (const std::exception& e) {
+  catch (const std::exception& exp) {
     if (releaseVersion) {
-      warnlog("Error while retrieving the security update for version %s: %s", version, e.what());
+      SLOG(warnlog("Error while retrieving the security update for version %s: %s", version, exp.what()),
+           logger->error(Logr::Warning, exp.what(), "Error while retrieving the security status"));
     }
     else if (!s_secPollDone) {
-      infolog("Error while retrieving the security update for version %s: %s", version, e.what());
+      SLOG(infolog("Error while retrieving the security update for version %s: %s", version, exp.what()),
+           logger->error(Logr::Info, exp.what(), "Error while retrieving the security status"));
     }
   }
 
   if (releaseVersion) {
-    warnlog("Failed to retrieve security status update for '%s' on %s", pkgv, queriedName);
+    SLOG(warnlog("Failed to retrieve security status update for '%s' on %s", pkgv, queriedName),
+         logger->info(Logr::Warning, "Failed to retrieve security status"));
   }
   else if (!s_secPollDone) {
-    infolog("Not validating response for security status update, this is a non-release version.");
-
+    SLOG(infolog("Not validating response for security status update, this is a non-release version."),
+         logger->info(Logr::Info, "Not validating response for security status update, this is a non-release version."));
     /* for non-released versions, there is no use sending the same message several times,
        let's just accept that there will be no security polling for this exact version */
     s_secPollDone = true;

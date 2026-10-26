@@ -101,7 +101,13 @@ namespace YaHTTP {
       if (matched && !method.empty() && req->method != method) {
          // method did not match, record it though so we can return correct result
          matched = false;
-         seen = true;
+         // The OPTIONS handler registered in pdns/webserver.cc matches every
+         // url, and would cause "not found" errors to always be superseded
+         // with "found, but wrong method" errors, so don't pretend there has
+         // been a match in this case.
+         if (method != "OPTIONS") {
+           seen = true;
+         }
          continue;
       }
       if (matched) {
@@ -133,65 +139,4 @@ namespace YaHTTP {
     return RouteFound;
   };
 
-  void Router::printRoutes(std::ostream &os) {
-    for(TRouteList::iterator i = routes.begin(); i != routes.end(); i++) {
-#if __cplusplus >= 201103L
-      std::streamsize ss = os.width();
-      std::ios::fmtflags ff = os.setf(std::ios::left);
-      os.width(10);
-      os << std::get<0>(*i);
-      os.width(50);
-      os << std::get<1>(*i);
-      os.width(ss);
-      os.setf(ff);
-      os << "    " << std::get<3>(*i);
-      os << std::endl;
-#else
-      os << i->get<0>() << "    " << i->get<1>() << "    " << i->get<3>() << std::endl;
-#endif
-    } 
-  };
-
-  std::pair<std::string,std::string> Router::urlFor(const std::string &name, const strstr_map_t& arguments) {
-    std::ostringstream path;
-    std::string mask,method,result;
-    int k1,k2,k3;
-
-    bool found = false;
-    for(TRouteList::iterator i = routes.begin(); !found && i != routes.end(); i++) {
-#if __cplusplus >= 201103L
-      if (std::get<3>(*i) == name) { mask = std::get<1>(*i); method = std::get<0>(*i); found = true; }
-#else
-      if (i->get<3>() == name) { mask = i->get<1>(); method = i->get<0>(); found = true; }
-#endif
-    }
-
-    if (!found)
-      throw Error("Route not found");
-
-    for(k1=0,k3=0;k1<static_cast<int>(mask.size());k1++) {
-      if (mask[k1] == '<') {
-        std::string pname;
-        strstr_map_t::const_iterator pptr;
-        k2=k1;
-        while(k1<static_cast<int>(mask.size()) && mask[k1]!='>') k1++;
-        path << mask.substr(k3,k2-k3);
-        if (mask[k2+1] == '*')
-          pname = std::string(mask.begin() + k2 + 2, mask.begin() + k1);
-        else 
-          pname = std::string(mask.begin() + k2 + 1, mask.begin() + k1);
-        if ((pptr = arguments.find(pname)) != arguments.end()) 
-          path << Utility::encodeURL(pptr->second);
-        k3 = k1+1;
-      }
-      else if (mask[k1] == '*') {
-        // ready 
-        k3++;
-        continue;
-      }
-    }
-    path << mask.substr(k3);
-    result = path.str();
-    return std::make_pair(method, result);
-  }
 };

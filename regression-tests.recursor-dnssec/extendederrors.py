@@ -7,9 +7,9 @@ import dns.flags
 import dns.message
 import dns.query
 
+
 class ExtendedErrorOption(dns.edns.Option):
-    """Implementation of rfc8914
-    """
+    """Implementation of rfc8914"""
 
     def __init__(self, code, extra):
         super(ExtendedErrorOption, self).__init__(15)
@@ -20,13 +20,14 @@ class ExtendedErrorOption(dns.edns.Option):
     def to_wire(self, file=None):
         """Create EDNS packet."""
 
-        data = struct.pack('!H', self.code)
+        data = struct.pack("!H", self.code)
         data = data + self.extra
-        if file:
-            file.write(data)
-        else:
+        if not file:
             return data
+        file.write(data)
+        return None
 
+    @classmethod
     def from_wire(cls, otype, wire, current, olen):
         """Read EDNS packet.
 
@@ -35,17 +36,15 @@ class ExtendedErrorOption(dns.edns.Option):
         """
 
         if olen < 2:
-            raise Exception('Invalid EDNS Extended Error option')
+            raise Exception("Invalid EDNS Extended Error option")
 
-        (code,) = struct.unpack('!H', wire[current:current+2])
+        (code,) = struct.unpack("!H", wire[current : current + 2])
         if olen > 2:
-            extra = wire[current + 2:current + olen]
+            extra = wire[current + 2 : current + olen]
         else:
-            extra = b''
+            extra = b""
 
         return cls(code, extra)
-
-    from_wire = classmethod(from_wire)
 
     # needed in 2.0.0
     @classmethod
@@ -53,22 +52,18 @@ class ExtendedErrorOption(dns.edns.Option):
         data = parser.get_remaining()
 
         if len(data) < 2:
-            raise Exception('Invalid EDNS Extended Error option')
+            raise Exception("Invalid EDNS Extended Error option")
 
-        (code,) = struct.unpack('!H', data[0:2])
+        (code,) = struct.unpack("!H", data[0:2])
         if len(data) > 2:
             extra = data[2:]
         else:
-            extra = b''
+            extra = b""
 
         return cls(code, extra)
 
     def __repr__(self):
-        return '%s(%d, %s)' % (
-            self.__class__.__name__,
-            self.code,
-            self.extra
-        )
+        return "%s(%d, %s)" % (self.__class__.__name__, self.code, self.extra)
 
     def to_text(self):
         return self.__repr__()

@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 
 #pragma once
 #include <memory>
@@ -9,18 +30,28 @@
 #include "misc.hh"
 #include "noinitvector.hh"
 
-/* Async is only returned for TLS connections, if OpenSSL's async mode has been enabled */
+/* Async is only returned for TLS connections, if OpenSSL's async mode has been enabled (via TLSConfig::d_asyncMode). See TLSConnection::getAsyncFDs() */
 enum class IOState : uint8_t { Done, NeedRead, NeedWrite, Async };
 
 class TLSSession
 {
 public:
+  TLSSession() = default;
+  TLSSession(const TLSSession&) = delete;
+  TLSSession(TLSSession&&) = delete;
+  TLSSession& operator=(const TLSSession&) = delete;
+  TLSSession& operator=(TLSSession&&) = delete;
   virtual ~TLSSession() = default;
 };
 
 class TLSConnection
 {
 public:
+  TLSConnection() = default;
+  TLSConnection(const TLSConnection&) = delete;
+  TLSConnection(TLSConnection&&) = delete;
+  TLSConnection& operator=(const TLSConnection&) = delete;
+  TLSConnection& operator=(TLSConnection&&) = delete;
   virtual ~TLSConnection() = default;
   virtual void doHandshake() = 0;
   virtual IOState tryConnect(bool fastOpen, const ComboAddress& remote) = 0;
@@ -30,22 +61,41 @@ public:
   virtual size_t write(const void* buffer, size_t bufferSize, const struct timeval& writeTimeout) = 0;
   virtual IOState tryWrite(const PacketBuffer& buffer, size_t& pos, size_t toWrite) = 0;
   virtual IOState tryRead(PacketBuffer& buffer, size_t& pos, size_t toRead, bool allowIncomplete=false) = 0;
-  virtual std::string getServerNameIndication() const = 0;
-  virtual std::vector<uint8_t> getNextProtocol() const = 0;
-  virtual LibsslTLSVersion getTLSVersion() const = 0;
-  virtual bool hasSessionBeenResumed() const = 0;
+  [[nodiscard]] virtual std::string getServerNameIndication() const = 0;
+  [[nodiscard]] virtual std::vector<uint8_t> getNextProtocol() const = 0;
+  [[nodiscard]] virtual LibsslTLSVersion getTLSVersion() const = 0;
+  [[nodiscard]] virtual bool hasSessionBeenResumed() const = 0;
   virtual std::vector<std::unique_ptr<TLSSession>> getSessions() = 0;
   virtual void setSession(std::unique_ptr<TLSSession>& session) = 0;
-  virtual bool isUsable() const = 0;
+  [[nodiscard]] virtual bool isUsable() const = 0;
+  /* Used for OpenSSL's asynchronous mode. When that mode is enabled
+     (via TLSConfig::d_asyncMode), several operations can return a new
+     result: IOState::Async, that indicates that OpenSSL is doing a
+     compute-heavy operation and does not want to block the current
+     thread during that time. It has two advantages:
+     - lower latency, because we can switch to handling different TCP
+     connections instead of waiting for the operation to complete, if the
+     operation can be offloaded to a different hardware processing unit
+     (like zQAT)
+     - better efficiency by batching similar operations that can be done
+     in parallel by the processing unit.
+     So when we get IOState::Async, we need to call this method, getAsyncFDs()
+     that will return a list of file descriptors. These descriptors can be polled,
+     and will be marked as ready for reading when the asynchronous operation has
+     completed. So we need to get these file descriptors, watch them (for example
+     by registering them in our polling multiplexer), and retry the operation that
+     previously returned IOState::Async (tryHandshake, tryRead, tryWrite) again.
+  */
   virtual std::vector<int> getAsyncFDs() = 0;
   virtual void close() = 0;
+  [[nodiscard]] virtual std::pair<long, std::string> getVerifyResult() const = 0;
 
   void setUnknownTicketKey()
   {
     d_unknownTicketKey = true;
   }
 
-  bool getUnknownTicketKey() const
+  [[nodiscard]] bool getUnknownTicketKey() const
   {
     return d_unknownTicketKey;
   }
@@ -55,15 +105,17 @@ public:
     d_resumedFromInactiveTicketKey = true;
   }
 
-  bool getResumedFromInactiveTicketKey() const
+  [[nodiscard]] bool getResumedFromInactiveTicketKey() const
   {
     return d_resumedFromInactiveTicketKey;
   }
 
 protected:
+  // NOLINTBEGIN(cppcoreguidelines-non-private-member-variables-in-classes)
   int d_socket{-1};
   bool d_unknownTicketKey{false};
   bool d_resumedFromInactiveTicketKey{false};
+  // NOLINTEND(cppcoreguidelines-non-private-member-variables-in-classes)
 };
 
 class TLSCtx
@@ -73,6 +125,10 @@ public:
   {
     d_rotatingTicketsKey.clear();
   }
+  TLSCtx(const TLSCtx&) = delete;
+  TLSCtx(TLSCtx&&) = delete;
+  TLSCtx& operator=(const TLSCtx&) = delete;
+  TLSCtx& operator=(TLSCtx&&) = delete;
   virtual ~TLSCtx() = default;
   virtual std::unique_ptr<TLSConnection> getConnection(int socket, const struct timeval& timeout, time_t now) = 0;
   virtual std::unique_ptr<TLSConnection> getClientConnection(const std::string& host, bool hostIsAddr, int socket, const struct timeval& timeout) = 0;
@@ -80,6 +136,10 @@ public:
   virtual void loadTicketsKeys(const std::string& /* file */)
   {
     throw std::runtime_error("This TLS backend does not have the capability to load a tickets key from a file");
+  }
+  virtual void loadTicketsKey(const std::string& /* key */)
+  {
+    throw std::runtime_error("This TLS backend does not have the capability to load a ticket key");
   }
   void handleTicketsKeyRotation(time_t now)
   {
@@ -126,9 +186,11 @@ public:
     return TLSCtx::s_ticketsKeyAddedHook != nullptr;
   }
 protected:
-  std::atomic_flag d_rotatingTicketsKey;
+  // NOLINTBEGIN(cppcoreguidelines-non-private-member-variables-in-classes)
+  std::atomic_flag d_rotatingTicketsKey{};
   std::atomic<time_t> d_ticketsKeyNextRotation{0};
   time_t d_ticketsKeyRotationDelay{0};
+  // NOLINTEND(cppcoreguidelines-non-private-member-variables-in-classes)
 
 private:
   static tickets_key_added_hook s_ticketsKeyAddedHook;
@@ -151,21 +213,33 @@ public:
 
   void rotateTicketsKey(time_t now)
   {
-    if (d_ctx != nullptr) {
+    if (d_ctx != nullptr && d_parentFrontend == nullptr) {
       d_ctx->rotateTicketsKey(now);
     }
   }
 
   void loadTicketsKeys(const std::string& file)
   {
-    if (d_ctx != nullptr) {
+    if (d_ctx != nullptr && d_parentFrontend == nullptr) {
       d_ctx->loadTicketsKeys(file);
     }
   }
 
-  std::shared_ptr<TLSCtx> getContext()
+  void loadTicketsKey(const std::string& key)
+  {
+    if (d_ctx != nullptr && d_parentFrontend == nullptr) {
+      d_ctx->loadTicketsKey(key);
+    }
+  }
+
+  std::shared_ptr<TLSCtx> getContext() const
   {
     return std::atomic_load_explicit(&d_ctx, std::memory_order_acquire);
+  }
+
+  void setParent(std::shared_ptr<const TLSFrontend> parent)
+  {
+    std::atomic_store_explicit(&d_parentFrontend, std::move(parent), std::memory_order_release);
   }
 
   void cleanup()
@@ -184,13 +258,13 @@ public:
 
   static std::string timeToString(time_t rotationTime)
   {
-    char buf[20];
-    struct tm date_tm;
+    std::array<char, 20> buf{};
+    struct tm date_tm{};
 
     localtime_r(&rotationTime, &date_tm);
-    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &date_tm);
+    strftime(buf.data(), buf.size(), "%Y-%m-%d %H:%M:%S", &date_tm);
 
-    return std::string(buf);
+    return buf.data();
   }
 
   time_t getTicketsKeyRotationDelay() const
@@ -229,13 +303,21 @@ public:
   ALPN d_alpn{ALPN::Unset};
   /* whether the proxy protocol is inside or outside the TLS layer */
   bool d_proxyProtocolOutsideTLS{false};
+
 protected:
+  // NOLINTBEGIN(cppcoreguidelines-non-private-member-variables-in-classes)
   std::shared_ptr<TLSCtx> d_ctx{nullptr};
+  std::shared_ptr<const TLSFrontend> d_parentFrontend{nullptr};
+  // NOLINTEND(cppcoreguidelines-non-private-member-variables-in-classes)
 };
 
 class TCPIOHandler
 {
 public:
+  TCPIOHandler(const TCPIOHandler&) = delete;
+  TCPIOHandler(TCPIOHandler&&) = delete;
+  TCPIOHandler& operator=(const TCPIOHandler&) = delete;
+  TCPIOHandler& operator=(TCPIOHandler&&) = delete;
   TCPIOHandler(const std::string& host, bool hostIsAddr, int socket, const struct timeval& timeout, const std::shared_ptr<TLSCtx>& ctx) :
     d_socket(socket)
   {
@@ -271,7 +353,7 @@ public:
     }
   }
 
-  int getDescriptor() const
+  [[nodiscard]] int getDescriptor() const
   {
     return d_socket;
   }
@@ -296,12 +378,12 @@ public:
     }
     else {
       if (!s_disableConnectForUnitTests) {
-        SConnectWithTimeout(d_socket, remote, /* no timeout, we will handle it ourselves */ timeval{0,0});
+        SConnectWithTimeout(d_socket, fastOpen, remote, /* no timeout, we will handle it ourselves */ timeval{0,0});
       }
     }
 #else
     if (!s_disableConnectForUnitTests) {
-      SConnectWithTimeout(d_socket, remote, /* no timeout, we will handle it ourselves */ timeval{0,0});
+      SConnectWithTimeout(d_socket, fastOpen, remote, /* no timeout, we will handle it ourselves */ timeval{0,0});
     }
 #endif /* MSG_FASTOPEN */
 
@@ -332,12 +414,12 @@ public:
     }
     else {
       if (!s_disableConnectForUnitTests) {
-        SConnectWithTimeout(d_socket, remote, timeout);
+        SConnectWithTimeout(d_socket, fastOpen, remote, timeout);
       }
     }
 #else
     if (!s_disableConnectForUnitTests) {
-      SConnectWithTimeout(d_socket, remote, timeout);
+      SConnectWithTimeout(d_socket, fastOpen, remote, timeout);
     }
 #endif /* MSG_FASTOPEN */
 
@@ -358,13 +440,12 @@ public:
   {
     if (d_conn) {
       return d_conn->read(buffer, bufferSize, readTimeout, totalTimeout, allowIncomplete);
-    } else {
-      return readn2WithTimeout(d_socket, buffer, bufferSize, readTimeout, totalTimeout, allowIncomplete);
     }
+    return readn2WithTimeout(d_socket, buffer, bufferSize, readTimeout, totalTimeout, allowIncomplete);
   }
 
   /* Tries to read exactly toRead - pos bytes into the buffer, starting at position pos.
-     Updates pos everytime a successful read occurs,
+     Updates pos every time a successful read occurs,
      throws an std::runtime_error in case of IO error,
      return Done when toRead bytes have been read, needRead or needWrite if the IO operation
      would block.
@@ -380,7 +461,7 @@ public:
     }
 
     do {
-      ssize_t res = ::read(d_socket, reinterpret_cast<char*>(&buffer.at(pos)), toRead - pos);
+      ssize_t res = ::read(d_socket, &buffer.at(pos), toRead - pos);
       if (res == 0) {
         throw runtime_error("EOF while reading message");
       }
@@ -388,9 +469,7 @@ public:
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOTCONN) {
           return IOState::NeedRead;
         }
-        else {
-          throw std::runtime_error("Error while reading message: " + stringerror());
-        }
+        throw std::runtime_error("Error while reading message: " + stringerror());
       }
 
       pos += static_cast<size_t>(res);
@@ -404,7 +483,7 @@ public:
   }
 
   /* Tries to write exactly toWrite - pos bytes from the buffer, starting at position pos.
-     Updates pos everytime a successful write occurs,
+     Updates pos every time a successful write occurs,
      throws an std::runtime_error in case of IO error,
      return Done when toWrite bytes have been written, needRead or needWrite if the IO operation
      would block.
@@ -421,10 +500,13 @@ public:
 #ifdef MSG_FASTOPEN
     if (d_fastOpen) {
       int socketFlags = MSG_FASTOPEN;
-      size_t sent = sendMsgWithOptions(d_socket, reinterpret_cast<const char *>(&buffer.at(pos)), toWrite - pos, &d_remote, nullptr, 0, socketFlags);
-      if (sent > 0) {
+      auto sendRet = sendMsgWithOptions(d_socket, reinterpret_cast<const char*>(&buffer.at(pos)), toWrite - pos, &d_remote, nullptr, 0, socketFlags);
+      if (!sendRet.has_value()) {
+        throw std::runtime_error("sendMsgWithOptions: " + stringerror(sendRet.error()));
+      }
+      if (sendRet.value() > 0) {
         d_fastOpen = false;
-        pos += sent;
+        pos += sendRet.value();
       }
 
       if (pos < toWrite) {
@@ -436,7 +518,7 @@ public:
 #endif /* MSG_FASTOPEN */
 
     do {
-      ssize_t res = ::write(d_socket, reinterpret_cast<const char*>(&buffer.at(pos)), toWrite - pos);
+      ssize_t res = ::write(d_socket, &buffer.at(pos), toWrite - pos);
 
       if (res == 0) {
         throw runtime_error("EOF while sending message");
@@ -445,9 +527,7 @@ public:
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOTCONN) {
           return IOState::NeedWrite;
         }
-        else {
-          throw std::runtime_error("Error while writing message: " + stringerror());
-        }
+        throw std::runtime_error("Error while writing message: " + stringerror());
       }
 
       pos += static_cast<size_t>(res);
@@ -466,35 +546,38 @@ public:
 #ifdef MSG_FASTOPEN
     if (d_fastOpen) {
       int socketFlags = MSG_FASTOPEN;
-      size_t sent = sendMsgWithOptions(d_socket, reinterpret_cast<const char *>(buffer), bufferSize, &d_remote, nullptr, 0, socketFlags);
-      if (sent > 0) {
+      auto sendRet = sendMsgWithOptions(d_socket, reinterpret_cast<const char*>(buffer), bufferSize, &d_remote, nullptr, 0, socketFlags);
+      if (!sendRet.has_value()) {
+        throw std::runtime_error("sendMsgWithOptions: " + stringerror(sendRet.error()));
+      }
+      if (sendRet.value() > 0) {
         d_fastOpen = false;
       }
 
-      return sent;
+      return sendRet.value();
     }
 #endif /* MSG_FASTOPEN */
 
     return writen2WithTimeout(d_socket, buffer, bufferSize, writeTimeout);
   }
 
-  std::string getServerNameIndication() const
+  [[nodiscard]] std::string getServerNameIndication() const
   {
     if (d_conn) {
       return d_conn->getServerNameIndication();
     }
-    return std::string();
+    return {};
   }
 
-  std::vector<uint8_t> getNextProtocol() const
+  [[nodiscard]] std::vector<uint8_t> getNextProtocol() const
   {
     if (d_conn) {
       return d_conn->getNextProtocol();
     }
-    return std::vector<uint8_t>();
+    return {};
   }
 
-  LibsslTLSVersion getTLSVersion() const
+  [[nodiscard]] LibsslTLSVersion getTLSVersion() const
   {
     if (d_conn) {
       return d_conn->getTLSVersion();
@@ -502,22 +585,30 @@ public:
     return LibsslTLSVersion::Unknown;
   }
 
-  bool isTLS() const
+  [[nodiscard]] bool isTLS() const
   {
     return d_conn != nullptr;
   }
 
-  bool hasTLSSessionBeenResumed() const
+  [[nodiscard]] std::pair<long, std::string> getVerifyResult() const
+  {
+    if (d_conn) {
+      return d_conn->getVerifyResult();
+    }
+    return {0, ""};
+  }
+
+  [[nodiscard]] bool hasTLSSessionBeenResumed() const
   {
     return d_conn && d_conn->hasSessionBeenResumed();
   }
 
-  bool getResumedFromInactiveTicketKey() const
+  [[nodiscard]] bool getResumedFromInactiveTicketKey() const
   {
     return d_conn && d_conn->getResumedFromInactiveTicketKey();
   }
 
-  bool getUnknownTicketKey() const
+  [[nodiscard]] bool getUnknownTicketKey() const
   {
     return d_conn && d_conn->getUnknownTicketKey();
   }
@@ -538,7 +629,7 @@ public:
     return d_conn->getSessions();
   }
 
-  bool isUsable() const
+  [[nodiscard]] bool isUsable() const
   {
     if (!d_conn) {
       return isTCPSocketUsable(d_socket);
@@ -570,7 +661,12 @@ struct TLSContextParameters
   std::string d_provider;
   std::string d_ciphers;
   std::string d_ciphers13;
+  std::string d_ecdheCurves;
   std::string d_caStore;
+  std::string d_keyLogFile;
+  std::string d_client_certificate;
+  std::string d_client_certificate_key;
+  std::string d_client_certificate_password;
   TLSFrontend::ALPN d_alpn{TLSFrontend::ALPN::Unset};
   bool d_validateCertificates{true};
   bool d_releaseBuffers{true};

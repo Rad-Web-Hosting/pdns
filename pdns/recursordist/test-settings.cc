@@ -9,7 +9,7 @@
 #include <boost/format.hpp>
 #include <fstream>
 
-#include "settings/cxxsettings.hh"
+#include "rec-rust-lib/cxxsettings.hh"
 
 BOOST_AUTO_TEST_SUITE(test_settings)
 
@@ -90,6 +90,150 @@ packetcache:
   BOOST_CHECK_EQUAL(yaml, std::string(back));
 }
 
+BOOST_AUTO_TEST_CASE(test_rust_parse_with_refs_issue_18174_unique_aliases)
+{
+  const std::string yaml = R"EOT(
+incoming:
+  allow_from:
+  - 0.0.0.0/0
+  listen:
+  - 0.0.0.0
+  max_tcp_clients: 512
+  port: 1053
+
+logging:
+  common_errors: true
+  disable_syslog: false
+
+recursor:
+  any_to_tcp: true
+  daemon: false
+  export_etc_hosts: false
+  extended_resolution_errors: true
+  forward_zones:
+    - zone: example.com
+      forwarders: &id001
+        - 108.162.192.162
+        - 172.64.32.162
+        - 173.245.58.162
+        - 108.162.195.228
+        - 172.64.35.228
+        - 162.159.44.228
+    - zone: sub-norecurse.example.com
+      forwarders: *id001
+
+  forward_zones_recurse:
+    - zone: example.org
+      forwarders: &id002
+        - 1.1.1.1
+        - 1.0.0.1
+    - zone: example.net
+      forwarders: *id002
+    - zone: sub.example.org
+      forwarders: &id003
+        - 8.8.8.8
+        - 8.8.4.4
+      recurse: true
+    - zone: sub.example.net
+      forwarders: *id003
+      recurse: true
+    - zone: sub2.example.org
+      forwarders: &id004
+        - 9.9.9.9
+        - 149.112.112.112
+      recurse: true
+    - zone: sub2.example.net
+      forwarders: *id004
+      recurse: true
+
+  write_pid: false
+
+dnssec:
+  validation: validate
+)EOT";
+
+  auto settings = pdns::rust::settings::rec::parse_yaml_string(yaml);
+  BOOST_REQUIRE_EQUAL(settings.recursor.forward_zones.size(), 2U);
+  BOOST_REQUIRE_EQUAL(settings.recursor.forward_zones_recurse.size(), 6U);
+
+  BOOST_CHECK_EQUAL(settings.recursor.forward_zones_recurse[3].zone, "sub.example.net");
+  BOOST_REQUIRE_EQUAL(settings.recursor.forward_zones_recurse[3].forwarders.size(), 2U);
+  BOOST_CHECK_EQUAL(settings.recursor.forward_zones_recurse[3].forwarders[0], "8.8.8.8");
+  BOOST_CHECK_EQUAL(settings.recursor.forward_zones_recurse[3].forwarders[1], "8.8.4.4");
+}
+
+BOOST_AUTO_TEST_CASE(test_rust_parse_with_refs_issue_18174, *boost::unit_test::expected_failures(2))
+{
+  const std::string yaml = R"EOT(
+incoming:
+  allow_from:
+  - 0.0.0.0/0
+  listen:
+  - 0.0.0.0
+  max_tcp_clients: 512
+  port: 1053
+
+logging:
+  common_errors: true
+  disable_syslog: false
+
+recursor:
+  any_to_tcp: true
+  daemon: false
+  export_etc_hosts: false
+  extended_resolution_errors: true
+  forward_zones:
+    - zone: example.com
+      forwarders: &id001
+        - 108.162.192.162
+        - 172.64.32.162
+        - 173.245.58.162
+        - 108.162.195.228
+        - 172.64.35.228
+        - 162.159.44.228
+    - zone: sub-norecurse.example.com
+      forwarders: *id001
+
+  forward_zones_recurse:
+    - zone: example.org
+      forwarders: &id001
+        - 1.1.1.1
+        - 1.0.0.1
+    - zone: example.net
+      forwarders: *id001
+    - zone: sub.example.org
+      forwarders: &id001
+        - 8.8.8.8
+        - 8.8.4.4
+      recurse: true
+    - zone: sub.example.net
+      forwarders: *id001
+      recurse: true
+    - zone: sub2.example.org
+      forwarders: &id002
+        - 9.9.9.9
+        - 149.112.112.112
+      recurse: true
+    - zone: sub2.example.net
+      forwarders: *id002
+      recurse: true
+
+  write_pid: false
+
+dnssec:
+  validation: validate
+)EOT";
+
+  auto settings = pdns::rust::settings::rec::parse_yaml_string(yaml);
+  BOOST_REQUIRE_EQUAL(settings.recursor.forward_zones.size(), 2U);
+  BOOST_REQUIRE_EQUAL(settings.recursor.forward_zones_recurse.size(), 6U);
+
+  BOOST_CHECK_EQUAL(settings.recursor.forward_zones_recurse[3].zone, "sub.example.net");
+  BOOST_REQUIRE_EQUAL(settings.recursor.forward_zones_recurse[3].forwarders.size(), 2U);
+  BOOST_CHECK_EQUAL(settings.recursor.forward_zones_recurse[3].forwarders[0], "8.8.8.8"); // currently failing
+  BOOST_CHECK_EQUAL(settings.recursor.forward_zones_recurse[3].forwarders[1], "8.8.4.4"); // currently failing
+}
+
 BOOST_AUTO_TEST_CASE(test_rust_validation_with_error1)
 {
   const std::string yaml = R"EOT(
@@ -100,9 +244,7 @@ incoming:
   BOOST_CHECK_THROW({
     auto settings = pdns::rust::settings::rec::parse_yaml_string(yaml);
     auto back = settings.to_yaml_string();
-    settings.validate();
-  },
-                    rust::Error);
+    settings.validate(); }, rust::Error);
 }
 
 BOOST_AUTO_TEST_CASE(test_rust_validation_with_error2)
@@ -118,10 +260,7 @@ recursor:
 
   auto settings = pdns::rust::settings::rec::parse_yaml_string(yaml);
   auto back = settings.to_yaml_string();
-  BOOST_CHECK_THROW({
-    settings.validate();
-  },
-                    rust::Error);
+  BOOST_CHECK_THROW({ settings.validate(); }, rust::Error);
 }
 
 BOOST_AUTO_TEST_CASE(test_rust_validation_with_error3)
@@ -137,9 +276,7 @@ recursor:
   BOOST_CHECK_THROW({
     auto settings = pdns::rust::settings::rec::parse_yaml_string(yaml);
     auto back = settings.to_yaml_string();
-    settings.validate();
-  },
-                    rust::Error);
+    settings.validate(); }, rust::Error);
 }
 
 BOOST_AUTO_TEST_CASE(test_rust_validation_with_error4)
@@ -153,9 +290,7 @@ recursor:
   BOOST_CHECK_THROW({
     auto settings = pdns::rust::settings::rec::parse_yaml_string(yaml);
     auto back = settings.to_yaml_string();
-    settings.validate();
-  },
-                    rust::Error);
+    settings.validate(); }, rust::Error);
 }
 
 BOOST_AUTO_TEST_CASE(test_rust_validation_with_error5)
@@ -194,9 +329,7 @@ recursor:
     BOOST_CHECK_THROW({
       auto settings = pdns::rust::settings::rec::parse_yaml_string(yamltest.str());
       auto back = settings.to_yaml_string();
-      settings.validate();
-    },
-                      rust::Error);
+      settings.validate(); }, rust::Error);
   }
 }
 
@@ -437,6 +570,7 @@ BOOST_AUTO_TEST_CASE(test_yaml_defaults_ta)
   BOOST_CHECK_EQUAL(settings.dnssec.negative_trustanchors.size(), 0U);
   BOOST_CHECK_EQUAL(std::string(settings.dnssec.trustanchorfile), "");
   BOOST_CHECK_EQUAL(settings.dnssec.trustanchorfile_interval, 24U);
+  BOOST_CHECK_EQUAL(settings.dnssec.nta_extended_error, false);
 
   const std::string yaml2 = R"EOT(dnssec:
   trustanchors:
@@ -449,6 +583,7 @@ BOOST_AUTO_TEST_CASE(test_yaml_defaults_ta)
       reason: d
   trustanchorfile: e
   trustanchorfile_interval: 99
+  nta_extended_error: false
 )EOT";
   settings = pdns::rust::settings::rec::parse_yaml_string(yaml2);
   settings.validate();
@@ -460,6 +595,7 @@ BOOST_AUTO_TEST_CASE(test_yaml_defaults_ta)
   BOOST_CHECK_EQUAL(std::string(settings.dnssec.negative_trustanchors[0].reason), "d");
   BOOST_CHECK_EQUAL(std::string(settings.dnssec.trustanchorfile), "e");
   BOOST_CHECK_EQUAL(settings.dnssec.trustanchorfile_interval, 99U);
+  BOOST_CHECK_EQUAL(settings.dnssec.nta_extended_error, false);
 }
 
 BOOST_AUTO_TEST_CASE(test_yaml_ta_merge)
@@ -477,7 +613,8 @@ BOOST_AUTO_TEST_CASE(test_yaml_ta_merge)
   settings.validate();
   LuaConfigItems lua1;
   ProxyMapping proxyMapping;
-  pdns::settings::rec::fromBridgeStructToLuaConfig(settings, lua1, proxyMapping);
+  OpenTelemetryTraceConditions conditions;
+  pdns::settings::rec::fromBridgeStructToLuaConfig(settings, lua1, proxyMapping, conditions);
   BOOST_CHECK_EQUAL(lua1.dsAnchors.size(), 2U);
   BOOST_CHECK_EQUAL(lua1.dsAnchors[DNSName(".")].size(), 1U);
   BOOST_CHECK_EQUAL(lua1.dsAnchors[DNSName(".")].begin()->getZoneRepresentation(), "19718 13 2 8acbb0cd28f41250a80a491389424d341522d946b0da0c0291f2d3d771d7805a");
@@ -495,9 +632,9 @@ BOOST_AUTO_TEST_CASE(test_yaml_ta_merge)
   settings = pdns::rust::settings::rec::parse_yaml_string(yaml2);
   settings.validate();
   LuaConfigItems lua2;
-  pdns::settings::rec::fromBridgeStructToLuaConfig(settings, lua2, proxyMapping);
+  pdns::settings::rec::fromBridgeStructToLuaConfig(settings, lua2, proxyMapping, conditions);
   BOOST_CHECK_EQUAL(lua2.dsAnchors.size(), 2U);
-  BOOST_CHECK_EQUAL(lua2.dsAnchors[DNSName(".")].size(), 1U);
+  BOOST_CHECK_EQUAL(lua2.dsAnchors[DNSName(".")].size(), 2U);
   BOOST_CHECK_EQUAL(lua2.dsAnchors[DNSName("a")].size(), 2U);
 }
 
@@ -886,6 +1023,35 @@ BOOST_AUTO_TEST_CASE(test_yaml_proxymapping)
   BOOST_CHECK_EQUAL(settings.incoming.proxymappings[1].domains.size(), 3U);
 }
 
+BOOST_AUTO_TEST_CASE(test_yaml_forwardingcatalogzones)
+{
+  const std::string yaml = R"EOT(recursor:
+  forwarding_catalog_zones:
+  - zone: 'forward.invalid'
+    xfr:
+      addresses: [192.168.178.3:53]
+    groups:
+      - forwarders: [1.2.3.4]
+      - name: mygroup
+        forwarders: [4.5.6.7]
+        recurse: true
+        notify_allowed: true
+)EOT";
+
+  auto settings = pdns::rust::settings::rec::parse_yaml_string(yaml);
+  settings.validate();
+  BOOST_CHECK_EQUAL(std::string(settings.recursor.forwarding_catalog_zones[0].zone), "forward.invalid");
+  BOOST_CHECK_EQUAL(std::string(settings.recursor.forwarding_catalog_zones[0].xfr.addresses[0]), "192.168.178.3:53");
+  BOOST_CHECK_EQUAL(settings.recursor.forwarding_catalog_zones[0].groups[0].forwarders.size(), 1U);
+  BOOST_CHECK_EQUAL(std::string(settings.recursor.forwarding_catalog_zones[0].groups[0].forwarders[0]), "1.2.3.4");
+  BOOST_CHECK_EQUAL(std::string(settings.recursor.forwarding_catalog_zones[0].groups[0].name), "");
+
+  BOOST_CHECK_EQUAL(settings.recursor.forwarding_catalog_zones[0].groups[1].forwarders.size(), 1U);
+  BOOST_CHECK_EQUAL(std::string(settings.recursor.forwarding_catalog_zones[0].groups[1].forwarders[0]), "4.5.6.7");
+  BOOST_CHECK_EQUAL(settings.recursor.forwarding_catalog_zones[0].groups[1].recurse, true);
+  BOOST_CHECK_EQUAL(settings.recursor.forwarding_catalog_zones[0].groups[1].notify_allowed, true);
+}
+
 BOOST_AUTO_TEST_CASE(test_yaml_to_luaconfigand_back)
 {
   const std::string yaml = R"EOT(dnssec:
@@ -1036,7 +1202,8 @@ recordcache:
   // create a Lua config based on YAML
   LuaConfigItems luaConfig;
   ProxyMapping proxyMapping;
-  pdns::settings::rec::fromBridgeStructToLuaConfig(settings, luaConfig, proxyMapping);
+  OpenTelemetryTraceConditions conditions;
+  pdns::settings::rec::fromBridgeStructToLuaConfig(settings, luaConfig, proxyMapping, conditions);
 
   // Create YAML, given a Lua config
   auto newsettings = pdns::rust::settings::rec::parse_yaml_string("");

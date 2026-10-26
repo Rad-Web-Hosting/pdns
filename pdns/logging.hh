@@ -24,13 +24,10 @@
 
 #include "config.h"
 
-#ifdef RECURSOR
-
 #include <map>
 #include <memory>
 #include <string>
 #include <sstream>
-#include <boost/optional.hpp>
 
 #include "logr.hh"
 #include "dnsname.hh"
@@ -41,9 +38,9 @@ namespace Logging
 
 struct Entry
 {
-  boost::optional<std::string> name; // name parts joined with '.'
+  std::optional<std::string> name; // name parts joined with '.'
   std::string message; // message as send to log call
-  boost::optional<std::string> error; // error if .Error() was called
+  std::optional<std::string> error; // error if .Error() was called
   struct timeval d_timestamp; // time of entry generation
   std::map<std::string, std::string> values; // key-value pairs
   size_t level; // level at which this was logged
@@ -53,7 +50,7 @@ struct Entry
 // Warning: some meta-programming is going on.  We define helper
 // templates that can be used to see if specific string output
 // functions are available.  If so, we use those instead of << into an
-// ostringstream. Note that this decision happpens compile time.
+// ostringstream. Note that this decision happens compile time.
 // Some hints taken from https://www.cppstories.com/2019/07/detect-overload-from-chars/
 // (I could not get function templates with enabled_if<> to work in this case)
 //
@@ -155,58 +152,66 @@ struct IterLoggable : public Logr::Loggable
       else {
         first = false;
       }
-      oss << *i;
+      if constexpr (std::is_same_v<typename T::value_type, std::string>) {
+        oss << *i;
+      }
+      else if constexpr (is_toStructuredLogString_available<typename T::value_type>::value) {
+        oss << i->toStructuredLogString();
+      }
+      else if constexpr (is_toLogString_available<typename T::value_type>::value) {
+        oss << i->toLogString();
+      }
+      else if constexpr (is_toString_available<typename T::value_type>::value) {
+        oss << i->toString();
+      }
+      else if constexpr (is_to_string_available<typename T::value_type>::value) {
+        oss << std::to_string(*i);
+      }
+      else {
+        oss << *i;
+      }
     }
     return oss.str();
   }
 };
 
-typedef void (*EntryLogger)(const Entry&);
+using EntryLogger = void (*)(const Entry&);
 
 class Logger : public Logr::Logger, public std::enable_shared_from_this<const Logger>
 {
 public:
-  bool enabled(Logr::Priority) const override;
-
-  void info(const std::string& msg) const override;
   void info(Logr::Priority, const std::string& msg) const override;
-  void error(int err, const std::string& msg) const override;
-  void error(const std::string& err, const std::string& msg) const override;
   void error(Logr::Priority, int err, const std::string& msg) const override;
   void error(Logr::Priority, const std::string& err, const std::string& msg) const override;
 
   std::shared_ptr<Logr::Logger> v(size_t level) const override;
   std::shared_ptr<Logr::Logger> withValues(const std::map<std::string, std::string>& values) const override;
-  virtual std::shared_ptr<Logr::Logger> withName(const std::string& name) const override;
+  std::shared_ptr<Logr::Logger> withName(const std::string& name) const override;
 
   static std::shared_ptr<Logger> create(EntryLogger callback);
   static std::shared_ptr<Logger> create(EntryLogger callback, const std::string& name);
 
   Logger(EntryLogger callback);
-  Logger(EntryLogger callback, boost::optional<std::string> name);
-  Logger(std::shared_ptr<const Logger> parent, boost::optional<std::string> name, size_t verbosity, size_t lvl, EntryLogger callback);
-  virtual ~Logger();
-
-  size_t getVerbosity() const;
-  void setVerbosity(size_t verbosity);
+  Logger(EntryLogger callback, std::optional<std::string> name);
+  Logger(std::shared_ptr<const Logger> parent, std::optional<std::string> name, size_t lvl, EntryLogger callback);
+  ~Logger() override;
 
 private:
-  void logMessage(const std::string& msg, boost::optional<const std::string> err) const;
-  void logMessage(const std::string& msg, Logr::Priority p, boost::optional<const std::string> err) const;
+  void logMessage(const std::string& msg, Logr::Priority prio, const std::optional<std::string>& err) const;
   std::shared_ptr<const Logger> getptr() const;
 
   std::shared_ptr<const Logger> _parent{nullptr};
   EntryLogger _callback;
-  boost::optional<std::string> _name;
+  std::optional<std::string> _name;
   std::map<std::string, std::string> _values;
   // current Logger's level. the higher the more verbose.
   size_t _level{0};
-  // verbosity settings. messages with level higher's than verbosity won't appear
-  size_t _verbosity{0};
 };
 }
 
 extern std::shared_ptr<Logging::Logger> g_slog;
+
+#ifdef RECURSOR // [
 
 // Prefer structured logging? Since Recursor 5.1.0, we always do. We keep a const, to allow for
 // step-by-step removal of old style logging code (for recursor-only code). Note that code shared
@@ -217,7 +222,7 @@ constexpr bool g_slogStructured = true;
 // A typical use:
 //
 // SLOG(g_log<<Logger::Warning<<"Unable to parse configuration file '"<<configname<<"'"<<endl,
-//      startupLog->error("No such file", "Unable to parse configuration file", "config_file", Logging::Loggable(configname));
+//      startupLog->error(Logr::Warning, "No such file", "Unable to parse configuration file", "config_file", Logging::Loggable(configname));
 //
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define SLOG(oldStyle, slogCall) \
@@ -225,10 +230,50 @@ constexpr bool g_slogStructured = true;
     slogCall;                    \
   } while (0)
 
-#else // No structured logging (e.g. auth)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define VERBOSESLOG(nonStructured, structured)
+
+#elif defined(DNSDIST) // ] [
+
+// Still able to choose between old-style and structured logging
+
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define SLOG(nonStructured, structured)            \
+  do {                                             \
+    if (dnsdist::logging::doStructuredLogging()) { \
+      structured;                                  \
+    }                                              \
+    else {                                         \
+      nonStructured;                               \
+    }                                              \
+  } while (0)
+
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define VERBOSESLOG(nonStructured, structured)  \
+  do {                                          \
+    if (dnsdist::logging::doVerboseLogging()) { \
+      SLOG(nonStructured, structured);          \
+    }                                           \
+  } while (0)
+
+#else // ] [ PDNS_AUTH
+
+// Still able to choose between old-style and structured logging
+extern bool g_slogStructured;
+
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define SLOG(oldStyle, slogCall) \
   do {                           \
-    oldStyle;                    \
+    if (g_slogStructured) {      \
+      slogCall;                  \
+    }                            \
+    else {                       \
+      oldStyle;                  \
+    }                            \
   } while (0)
-#endif // RECURSOR
+
+// VERBOSESLOG is not used in Auth.
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define VERBOSESLOG(nonStructured, structured)
+
+#endif // ]

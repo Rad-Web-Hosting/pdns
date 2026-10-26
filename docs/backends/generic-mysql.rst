@@ -2,13 +2,19 @@ Generic MySQL/MariaDB  backend
 ==============================
 
 * Native: Yes
-* Master: Yes
-* Slave: Yes
-* Superslave: Yes
-* Case: All lower
+* Primary: Yes
+* Secondary: Yes
+* Producer: Yes
+* Consumer: Yes
+* Autosecondary: Yes
+* DNS Update: Yes
 * DNSSEC: Yes (set ``gmysql-dnssec``)
 * Disabled data: Yes
 * Comments: Yes
+* Search: Yes
+* Views: No
+* API: Read-Write
+* :ref:`Multiple instances <setting-launch>`: Yes
 * Zone caching: Yes
 * Module name: gmysql
 * Launch name: ``gmysql``
@@ -43,6 +49,11 @@ domains table. The following SQL does the job:
 .. literalinclude:: ../../modules/gmysqlbackend/enable-foreign-keys.mysql.sql
    :language: SQL
 
+.. warning::
+  Please note, however, that setting up these foreign key constraints prevents
+  the PowerDNS database from being usable with mysql group replication, if you
+  are using multiple servers.
+
 Using MySQL/MariaDB replication
 -------------------------------
 
@@ -50,7 +61,7 @@ To support ``NATIVE`` domains, the ``binlog_format`` for the MySQL/MariaDB
 replication **must** be set to ``MIXED`` or ``ROW`` to prevent
 differences in data between replicated servers. See `"Setting
 The Binary Log
-Format" <http://dev.mysql.com/doc/refman/5.7/en/binary-log-setting.html>`__
+Format" <https://dev.mysql.com/doc/refman/5.7/en/binary-log-setting.html>`__
 and `"Binary Log Formats" <https://mariadb.com/kb/en/binary-log-formats/>`__
 for more information.
 
@@ -72,7 +83,7 @@ Settings
 Host (ip address) to connect to. Mutually exclusive with :ref:`setting-gmysql-socket`.
 
 .. warning::
-  When specified as a hostname a chicken/egg situation might
+  When specified as a hostname, a chicken/egg situation might
   arise where the database is needed to resolve the IP address of the
   database. It is best to supply an IP address of the database here.
 
@@ -116,7 +127,7 @@ Group to connect as. Default: "client".
 ``gmysql-password``
 ^^^^^^^^^^^^^^^^^^^
 
-The password to for :ref:`setting-gmysql-user`.
+The password for :ref:`setting-gmysql-user`.
 
 .. _setting-gmysql-dnssec:
 

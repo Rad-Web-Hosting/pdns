@@ -22,6 +22,7 @@
 #pragma once
 
 #include "dnsparser.hh"
+#include "iputils.hh"
 
 namespace dnsdist
 {
@@ -59,13 +60,23 @@ namespace PacketMangling
 {
   bool editDNSHeaderFromPacket(PacketBuffer& packet, const std::function<bool(dnsheader& header)>& editFunction);
   bool editDNSHeaderFromRawPacket(void* packet, const std::function<bool(dnsheader& header)>& editFunction);
+  void restrictDNSPacketTTLs(PacketBuffer& packet, uint32_t minimumValue, uint32_t maximumValue = std::numeric_limits<uint32_t>::max(), const std::unordered_set<QType>& types = {});
+  void restoreFlags(struct dnsheader* dnsHeader, uint16_t origFlags);
+}
+
+namespace RecordParsers
+{
+  std::optional<ComboAddress> parseARecord(const std::string_view& packet, const DNSPacketOverlay::Record& record);
+  std::optional<ComboAddress> parseAAAARecord(const std::string_view& packet, const DNSPacketOverlay::Record& record);
+  std::optional<ComboAddress> parseAddressRecord(const std::string_view& packet, const DNSPacketOverlay::Record& record);
+  std::optional<DNSName> parseCNAMERecord(const std::string_view& packet, const DNSPacketOverlay::Record& record);
 }
 
 struct ResponseConfig
 {
-  boost::optional<bool> setAA{boost::none};
-  boost::optional<bool> setAD{boost::none};
-  boost::optional<bool> setRA{boost::none};
+  std::optional<bool> setAA{std::nullopt};
+  std::optional<bool> setAD{std::nullopt};
+  std::optional<bool> setRA{std::nullopt};
   uint32_t ttl{60};
 };
 void setResponseHeadersFromConfig(dnsheader& dnsheader, const ResponseConfig& config);

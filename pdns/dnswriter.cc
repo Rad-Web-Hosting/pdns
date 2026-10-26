@@ -23,9 +23,7 @@
 #include "config.h"
 #endif
 #include <boost/version.hpp>
-#if BOOST_VERSION >= 105400
 #include <boost/container/static_vector.hpp>
-#endif
 #include "dnswriter.hh"
 #include "misc.hh"
 #include "dnsparser.hh"
@@ -40,9 +38,9 @@
 
 */
 
-
-template <typename Container> GenericDNSPacketWriter<Container>::GenericDNSPacketWriter(Container& content, const DNSName& qname, uint16_t  qtype, uint16_t qclass, uint8_t opcode)
-  : d_content(content), d_qname(qname), d_canonic(false), d_lowerCase(false)
+template <typename Container>
+GenericDNSPacketWriter<Container>::GenericDNSPacketWriter(Container& content, const DNSName& qname, uint16_t qtype, uint16_t qclass, uint8_t opcode) :
+  d_qname(qname), d_content(content)
 {
   d_content.clear();
   dnsheader dnsheader;
@@ -63,9 +61,10 @@ template <typename Container> GenericDNSPacketWriter<Container>::GenericDNSPacke
   xfr16BitInt(qtype);
   xfr16BitInt(qclass);
 
-  d_truncatemarker=d_content.size();
-  d_sor = 0;
-  d_rollbackmarker = 0;
+  if (d_content.size() > std::numeric_limits<decltype(d_truncatemarker)>::max()) {
+    throw std::range_error("Trying to build a packet larger than " + std::to_string(std::numeric_limits<decltype(d_truncatemarker)>::max()) + " bytes");
+  }
+  d_truncatemarker = d_content.size();
 }
 
 template <typename Container> dnsheader* GenericDNSPacketWriter<Container>::getHeader()
@@ -78,11 +77,14 @@ template <typename Container> void GenericDNSPacketWriter<Container>::startRecor
 {
   d_compress = compress;
   commit();
-  d_rollbackmarker=d_content.size();
+  if (d_content.size() > std::numeric_limits<decltype(d_rollbackmarker)>::max()) {
+    throw std::range_error("Trying to build a packet larger than " + std::to_string(std::numeric_limits<decltype(d_rollbackmarker)>::max()) + " bytes");
+  }
+  d_rollbackmarker = d_content.size();
 
-  if(compress && !name.isRoot() && d_qname==name) {  // don't do the whole label compression thing if we *know* we can get away with "see question" - except when compressing the root
-    static unsigned char marker[2]={0xc0, 0x0c};
-    d_content.insert(d_content.end(), (const char *) &marker[0], (const char *) &marker[2]);
+  if (compress && !name.isRoot() && d_qname==name) {  // don't do the whole label compression thing if we *know* we can get away with "see question" - except when compressing the root
+    static const std::array<unsigned char, 2> marker{0xc0, 0x0c};
+    d_content.insert(d_content.end(), reinterpret_cast<const char *>(marker.begin()), reinterpret_cast<const char *>(marker.end()));
   }
   else {
     xfrName(name, compress);
@@ -92,7 +94,8 @@ template <typename Container> void GenericDNSPacketWriter<Container>::startRecor
   xfr32BitInt(ttl);
   xfr16BitInt(0); // this will be the record size
   d_recordplace = place;
-  d_sor=d_content.size(); // this will remind us where to stuff the record size
+
+  d_sor = d_content.size(); // this will remind us where to stuff the record size
 }
 
 template <typename Container> void GenericDNSPacketWriter<Container>::addOpt(const uint16_t udpsize, const uint16_t extRCode, const uint16_t ednsFlags, const optvect_t& options, const uint8_t version)
@@ -131,6 +134,9 @@ template <typename Container> void GenericDNSPacketWriter<Container>::addOpt(con
 
 template <typename Container> void GenericDNSPacketWriter<Container>::xfr48BitInt(uint64_t val)
 {
+  if ((val >> 48) != 0) {
+    throw runtime_error("Value too large to fit in 48 bits");
+  }
   std::array<unsigned char, 6> bytes;
   uint16_t theLeft = htons((val >> 32)&0xffffU);
   uint32_t theRight = htonl(val & 0xffffffffU);
@@ -142,26 +148,35 @@ template <typename Container> void GenericDNSPacketWriter<Container>::xfr48BitIn
 
 template <typename Container> void GenericDNSPacketWriter<Container>::xfrNodeOrLocatorID(const NodeOrLocatorID& val)
 {
-  d_content.insert(d_content.end(), val.content, val.content + sizeof(val.content));
+  d_content.insert(d_content.end(), val.content.data(), val.content.data() + sizeof(val.content));
 }
 
-template <typename Container> void GenericDNSPacketWriter<Container>::xfr32BitInt(uint32_t val)
+template <typename Container> void GenericDNSPacketWriter<Container>::xfr32BitInt(uint64_t val)
 {
-  uint32_t rval=htonl(val);
+  if (val > std::numeric_limits<uint32_t>::max()) {
+    throw runtime_error("Value too large to fit in 32 bits");
+  }
+  uint32_t rval=htonl(static_cast<uint32_t>(val));
   uint8_t* ptr=reinterpret_cast<uint8_t*>(&rval);
   d_content.insert(d_content.end(), ptr, ptr+4);
 }
 
-template <typename Container> void GenericDNSPacketWriter<Container>::xfr16BitInt(uint16_t val)
+template <typename Container> void GenericDNSPacketWriter<Container>::xfr16BitInt(uint64_t val)
 {
-  uint16_t rval=htons(val);
+  if (val > std::numeric_limits<uint16_t>::max()) {
+    throw runtime_error("Value too large to fit in 16 bits");
+  }
+  uint16_t rval=htons(static_cast<uint16_t>(val));
   uint8_t* ptr=reinterpret_cast<uint8_t*>(&rval);
   d_content.insert(d_content.end(), ptr, ptr+2);
 }
 
-template <typename Container> void GenericDNSPacketWriter<Container>::xfr8BitInt(uint8_t val)
+template <typename Container> void GenericDNSPacketWriter<Container>::xfr8BitInt(uint64_t val)
 {
-  d_content.push_back(val);
+  if (val > std::numeric_limits<uint8_t>::max()) {
+    throw runtime_error("Value too large to fit in 8 bits");
+  }
+  d_content.push_back(static_cast<uint8_t>(val));
 }
 
 
@@ -198,15 +213,19 @@ template <typename Container> void GenericDNSPacketWriter<Container>::xfrUnquote
     d_content.push_back(0);
     return;
   }
-  if(lenField)
+  if (lenField) {
+    if (text.length() > 255) {
+      throw runtime_error("invalid unquoted text length");
+    }
     d_content.push_back(text.length());
+  }
   d_content.insert(d_content.end(), text.c_str(), text.c_str() + text.length());
 }
 
 
 static constexpr bool l_verbose=false;
 static constexpr uint16_t maxCompressionOffset=16384;
-template <typename Container> uint16_t GenericDNSPacketWriter<Container>::lookupName(const DNSName& name, uint16_t* matchLen)
+template <typename Container> uint16_t GenericDNSPacketWriter<Container>::lookupName(const DNSName& name, uint16_t* matchLen) // NOLINT(readability-function-cognitive-complexity)
 {
   // iterate over the written labels, see if we find a match
   const auto& raw = name.getStorage();
@@ -216,107 +235,163 @@ template <typename Container> uint16_t GenericDNSPacketWriter<Container>::lookup
      b\xc0\x0c
   */
   unsigned int bestpos=0;
-  *matchLen=0;
-  boost::container::static_vector<uint16_t, 34> nvect;
-  boost::container::static_vector<uint16_t, 34> pvect;
+  *matchLen = 0;
+
+  // positions of each label in the name we are trying to compress
+  boost::container::static_vector<uint16_t, 34> positionsInName;
+  // positions of labels in the packet we are building
+  boost::container::static_vector<uint16_t, 34> positionsInPacket;
 
   try {
     for(auto riter= raw.cbegin(); riter < raw.cend(); ) {
-      if(!*riter)
+      if (*riter == 0) {
         break;
-      nvect.push_back(riter - raw.cbegin());
-      riter+=*riter+1;
+      }
+      positionsInName.push_back(riter - raw.cbegin());
+      riter += *riter + 1;
     }
   }
-  catch(std::bad_alloc& ba) {
-    if(l_verbose)
-      cout<<"Domain "<<name<<" too large to compress"<<endl;
+  catch (const std::bad_alloc& ba) {
+    if (l_verbose) {
+      cout << "Domain " << name << " too large to compress" << endl;
+    }
     return 0;
   }
 
-  if(l_verbose) {
+  if (l_verbose) {
     cout<<"Input vector for lookup "<<name<<": ";
-    for(const auto n : nvect)
-      cout << n<<" ";
+    for (const auto n : positionsInName) {
+      cout << n << " ";
+    }
     cout<<endl;
     cout<<makeHexDump(string(raw.c_str(), raw.c_str()+raw.size()))<<endl;
   }
 
-  if(l_verbose)
-    cout<<"Have "<<d_namepositions.size()<<" to ponder"<<endl;
+  if (l_verbose) {
+    cout << "Have " << d_namepositions.size() << " to ponder" << endl;
+  }
+
   int counter=1;
-  for(auto p : d_namepositions) {
-    if(l_verbose) {
-      cout<<"Pos: "<<p<<", "<<d_content.size()<<endl;
-      DNSName pname((const char*)&d_content[0], d_content.size(), p, true); // only for debugging
-      cout<<"Looking at '"<<pname<<"' in packet at position "<<p<<"/"<<d_content.size()<<", option "<<counter<<"/"<<d_namepositions.size()<<endl;
+  for (const auto positionInPacket : d_namepositions) {
+    // here it's a bit tricky because the names might be compressed,
+    // so we will gather all labels composing the name, following
+    // pointers if needed
+    // for example if there is an uncompressed \1a\1b\1c\0 we will store
+    // the position of \1a, \1b, \1c
+    // if there is instead \1a followed by a pointer to \1b\1c\0 earlier
+    // in the packet we will store the position of \1a, \1b, \1c as well
+    // they will just be disjoint
+    if (l_verbose) {
+      cout<<"Pos: "<<positionInPacket<<", "<<d_content.size()<<endl;
+      DNSName pname(reinterpret_cast<const char*>(d_content.data()), d_content.size(), positionInPacket, true); // only for debugging
+      cout<<"Looking at '"<<pname<<"' in packet at position "<<positionInPacket<<"/"<<d_content.size()<<", option "<<counter<<"/"<<d_namepositions.size()<<endl;
       ++counter;
     }
+    size_t pointerQuota = 50U;
     // memcmp here makes things _slower_
-    pvect.clear();
+    positionsInPacket.clear();
     try {
-      for(auto iter = d_content.cbegin() + p; iter < d_content.cend();) {
-        uint8_t c=*iter;
-        if(l_verbose)
-          cout<<"Found label length: "<<(int)c<<endl;
-        if(c & 0xc0) {
-          uint16_t npos = 0x100*(c & (~0xc0)) + *++iter;
-          iter = d_content.begin() + npos;
-          if(l_verbose)
-            cout<<"Is compressed label to newpos "<<npos<<", going there"<<endl;
-          // check against going forward here
-          continue;
+      for (auto iter = d_content.cbegin() + positionInPacket; iter < d_content.cend() && pointerQuota > 0;) {
+        uint8_t labelLength = *iter;
+        const uint16_t currentPos = (iter - d_content.cbegin());
+        if (l_verbose) {
+          cout << "Found label length: " << std::to_string(labelLength) << " at " << currentPos << endl;
         }
-        if(!c)
+        if (labelLength & 0xc0) {
+          uint16_t npos = 0x100*(labelLength & (~0xc0)) + *++iter;
+          // check against going forward
+          if (npos >= currentPos || npos < sizeof(dnsheader)) {
+            /* something is not right */
+            break;
+          }
+
+          // jump to the target of the pointer
+          iter = d_content.begin() + npos;
+          if (l_verbose) {
+            cout << "Is compressed label to newpos " << npos << ", going there" << endl;
+          }
+
+          if (pointerQuota >= 1) {
+            pointerQuota--;
+            continue;
+          }
+
+          // out of pointer quota, let's stop there
           break;
-        auto offset = iter - d_content.cbegin();
-        if (offset >= maxCompressionOffset) break; // compression pointers cannot point here
-        pvect.push_back(offset);
-        iter+=*iter+1;
+        }
+
+        if (labelLength == 0) {
+          break;
+        }
+
+        if (currentPos >= maxCompressionOffset) {
+          break; // compression pointers cannot point here
+        }
+
+        positionsInPacket.push_back(currentPos);
+        // jump to the next label
+        iter += labelLength + 1;
       }
     }
-    catch(std::bad_alloc& ba) {
-      if(l_verbose)
-        cout<<"Domain "<<name<<" too large to compress"<<endl;
+    catch (const std::bad_alloc& ba) {
+      if (l_verbose) {
+        cout << "Domain " << name << " too large to compress" << endl;
+      }
       continue;
     }
-    if(l_verbose) {
+
+    if (l_verbose) {
       cout<<"Packet vector: "<<endl;
-      for(const auto n : pvect)
-        cout << n<<" ";
+      for (const auto n : positionsInPacket) {
+        cout << n << " ";
+      }
       cout<<endl;
     }
-    auto niter=nvect.crbegin(), piter=pvect.crbegin();
+
+    auto positionInNameIter = positionsInName.crbegin();
+    auto positionInPacketIter = positionsInPacket.crbegin();
     unsigned int cmatchlen=1;
-    for(; niter != nvect.crend() && piter != pvect.crend(); ++niter, ++piter) {
-      // niter is an offset in raw, pvect an offset in packet
-      uint8_t nlen = raw[*niter], plen=d_content[*piter];
-      if(l_verbose)
-        cout<<"nlnen="<<(int)nlen<<", plen="<<(int)plen<<endl;
-      if(nlen != plen)
-        break;
-      if(strncasecmp(raw.c_str()+*niter+1, (const char*)&d_content[*piter]+1, nlen)) {
-        if(l_verbose)
-          cout<<"Mismatch: "<<string(raw.c_str()+*niter+1, raw.c_str()+*niter+nlen+1)<< " != "<<string((const char*)&d_content[*piter]+1, (const char*)&d_content[*piter]+nlen+1)<<endl;
+    for(; positionInNameIter != positionsInName.crend() && positionInPacketIter != positionsInPacket.crend(); ++positionInNameIter, ++positionInPacketIter) {
+      // positionInNameIter is an offset in raw, pvect an offset in packet
+      uint8_t nlen = raw[*positionInNameIter];
+      uint8_t plen = d_content[*positionInPacketIter];
+
+      if (l_verbose) {
+        cout << "nlnen=" << (int)nlen << ", plen=" << (int)plen << endl;
+      }
+
+      if (nlen != plen) {
         break;
       }
-      cmatchlen+=nlen+1;
-      if(cmatchlen == raw.length()) { // have matched all of it, can't improve
-        if(l_verbose)
-          cout<<"Stopping search, matched whole name"<<endl;
+
+      auto rawpart = std::string_view(raw.c_str() + *positionInNameIter + 1, nlen); // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      auto pktpart = std::string_view((const char*)&d_content[*positionInPacketIter] + 1, nlen); // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      if (pdns_ilexicographical_compare_three_way(rawpart, pktpart) != 0) {
+        if (l_verbose) {
+          cout << "Mismatch: " << rawpart << " != " << pktpart << endl;
+        }
+        break;
+      }
+
+      cmatchlen += nlen + 1;
+      if (cmatchlen == raw.length()) { // have matched all of it, can't improve
+        if (l_verbose) {
+          cout << "Stopping search, matched whole name" << endl;
+        }
+
         *matchLen = cmatchlen;
-        return *piter;
+        return *positionInPacketIter;
       }
     }
-    if(piter != pvect.crbegin() && *matchLen < cmatchlen) {
+    if (positionInPacketIter != positionsInPacket.crbegin() && *matchLen < cmatchlen) {
       *matchLen = cmatchlen;
-      bestpos=*--piter;
+      bestpos = *--positionInPacketIter;
     }
   }
   return bestpos;
 }
 // this is the absolute hottest function in the pdns recursor
-template <typename Container> void GenericDNSPacketWriter<Container>::xfrName(const DNSName& name, bool compress, bool)
+template <typename Container> void GenericDNSPacketWriter<Container>::xfrName(const DNSName& name, bool compress)
 {
   if(l_verbose)
     cout<<"Wants to write "<<name<<", compress="<<compress<<", canonic="<<d_canonic<<", LC="<<d_lowerCase<<endl;
@@ -408,19 +483,24 @@ template <typename Container> void GenericDNSPacketWriter<Container>::xfrSvcPara
         xfr16BitInt(m);
       }
       break;
-    case SvcParam::alpn:
+    case SvcParam::alpn: [[fallthrough]];
+    case SvcParam::docpath:
     {
-      uint16_t totalSize = param.getALPN().size(); // All 1 octet size headers for each value
+      size_t totalSize = param.getALPN().size(); // All 1 octet size headers for each value
       for (auto const &a : param.getALPN()) {
         totalSize += a.length();
       }
-      xfr16BitInt(totalSize);
+      if (totalSize > std::numeric_limits<uint16_t>::max()) {
+        throw runtime_error("invalid total length of alpn parameters");
+      }
+      xfr16BitInt(static_cast<uint16_t>(totalSize));
       for (auto const &a : param.getALPN()) {
         xfrUnquotedText(a, true); // will add the 1-byte length field
       }
       break;
     }
-    case SvcParam::no_default_alpn:
+    case SvcParam::no_default_alpn: [[fallthrough]];
+    case SvcParam::pvd:
       xfr16BitInt(0); // no size :)
       break;
     case SvcParam::port:
@@ -443,6 +523,15 @@ template <typename Container> void GenericDNSPacketWriter<Container>::xfrSvcPara
       xfr16BitInt(param.getECH().size()); // size
       xfrBlobNoSpaces(param.getECH());
       break;
+    case SvcParam::ohttp:
+      xfr16BitInt(0); // no size
+      break;
+    case SvcParam::tls_supported_groups:
+      xfr16BitInt(2 * param.getTLSSupportedGroups().size()); // size
+      for (const auto& group: param.getTLSSupportedGroups()) {
+        xfr16BitInt(group);
+      }
+      break;
     default:
       xfr16BitInt(param.getValue().size());
       xfrBlob(param.getValue());
@@ -455,6 +544,12 @@ template <typename Container> void GenericDNSPacketWriter<Container>::xfrSvcPara
 template <typename Container> void GenericDNSPacketWriter<Container>::getRecordPayload(string& records)
 {
   records.assign(d_content.begin() + d_sor, d_content.end());
+}
+
+// call __before commit__
+template <typename Container> void GenericDNSPacketWriter<Container>::getWireFormatContent(string& record)
+{
+  record.assign(d_content.begin() + d_rollbackmarker, d_content.end());
 }
 
 template <typename Container> uint32_t GenericDNSPacketWriter<Container>::size() const
@@ -477,13 +572,23 @@ template <typename Container> void GenericDNSPacketWriter<Container>::truncate()
 
 template <typename Container> void GenericDNSPacketWriter<Container>::commit()
 {
-  if(!d_sor)
+  if (d_sor == 0) {
     return;
+  }
+
+  if (d_sor < 2 || d_sor > d_content.size()) {
+    throw std::range_error("Invalid start of record when trying to build a packet: " + std::to_string(d_sor) + " / " + std::to_string(d_content.size()));
+  }
+
+  if (d_content.size() > std::numeric_limits<uint16_t>::max()) {
+    throw std::range_error("Trying to build a packet larger than " + std::to_string(std::numeric_limits<uint16_t>::max()) + " bytes");
+  }
+
   uint16_t rlen = d_content.size() - d_sor;
-  d_content[d_sor-2]=rlen >> 8;
-  d_content[d_sor-1]=rlen & 0xff;
-  d_sor=0;
-  dnsheader* dh=reinterpret_cast<dnsheader*>( &*d_content.begin());
+  d_content.at(d_sor-2) = rlen >> 8;
+  d_content.at(d_sor-1) = rlen & 0xff;
+  d_sor = 0;
+  auto* dh = reinterpret_cast<dnsheader*>( &*d_content.begin());
   switch(d_recordplace) {
   case DNSResourceRecord::QUESTION:
     dh->qdcount = htons(ntohs(dh->qdcount) + 1);

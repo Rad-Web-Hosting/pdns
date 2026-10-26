@@ -2,6 +2,605 @@ Changelogs for 4.9.x
 ====================
 
 .. changelog::
+  :version: 4.9.18
+  :released: 21st of October 2026
+
+  This is release 4.9.18 of the Authoritative Server.
+  It contains bug fixes, as well as a security fix.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  Note: previous Authoritative 4.9.x Docker images were built on Debian Bullseye.
+  Bullseye is now End Of Life.
+  The 4.9.18 Docker image was built on Debian Trixie instead.
+  This is not reflected in git history.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18199
+
+    Fix PowerDNS Security Advisory 2026-13 for PowerDNS Authoritative Server
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 18136
+    :tickets: 17723, 18135
+
+    report remote in "unable to get SOA" messages
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 18133
+    :tickets: 18077, 17736, 16389, 17514, 16389
+
+    correctly stop the Lua checker thread when exiting
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18093
+    :tickets: 17160
+
+    safer lua geoip queries
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18096
+    :tickets: 18028
+
+    yet another lmdb bugfix
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18094
+    :tickets: 17671
+
+    SQL: stricter listSubZones operation
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18095
+    :tickets: 17904
+
+    better handling of incorrect Lua view() input
+
+.. changelog::
+  :version: 4.9.17
+  :released: 6th of August 2026
+
+  This is release 4.9.17 of the Authoritative Server.
+  It contains bug fixes, as well as a security fix.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17841
+    :tickets: 17835
+
+    iputils: do not index past the address for byte-aligned prefixes
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17837
+    :tickets: 17824
+
+    geoipbackend: create DNSSEC key files with mode 0600
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17813
+    :tickets: 17774
+
+    more lmdb stability
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17820
+    :tickets: 17797
+
+    Account for the existing content when parsing labels
+
+.. changelog::
+  :version: 4.9.16
+  :released: 25th of June 2026
+
+  This is release 4.9.16 of the Authoritative Server.
+  It contains a security fix only.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17591
+
+    Fix PowerDNS Security Advisory 2026-07 for PowerDNS Authoritative Server
+
+.. changelog::
+  :version: 4.9.15
+  :released: 20th of May 2026
+
+  This is release 4.9.15 of the Authoritative Server.
+  It contains bug fixes and security fixes.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17444
+
+    Fix PowerDNS Security Advisory 2026-06 for PowerDNS Authoritative Server: Multiple Issues
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17295
+    :tickets: 17284
+
+    use less inefficient code in web server
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17293
+    :tickets: 17240
+
+    harden xfr*BitInt writers
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17260
+    :tickets: 16636
+
+    perform axfr immediately when creating an autosecondary domain
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17262
+    :tickets: 16731
+
+    web: stricter control of statistics rings changes
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17265
+    :tickets: 16831
+
+    stricter handing of the Lua DNS update policy
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17267
+    :tickets: 17000
+
+    correctly delete ENT records from the API
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17269
+    :tickets: 17126
+
+    lua: one more bad case of createForward
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17271
+    :tickets: 17130
+
+    minor pdns_control bugfixes
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17272
+    :tickets: 17149
+
+    webserver: correctly split the basic authorization cookie
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17274
+    :tickets: 17152
+
+    fixes to AXFR in Bind backend
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17276
+    :tickets: 17155
+
+    dnsupdate handling buglet
+
+.. changelog::
+  :version: 4.9.14
+  :released: 22th of April 2026
+
+  This is release 4.9.14 of the Authoritative Server.
+  It contains security fixes only.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17192
+
+    Fix PowerDNS Security Advisory 2026-05 for PowerDNS Authoritative Server: Multiple Issues
+
+.. changelog::
+  :version: 4.9.13
+  :released: 20th of February 2026
+
+  This is release 4.9.13 of the Authoritative Server.
+  It contains bug fixes only.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16877
+
+    fix stupid logic error in lmdb-write-update-notification=no
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16875
+
+    Stricter timestamp checks
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16873
+
+    Correctly compute public key exponent length when larger than 255.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16788
+
+    lmdb: be sure to abort pending transactions in the correct order.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16789
+
+    Wrap SSql pointers in a unique pointer earlier
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16686
+
+    fix geoip_mmdb backend MMDB_open error handling
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16684
+
+    more robustness in createReverse*
+
+.. changelog::
+  :version: 4.9.12
+  :released: 11th of December 2025
+
+  This is release 4.9.12 of the Authoritative Server.
+  It contains bug fixes and a minor feature.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: New Features
+    :pullreq: 16600
+    :tickets: 16589
+
+    allow finer-grained rrset changes through the API
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16604
+    :tickets: 16538
+
+    m4/pdns_check_libcrypto: fix ecdsa/eddsa includedir (famfo)
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16567
+    :tickets: 16564
+
+    add missing catch block for STL exceptions in createForward
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16550
+    :tickets: 15716
+
+    auth backend transaction fixes in error cases
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16534
+    :tickets: 16059
+
+    REST API: bring back 404 errors
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16535
+    :tickets: 16287
+
+    Prevent a potential race condition in cache cleaning
+
+.. changelog::
+  :version: 4.9.11
+  :released: 15th of October 2025
+
+  This is release 4.9.10 of the Authoritative Server.
+  It contains a minor feature.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: New Features
+    :pullreq: 16196
+
+    lmdb: optional memory-only freshness check timestamp
+
+.. changelog::
+  :version: 4.9.10
+  :released: never
+
+  Technical issues in the release process prevented the 4.9.10 release to be
+  created correctly.
+  Therefore 4.9.10 was never released, in favour of 4.9.11.
+
+.. changelog::
+  :version: 4.9.9
+  :released: 24th of September 2025
+
+  This is release 4.9.9 of the Authoritative Server.
+  It contains a minor feature and a few fixes.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16158
+
+    memory corruption in ODBC plus tweaks to appease coverity
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16157
+
+    Fix EDNS Cookie & Proxy protocol
+
+  .. change::
+    :tags: New Features
+    :pullreq: 16154
+
+    lmdb: optional memory-only notification timestamps (:ref:`setting-lmdb-write-notification-update`)
+
+.. changelog::
+  :version: 4.9.8
+  :released: 7th of August 2025
+
+  This is release 4.9.8 of the Authoritative Server.
+  It contains a minor feature.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: New Features
+    :pullreq: 15961
+
+    Return record last modification time in the API when known.
+
+.. changelog::
+  :version: 4.9.7
+  :released: 7th of July 2025
+
+  This is release 4.9.7 of the Authoritative Server.
+  It contains bug fixes, mainly in LMDB.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 15770
+    :tickets: 15063
+
+    compilation fix: Include cstdint to get uint64_t
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 15772
+    :tickets: 15594
+
+    auth docker: avoid crash on --version caused by doubly loaded modules
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 15771
+    :tickets: 15518
+
+    TSIG payload: use canonical (lowercase) name format
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 15736
+    :tickets: 15677
+
+    LMDB: honour map-size for all files
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 15720
+
+    Close race window during which LMDB lightning stream flag values might be incorrect.
+
+.. changelog::
+  :version: 4.9.6
+  :released: never
+
+  Technical issues in the release process prevented the 4.9.6 release to be
+  created correctly.
+  Therefore 4.9.6 was never released, in favour of 4.9.7.
+
+.. changelog::
+  :version: 4.9.5
+  :released: 7th of May 2025
+
+  This is release 4.9.5 of the Authoritative Server.
+  It contains an LMDB performance optimization and bug fixes.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 15237
+    :tickets: 15176
+
+    Faster LMDB list/lookup/get operations
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 15347
+    :tickets: 15339
+
+    Correctly handle marked-as-deleted elements in LMDB read-only queries
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 15345
+    :tickets: 15340
+
+    Fix MySQL operation on 64-bit big-endian platforms
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 15228
+    :tickets: 15222
+
+    Fix incorrect behaviour of Lua createForward and createForward6 functions
+    leading to possible SERVFAIL answers, when processing certain data.
+
+.. changelog::
+  :version: 4.9.4
+  :released: 7th of February 2025
+
+  This is release 4.9.4 of the Authoritative Server.
+  It contains a bug fix.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 15094
+    :tickets: 15093
+
+    check return value of getCatalogMembers() (Kees Monshouwer)
+
+.. changelog::
+  :version: 4.9.3
+  :released: 17th of December 2024
+
+  This is release 4.9.3 of the Authoritative Server.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 14968
+
+    SVCB parser: allow quotes around port=
+
+.. changelog::
+  :version: 4.9.2
+  :released: 1st of October 2024
+
+  This is release 4.9.2 of the Authoritative Server.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 14711
+
+    pdnsutil check-zone: make LUA records optional
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 14710
+
+    Yahttp router: appease coverity regarding unsigned underflow in match()
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 14708
+
+    json11: add include for cstdint
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 14709
+
+    Fix build with boost 1.86.0
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 14675
+
+    API: when querying with rrset_name, respect it for comments too
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 14707
+
+    more and better thread names
+
+  .. change::
+    :tags: New Features
+    :pullreq: 14712
+
+    provide dns packet when doing lookup for presigned signatures
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 14706
+
+    webserver.cc: try to pass exception text with 500 errors
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 14603
+
+    ssqlite3: use "begin immediate" to avoid later fights over upgrading to write
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 14526
+
+    fix domain ordering in catalog SQL query
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 14403
+
+    switch el7 builds to Oracle Linux 7
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 14405
+
+    dns.cc: use ``pdns::views::UnsignedCharView``
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 14303
+
+    geoipbackend: link C++ filesystem lib if necessary
+
+  .. change::
+    :tags: New Features
+    :pullreq: 14245
+
+    auth web: make request/response timeout configurable (Samir Aguiar)
+
+.. changelog::
   :version: 4.9.1
   :released: 28th of May 2024
 

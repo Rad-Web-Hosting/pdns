@@ -7,27 +7,34 @@ fi
 
 . .venv/bin/activate
 python -V
-pip install -U pip wheel | cat
 pip install -q -r requirements.txt | cat
 
 mkdir -p configs
 
 [ -f ./vars ] && . ./vars
 
+protoc -I=../pdns/ --python_out=. ../pdns/dnsmessage.proto
+
 if [ -z "$PDNS_BUILD_PATH" ]; then
   # PDNS_BUILD_PATH is unset or empty. Assume an autotools build.
-  PDNS_BUILD_PATH=.
-
-  export PDNS=${PDNS:-${PWD}/../pdns/pdns_server}
-  export PDNSUTIL=${PDNSUTIL:-${PWD}/../pdns/pdnsutil}
-  export PDNSCONTROL=${PDNSCONTROL:-${PWD}/../pdns/pdns_control}
-  export PDNS_MODULE_DIR=${PDNS_MODULE_DIR:-${PWD}/modules}
-else
-  export PDNS=${PDNS:-$PDNS_BUILD_PATH/pdns-auth}
-  export PDNSUTIL=${PDNSUTIL:-$PDNS_BUILD_PATH/pdns-auth-util}
-  export PDNSCONTROL=${PDNSCONTROL:-$PDNS_BUILD_PATH/pdns-auth-control}
-  export PDNS_MODULE_DIR=${PDNS_MODULE_DIR:-$PDNS_BUILD_PATH/modules}
+  PDNS_BUILD_PATH=${PWD}/../pdns
 fi
+export PDNS=${PDNS:-$PDNS_BUILD_PATH/pdns_server}
+export PDNSUTIL=${PDNSUTIL:-$PDNS_BUILD_PATH/pdnsutil}
+export PDNSCONTROL=${PDNSCONTROL:-$PDNS_BUILD_PATH/pdns_control}
+export PDNS_MODULE_DIR=${PDNS_MODULE_DIR:-$PDNS_BUILD_PATH/modules}
+
+LIBFAKETIME_DEFAULT=/usr/local/lib/faketime/libfaketimeMT.so.1 # location after building and installing from https://github.com/wolfcw/libfaketime
+if [ $(uname -s) = "Darwin" ]; then
+  # macOS is not /really/ supported here; it works for some tests, and then you might need sudo.
+  LIBFAKETIME_DEFAULT=/usr/local/lib/faketime/libfaketime.1.dylib
+fi
+if [ $(uname -s) = "OpenBSD" ]; then
+  # OpenBSD is not /really/ supported here; it works for some tests, and then you might need doas.
+  LIBFAKETIME_DEFAULT=""
+fi
+
+export LIBFAKETIME=${LIBFAKETIME:-$LIBFAKETIME_DEFAULT}
 
 export PREFIX=127.0.0
 

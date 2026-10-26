@@ -46,11 +46,11 @@ static void loggerBackend(const Logging::Entry& entry)
   buf.str("");
   buf << "msg=" << std::quoted(entry.message);
   if (entry.error) {
-    buf << " oserror=" << std::quoted(entry.error.get());
+    buf << " oserror=" << std::quoted(entry.error.value());
   }
 
   if (entry.name) {
-    buf << " subsystem=" << std::quoted(entry.name.get());
+    buf << " subsystem=" << std::quoted(entry.name.value());
   }
   buf << " level=" << entry.level;
   if (entry.d_priority != 0) {
@@ -68,8 +68,6 @@ static void loggerBackend(const Logging::Entry& entry)
 
 static bool init_unit_test()
 {
-  ::arg().set("rng") = "auto";
-  ::arg().set("entropy-source") = "/dev/urandom";
   // Force init while we are still unthreaded
   dns_random_uint16();
   g_slog = Logging::Logger::create(loggerBackend);

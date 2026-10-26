@@ -14,51 +14,12 @@
 #include "dolog.hh"
 
 #include "ext/luawrapper/include/LuaContext.hpp"
-RecursiveLockGuarded<LuaContext> g_lua{LuaContext()};
-
-std::unique_ptr<DNSDistSNMPAgent> g_snmpAgent{nullptr};
-
-#if BENCH_POLICIES
-#include "dnsdist-rings.hh"
-Rings g_rings;
-#endif /* BENCH_POLICIES */
-
-/* add stub implementations, we don't want to include the corresponding object files
-   and their dependencies */
-
-// NOLINTNEXTLINE(readability-convert-member-functions-to-static): this is a stub, the real one is not that simple..
-bool TLSFrontend::setupTLS()
-{
-  return true;
-}
-
-// NOLINTNEXTLINE(readability-convert-member-functions-to-static): this is a stub, the real one is not that simple..
-bool DNSDistSNMPAgent::sendDNSTrap(const DNSQuestion& dnsQuestion, const std::string& reason)
-{
-  return false;
-}
-
-void setLuaNoSideEffect()
-{
-}
-
-DNSAction::Action SpoofAction::operator()(DNSQuestion* dnsQuestion, std::string* ruleresult) const
-{
-  return DNSAction::Action::None;
-}
 
 bool setupDoTProtocolNegotiation(std::shared_ptr<TLSCtx>& tlsCtx)
 {
   (void)tlsCtx;
   return true;
 }
-
-// NOLINTNEXTLINE(performance-unnecessary-value-param): this is a stub, the real one is not that simple and the performance does not matter
-void responderThread(std::shared_ptr<DownstreamState> dss)
-{
-}
-
-string g_outputBuffer;
 
 static DNSQuestion getDQ(const DNSName* providedName = nullptr)
 {
@@ -104,6 +65,8 @@ static void benchPolicy(const ServerPolicy& pol)
     }
   }
   cerr << pol.name << " took " << std::to_string(sw.udiff()) << " us for " << names.size() << endl;
+#else
+  (void)pol;
 #endif /* BENCH_POLICIES */
 }
 
@@ -553,7 +516,7 @@ BOOST_AUTO_TEST_CASE(test_lua)
     local counter = 0
     function luaroundrobin(servers, dq)
       counter = counter + 1
-      return servers[1 + (counter % #servers)]
+      return 1 + (counter % #servers)
     end
 
     setServerPolicyLua("luaroundrobin", luaroundrobin)
@@ -582,7 +545,9 @@ BOOST_AUTO_TEST_CASE(test_lua)
 
     for (const auto& name : names) {
       auto dnsQuestion = getDQ(&name);
-      auto server = pol->getSelectedBackend(servers, dnsQuestion);
+      auto selectedServer = pol->getSelectedBackend(servers, dnsQuestion);
+      BOOST_REQUIRE(selectedServer);
+      const auto& server = selectedServer.get();
       BOOST_REQUIRE(serversMap.count(server) == 1);
       ++serversMap[server];
     }

@@ -20,6 +20,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #pragma once
+#include <atomic>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -67,14 +68,21 @@ class MOADNSParser;
 class PacketReader
 {
 public:
-  PacketReader(const std::string_view& content, uint16_t initialPos=sizeof(dnsheader))
-    : d_pos(initialPos), d_startrecordpos(initialPos), d_content(content)
+  PacketReader(const std::string_view& content, uint16_t initialPos=sizeof(dnsheader), bool internalRepresentation = false, bool standalone = false)
+    : d_pos(initialPos), d_startrecordpos(initialPos), d_internal(internalRepresentation), d_standalone(standalone), d_content(content)
   {
-    if(content.size() > std::numeric_limits<uint16_t>::max())
+    if (content.size() > std::numeric_limits<uint16_t>::max()) {
       throw std::out_of_range("packet too large");
+    }
 
-    d_recordlen = (uint16_t) content.size();
-    not_used = 0;
+    d_recordlen = static_cast<uint16_t>(content.size());
+    d_pointerBudget = static_cast<size_t>(d_recordlen) * s_MaxPointersPerByte;
+  }
+
+  // Default is s_MaxPointersPerByte * packet size
+  void setPointerBudget(size_t maxPointers)
+  {
+    d_pointerBudget = maxPointers;
   }
 
   uint32_t get32BitInt();
@@ -135,7 +143,7 @@ public:
     val=get8BitInt();
   }
 
-  void xfrName(DNSName& name, bool /* compress */ = false, bool /* noDot */ = false)
+  void xfrName(DNSName& name, bool /* compress */ = false)
   {
     name = getName();
   }
@@ -163,11 +171,31 @@ public:
   string getText(bool multi, bool lenField);
   string getUnquotedText(bool lenField);
 
+  /* Whether the current position is at (or after, which would indicate a problem
+     and should have been detected earlier) the end of wire data corresponding to
+     the current DNS record */
+  bool eof() const
+  {
+    return d_pos >= (d_startrecordpos + d_recordlen);
+  }
 
-  bool eof() { return true; };
-  const string getRemaining() const {
-    return "";
+  /* Returns a string, formatted for human/log consumption, containing information
+     about the wire data from the current position to the end of the current DNS record */
+  std::string getRemaining() const {
+    return "Remaining data from PacketReader, current position " + std::to_string(d_pos) + " in packet of size " + std::to_string(d_content.size()) + ", end of record expected at " + std::to_string(d_startrecordpos + d_recordlen) + ": " + makeHexDump(std::string(d_content.begin() + d_pos, d_content.begin() + d_startrecordpos + d_recordlen));
   };
+
+#if defined(PDNS_AUTH) // [
+  /* This method moves the position to the end of the current DNS record.
+     The only case where it makes sense to call this method is when processing ENT
+     records, and only because of a bug in the authoritative server used to insert
+     non-empty content for some ENT records (see https://github.com/PowerDNS/pdns/pull/17000)
+  */
+  void consumeRemaining()
+  {
+    d_pos = (d_startrecordpos + d_recordlen);
+  }
+#endif // ]
 
   uint16_t getPosition() const
   {
@@ -176,14 +204,23 @@ public:
 
   void skip(uint16_t n)
   {
+    size_t stop = d_pos;
+    stop += n;
+    if (stop > d_content.size()) {
+      throw std::out_of_range("Attempt to skip bytes (" + std::to_string(n) + " starting at " + std::to_string(d_pos) + ") farther than the packet's end (" + std::to_string(d_content.size()) + ")");
+    }
     d_pos += n;
   }
 
+  static size_t s_MaxPointersPerByte;
+
 private:
+  size_t d_pointerBudget{0};
   uint16_t d_pos;
   uint16_t d_startrecordpos; // needed for getBlob later on
-  uint16_t d_recordlen;      // ditto
-  uint16_t not_used; // Aligns the whole class on 8-byte boundaries
+  uint16_t d_recordlen; // ditto
+  bool d_internal;
+  bool d_standalone; // no dnsheader at the beginning of content
   const std::string_view d_content;
 };
 
@@ -200,22 +237,28 @@ public:
   virtual std::string getZoneRepresentation(bool noDot=false) const = 0;
   virtual ~DNSRecordContent() = default;
   virtual void toPacket(DNSPacketWriter& pw) const = 0;
-  // returns the wire format of the content, possibly including compressed pointers pointing to the owner name (unless canonic or lowerCase are set)
-  string serialize(const DNSName& qname, bool canonic=false, bool lowerCase=false) const
+  // returns the wire format of the content or the full record, possibly including compressed pointers pointing to the owner name (unless canonic or lowerCase are set)
+  [[nodiscard]] string serialize(const DNSName& qname, bool canonic = false, bool lowerCase = false, bool full = false) const
   {
     vector<uint8_t> packet;
-    DNSPacketWriter pw(packet, g_rootdnsname, 1);
-    if(canonic)
-      pw.setCanonic(true);
+    DNSPacketWriter packetWriter(packet, g_rootdnsname, QType::A);
 
-    if(lowerCase)
-      pw.setLowercase(true);
+    if (canonic) {
+      packetWriter.setCanonic(true);
+    }
+    if (lowerCase) {
+      packetWriter.setLowercase(true);
+    }
 
-    pw.startRecord(qname, this->getType());
-    this->toPacket(pw);
+    packetWriter.startRecord(qname, getType());
+    toPacket(packetWriter);
 
     string record;
-    pw.getRecordPayload(record); // needs to be called before commit()
+    if (full) {
+      packetWriter.getWireFormatContent(record); // needs to be called before commit()
+    } else {
+      packetWriter.getRecordPayload(record); // needs to be called before commit()
+    }
     return record;
   }
 
@@ -224,8 +267,10 @@ public:
     return typeid(*this)==typeid(rhs) && this->getZoneRepresentation() == rhs.getZoneRepresentation();
   }
 
-  // parse the content in wire format, possibly including compressed pointers pointing to the owner name
-  static shared_ptr<DNSRecordContent> deserialize(const DNSName& qname, uint16_t qtype, const string& serialized);
+  // parse the content in wire format, possibly including compressed pointers pointing to the owner name.
+  // internalRepresentation is set when the data comes from an internal source,
+  // such as the LMDB backend.
+  static shared_ptr<DNSRecordContent> deserialize(const DNSName& qname, uint16_t qtype, const string& serialized, uint16_t qclass=QClass::IN, bool internalRepresentation = false);
 
   void doRecordCheck(const struct DNSRecord&){}
 
@@ -234,6 +279,7 @@ public:
 
   static void regist(uint16_t cl, uint16_t ty, makerfunc_t* f, zmakerfunc_t* z, const char* name)
   {
+    assert(!d_locked.load()); // NOLINT: it's the API
     if(f)
       getTypemap()[pair(cl,ty)]=f;
     if(z)
@@ -241,13 +287,6 @@ public:
 
     getT2Namemap().emplace(pair(cl, ty), name);
     getN2Typemap().emplace(name, pair(cl, ty));
-  }
-
-  static void unregist(uint16_t cl, uint16_t ty)
-  {
-    auto key = pair(cl, ty);
-    getTypemap().erase(key);
-    getZmakermap().erase(key);
   }
 
   static bool isUnknownType(const string& name)
@@ -284,6 +323,13 @@ public:
 
   virtual uint16_t getType() const = 0;
 
+  static void lock()
+  {
+    d_locked.store(true);
+  }
+
+  [[nodiscard]] virtual size_t sizeEstimate() const = 0;
+
 protected:
   typedef std::map<std::pair<uint16_t, uint16_t>, makerfunc_t* > typemap_t;
   typedef std::map<std::pair<uint16_t, uint16_t>, zmakerfunc_t* > zmakermap_t;
@@ -293,6 +339,7 @@ protected:
   static t2namemap_t& getT2Namemap();
   static n2typemap_t& getN2Typemap();
   static zmakermap_t& getZmakermap();
+  static std::atomic<bool> d_locked;
 };
 
 struct DNSRecord
@@ -386,10 +433,13 @@ public:
     auto aType = (a.d_type == QType::SOA) ? 0 : a.d_type;
     auto bType = (b.d_type == QType::SOA) ? 0 : b.d_type;
 
-    if(a.d_name.canonCompare(b.d_name))
+    int res = a.d_name.canonCompare_three_way(b.d_name, true);
+    if (res < 0) {
       return true;
-    if(b.d_name.canonCompare(a.d_name))
+    }
+    if (res > 0) {
       return false;
+    }
 
     if(std::tie(aType, a.d_class, a.d_ttl) < std::tie(bType, b.d_class, b.d_ttl))
       return true;
@@ -423,17 +473,26 @@ public:
 
     return *d_content == *rhs.d_content;
   }
+
+  [[nodiscard]] size_t sizeEstimate() const
+  {
+    return sizeof(*this) + d_name.sizeEstimate() + (d_content ? d_content->sizeEstimate() : 0U);
+  }
 };
 
 struct DNSZoneRecord
 {
-  int domain_id{-1};
+  domainid_t domain_id{UnknownDomainID};
   uint8_t scopeMask{0};
   int signttl{0};
   DNSName wildcardname;
   bool auth{true};
   bool disabled{false};
   DNSRecord dr;
+
+  bool operator<(const DNSZoneRecord& other) const {
+    return dr.d_ttl < other.dr.d_ttl;
+  }
 };
 
 class UnknownRecordContent : public DNSRecordContent
@@ -459,6 +518,11 @@ public:
     return d_record;
   }
 
+  [[nodiscard]] size_t sizeEstimate() const override
+  {
+    return sizeof(*this) + d_dr.sizeEstimate() + d_record.size();
+  }
+
 private:
   DNSRecord d_dr;
   vector<uint8_t> d_record;
@@ -475,9 +539,9 @@ public:
   }
 
   //! Parse from a pointer and length
-  MOADNSParser(bool query, const char *packet, unsigned int len) : d_tsigPos(0)
+  MOADNSParser(bool query, const char *packet, unsigned int len, size_t pointerBudget = 0) : d_tsigPos(0)
   {
-    init(query, std::string_view(packet, len));
+    init(query, std::string_view(packet, len), pointerBudget);
   }
 
   DNSName d_qname;
@@ -497,11 +561,12 @@ public:
   bool hasEDNS() const;
 
 private:
-  void init(bool query, const std::string_view& packet);
+  void init(bool query, const std::string_view& packet, size_t pointerBudget = 0);
   uint16_t d_tsigPos;
 };
 
 string simpleCompress(const string& label, const string& root="");
+void shuffleDNSPacket(char* packet, size_t length, const dnsheader_aligned& aligned_dh);
 void ageDNSPacket(char* packet, size_t length, uint32_t seconds, const dnsheader_aligned&);
 void ageDNSPacket(std::string& packet, uint32_t seconds, const dnsheader_aligned&);
 void editDNSPacketTTL(char* packet, size_t length, const std::function<uint32_t(uint8_t, uint16_t, uint16_t, uint32_t)>& visitor);
@@ -538,16 +603,19 @@ public:
    * The name is not checked for adherence to length restrictions.
    * Compression pointers are not followed.
    */
-  void skipDomainName()
+  bool skipDomainName()
   {
-    uint8_t len;
-    while((len=get8BitInt())) {
-      if(len >= 0xc0) { // extended label
+    uint8_t len{};
+    bool isRoot = true;
+    while ((len = get8BitInt()) != 0) {
+      isRoot = false;
+      if (len >= 0xc0) { // extended label
         get8BitInt();
-        return;
+        return false;
       }
       skipBytes(len);
     }
+    return isRoot;
   }
 
   void skipBytes(uint16_t bytes)
@@ -584,8 +652,17 @@ public:
 
   void skipRData()
   {
-    int toskip = get16BitInt();
+    auto toskip = get16BitInt();
     moveOffset(toskip);
+  }
+
+  std::pair<uint32_t, uint32_t> skipRDataAndReturnOffsets()
+  {
+    auto toskip = get16BitInt();
+    uint32_t start = d_offset;
+    moveOffset(toskip);
+    uint32_t end = d_offset;
+    return std::pair<uint32_t,uint32_t>(start, end);
   }
 
   void decreaseAndSkip32BitInt(uint32_t decrease)
@@ -618,6 +695,30 @@ public:
     return d_offset;
   }
 
+  void swapInPlace(std::pair<uint32_t, uint32_t> a, std::pair<uint32_t, uint32_t> b) {
+    // some basic range checks
+    if (b.first < a.first) {
+      std::swap(a, b);
+    }
+    if (a.second-a.first != b.second-b.first) {
+      throw std::out_of_range("swap: segments have different lengths");
+    }
+    if (a.second <= a.first) {
+      throw std::out_of_range("swap: ending of segment before start of segment");
+    }
+    if (a.second > b.first) {
+      throw std::out_of_range("swap: overlapping segments");
+    }
+    if (b.second > d_length) {
+      throw std::out_of_range("swap: ending of segment after end of array");
+    }
+    // don't allow to swap what we haven't read yet
+    if (b.second > d_offset) {
+      throw std::out_of_range("swap: ending of segment after current offset");
+    }
+    std::swap_ranges(d_packet+a.first, d_packet+a.second, d_packet+b.first);
+  }
+
 private:
   void moveOffset(uint16_t by)
   {
@@ -644,3 +745,5 @@ private:
   uint32_t d_notyouroffset;  // only 'moveOffset' can touch this
   const uint32_t&  d_offset; // look.. but don't touch
 };
+
+string txtEscape(const string &name);

@@ -42,13 +42,18 @@
 #include <arpa/inet.h>
 #include "pipebackend.hh"
 
+// The following requirement guarantees UnknownDomainID will get output as "-1"
+// for compatibility.
+static_assert(std::is_signed<domainid_t>::value);
+
 static const char* kBackendId = "[PIPEBackend]";
 
-CoWrapper::CoWrapper(const string& command, int timeout, int abiVersion)
+CoWrapper::CoWrapper(Logr::log_t log, const string& command, int timeout, int abiVersion)
 {
   d_command = command;
   d_timeout = timeout;
   d_abiVersion = abiVersion;
+  d_slog = log;
   launch(); // let exceptions fall through - if initial launch fails, we want to die
   // I think
 }
@@ -75,7 +80,8 @@ void CoWrapper::launch()
   d_cp->send("HELO\t" + std::to_string(d_abiVersion));
   string banner;
   d_cp->receive(banner);
-  g_log << Logger::Error << "Backend launched with banner: " << banner << endl;
+  SLOG(g_log << Logger::Error << "Backend launched with banner: " << banner << endl,
+       d_slog->info(Logr::Info, "launched", "banner", Logging::Loggable(banner)));
 }
 
 void CoWrapper::send(const string& line)
@@ -98,7 +104,8 @@ void CoWrapper::receive(string& line)
     return;
   }
   catch (PDNSException& ae) {
-    g_log << Logger::Warning << kBackendId << " Unable to receive data from coprocess. " << ae.reason << endl;
+    SLOG(g_log << Logger::Warning << kBackendId << " Unable to receive data from coprocess. " << ae.reason << endl,
+         d_slog->error(Logr::Warning, ae.reason, "Unable to receive data from coprocess"));
     d_cp.reset();
     throw;
   }
@@ -106,14 +113,17 @@ void CoWrapper::receive(string& line)
 
 PipeBackend::PipeBackend(const string& suffix)
 {
+  if (g_slogStructured) {
+    d_slog = g_slog->withName("pipe" + suffix);
+  }
   d_disavow = false;
-  signal(SIGCHLD, SIG_IGN);
   setArgPrefix("pipe" + suffix);
   try {
     launch();
   }
   catch (const ArgException& A) {
-    g_log << Logger::Error << kBackendId << " Unable to launch, fatal argument error: " << A.reason << endl;
+    SLOG(g_log << Logger::Error << kBackendId << " Unable to launch, fatal argument error: " << A.reason << endl,
+         d_slog->error(Logr::Error, A.reason, "Unable to launch coprocess"));
     throw;
   }
   catch (...) {
@@ -132,7 +142,7 @@ void PipeBackend::launch()
     }
     d_regexstr = getArg("regex");
     d_abiVersion = getArgAsNum("abi-version");
-    d_coproc = std::make_unique<CoWrapper>(getArg("command"), getArgAsNum("timeout"), getArgAsNum("abi-version"));
+    d_coproc = std::make_unique<CoWrapper>(d_slog, getArg("command"), getArgAsNum("timeout"), d_abiVersion);
   }
 
   catch (const ArgException& A) {
@@ -152,14 +162,16 @@ void PipeBackend::cleanup()
   d_abiVersion = 0;
 }
 
-void PipeBackend::lookup(const QType& qtype, const DNSName& qname, int zoneId, DNSPacket* pkt_p)
+void PipeBackend::lookup(const QType& qtype, const DNSName& qname, domainid_t zoneId, DNSPacket* pkt_p)
 {
   try {
     launch();
     d_disavow = false;
     if (d_regex && !d_regex->match(qname.toStringRootDot())) {
-      if (::arg().mustDo("query-logging"))
-        g_log << Logger::Error << "Query for '" << qname << "' failed regex '" << d_regexstr << "'" << endl;
+      if (::arg().mustDo("query-logging")) {
+        SLOG(g_log << Logger::Error << "Query for '" << qname << "' failed regex '" << d_regexstr << "'" << endl,
+             d_slog->info(Logr::Warning, "query failed regex", "name", Logging::Loggable(qname), "regex", Logging::Loggable(d_regexstr)));
+      }
       d_disavow = true; // don't pass to backend
     }
     else {
@@ -182,20 +194,23 @@ void PipeBackend::lookup(const QType& qtype, const DNSName& qname, int zoneId, D
       if (d_abiVersion >= 3)
         query << "\t" << realRemote.toString();
 
-      if (::arg().mustDo("query-logging"))
-        g_log << Logger::Error << "Query: '" << query.str() << "'" << endl;
+      if (::arg().mustDo("query-logging")) {
+        SLOG(g_log << Logger::Error << "Query: '" << query.str() << "'" << endl,
+             d_slog->info(Logr::Warning, "sending query", "query", Logging::Loggable(query.str())));
+      }
       d_coproc->send(query.str());
     }
   }
   catch (PDNSException& pe) {
-    g_log << Logger::Error << kBackendId << " Error from coprocess: " << pe.reason << endl;
+    SLOG(g_log << Logger::Error << kBackendId << " Error from coprocess: " << pe.reason << endl,
+         d_slog->error(Logr::Error, pe.reason, "Error from coprocess"));
     d_disavow = true;
   }
   d_qtype = qtype;
   d_qname = qname;
 }
 
-bool PipeBackend::list(const DNSName& target, int inZoneId, bool /* include_disabled */)
+bool PipeBackend::list(const ZoneName& target, domainid_t domain_id, bool /* include_disabled */)
 {
   try {
     launch();
@@ -205,16 +220,17 @@ bool PipeBackend::list(const DNSName& target, int inZoneId, bool /* include_disa
 
     // type    qname           qclass  qtype   id      ip-address
     if (d_abiVersion >= 4)
-      query << "AXFR\t" << inZoneId << "\t" << target.toStringRootDot();
+      query << "AXFR\t" << domain_id << "\t" << target.toStringRootDot();
     else
-      query << "AXFR\t" << inZoneId;
+      query << "AXFR\t" << domain_id;
 
     d_coproc->send(query.str());
   }
   catch (PDNSException& ae) {
-    g_log << Logger::Error << kBackendId << " Error from coprocess: " << ae.reason << endl;
+    SLOG(g_log << Logger::Error << kBackendId << " Error from coprocess: " << ae.reason << endl,
+         d_slog->error(Logr::Error, ae.reason, "Error from coprocess"));
   }
-  d_qname = DNSName(std::to_string(inZoneId)); // why do we store a number here??
+  d_qname = DNSName(std::to_string(domain_id)); // why do we store a number here??
   return true;
 }
 
@@ -223,6 +239,10 @@ string PipeBackend::directBackendCmd(const string& query)
   if (d_abiVersion < 5)
     return "not supported on ABI version " + std::to_string(d_abiVersion) + " (use ABI version 5 or later)\n";
 
+  if (query.empty()) {
+    return "";
+  }
+
   try {
     launch();
     ostringstream oss;
@@ -230,7 +250,8 @@ string PipeBackend::directBackendCmd(const string& query)
     d_coproc->send(oss.str());
   }
   catch (PDNSException& ae) {
-    g_log << Logger::Error << kBackendId << " Error from coprocess: " << ae.reason << endl;
+    SLOG(g_log << Logger::Error << kBackendId << " Error from coprocess: " << ae.reason << endl,
+         d_slog->error(Logr::Error, ae.reason, "Error from coprocess"));
     cleanup();
   }
 
@@ -246,21 +267,16 @@ string PipeBackend::directBackendCmd(const string& query)
   return oss.str();
 }
 
-//! For the dynamic loader
-DNSBackend* PipeBackend::maker()
-{
-  try {
-    return new PipeBackend();
-  }
-  catch (...) {
-    g_log << Logger::Error << kBackendId << " Unable to instantiate a pipebackend!" << endl;
-    return nullptr;
-  }
-}
-
 PipeBackend::~PipeBackend()
 {
   cleanup();
+}
+
+void PipeBackend::throwTooShortDataError(const std::string& what)
+{
+  SLOG(g_log << Logger::Error << kBackendId << " Coprocess returned incomplete or empty line in data section for query for " << d_qname << endl,
+       d_slog->info(Logr::Error, "Coprocess returned incomplete or empty line", "query", Logging::Loggable(d_qname)));
+  throw PDNSException("Format error communicating with coprocess in data section" + what);
 }
 
 bool PipeBackend::get(DNSResourceRecord& r)
@@ -272,9 +288,6 @@ bool PipeBackend::get(DNSResourceRecord& r)
 
   // The answer format:
   // DATA    qname           qclass  qtype   ttl     id      content
-  unsigned int extraFields = 0;
-  if (d_abiVersion >= 3)
-    extraFields = 2;
 
   try {
     launch();
@@ -283,7 +296,8 @@ bool PipeBackend::get(DNSResourceRecord& r)
       vector<string> parts;
       stringtok(parts, line, "\t");
       if (parts.empty()) {
-        g_log << Logger::Error << kBackendId << " Coprocess returned empty line in query for " << d_qname << endl;
+        SLOG(g_log << Logger::Error << kBackendId << " Coprocess returned empty line in query for " << d_qname << endl,
+             d_slog->info(Logr::Error, "Coprocess returned empty line", "query", Logging::Loggable(d_qname)));
         throw PDNSException("Format error communicating with coprocess");
       }
       else if (parts[0] == "FAIL") {
@@ -293,44 +307,54 @@ bool PipeBackend::get(DNSResourceRecord& r)
         return false;
       }
       else if (parts[0] == "LOG") {
-        g_log << Logger::Error << "Coprocess: " << line.substr(4) << endl;
+        SLOG(g_log << Logger::Error << "Coprocess: " << line.substr(4) << endl,
+             d_slog->info(Logr::Error, "Coprocess log message", "log", Logging::Loggable(line.substr(4))));
         continue;
       }
       else if (parts[0] == "DATA") { // yay
-        if (parts.size() < 7 + extraFields) {
-          g_log << Logger::Error << kBackendId << " Coprocess returned incomplete or empty line in data section for query for " << d_qname << endl;
-          throw PDNSException("Format error communicating with coprocess in data section");
-          // now what?
+        // The shortest records (ENT) require 6 fields. Other may require more
+        // and will have a stricter check once the record type has been
+        // computed.
+        if (parts.size() < 6 + (d_abiVersion >= 3 ? 2 : 0)) {
+          throwTooShortDataError("");
         }
 
         if (d_abiVersion >= 3) {
-          r.scopeMask = std::stoi(parts[1]);
+          pdns::checked_stoi_into(r.scopeMask, parts[1]);
           r.auth = (parts[2] == "1");
+          parts.erase(parts.begin() + 1, parts.begin() + 3);
         }
         else {
           r.scopeMask = 0;
           r.auth = true;
         }
-        r.qname = DNSName(parts[1 + extraFields]);
-        r.qtype = parts[3 + extraFields];
-        pdns::checked_stoi_into(r.ttl, parts[4 + extraFields]);
-        pdns::checked_stoi_into(r.domain_id, parts[5 + extraFields]);
+        r.qname = DNSName(parts[1]);
+        r.qtype = parts[3];
+        pdns::checked_stoi_into(r.ttl, parts[4]);
+        pdns::checked_stoi_into(r.domain_id, parts[5]);
 
-        if (r.qtype.getCode() != QType::MX && r.qtype.getCode() != QType::SRV) {
+        switch (r.qtype.getCode()) {
+        case QType::ENT:
+          // No other data to process
           r.content.clear();
-          for (unsigned int n = 6 + extraFields; n < parts.size(); ++n) {
-            if (n != 6 + extraFields)
-              r.content.append(1, ' ');
-            r.content.append(parts[n]);
+          break;
+        case QType::MX:
+        case QType::SRV:
+          if (parts.size() < 8) {
+            throwTooShortDataError(" of MX/SRV record");
           }
-        }
-        else {
-          if (parts.size() < 8 + extraFields) {
-            g_log << Logger::Error << kBackendId << " Coprocess returned incomplete MX/SRV line in data section for query for " << d_qname << endl;
-            throw PDNSException("Format error communicating with coprocess in data section of MX/SRV record");
+          r.content = parts[6] + " " + parts[7];
+          break;
+        default:
+          if (parts.size() < 7) {
+            throwTooShortDataError("");
           }
-
-          r.content = parts[6 + extraFields] + " " + parts[7 + extraFields];
+          r.content = parts[6];
+          for (std::vector<std::string>::size_type pos = 7; pos < parts.size(); ++pos) {
+            r.content.append(1, ' ');
+            r.content.append(parts[pos]);
+          }
+          break;
         }
         break;
       }
@@ -339,11 +363,13 @@ bool PipeBackend::get(DNSResourceRecord& r)
     }
   }
   catch (DBException& dbe) {
-    g_log << Logger::Error << kBackendId << " " << dbe.reason << endl;
+    SLOG(g_log << Logger::Error << kBackendId << " " << dbe.reason << endl,
+         d_slog->error(Logr::Error, dbe.reason, "Coprocess error"));
     throw;
   }
   catch (PDNSException& pe) {
-    g_log << Logger::Error << kBackendId << " " << pe.reason << endl;
+    SLOG(g_log << Logger::Error << kBackendId << " " << pe.reason << endl,
+         d_slog->error(Logr::Error, pe.reason, "Coprocess error"));
     cleanup();
     throw;
   }
@@ -380,6 +406,9 @@ public:
   PipeLoader()
   {
     BackendMakers().report(std::make_unique<PipeFactory>());
+    // If this module is not loaded dynamically at runtime, this code runs
+    // as part of a global constructor, before the structured logger has a
+    // chance to be set up, so fallback to simple logging.
     g_log << Logger::Info << kBackendId << " This is the pipe backend version " VERSION
 #ifndef REPRODUCIBLE
           << " (" __DATE__ " " __TIME__ ")"

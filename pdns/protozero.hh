@@ -70,7 +70,8 @@ namespace ProtoZero
       DNSQueryType = 1,
       DNSResponseType = 2,
       DNSOutgoingQueryType = 3,
-      DNSIncomingResponseType = 4
+      DNSIncomingResponseType = 4,
+      InternalType = 5
     };
     enum class Field : protozero::pbf_tag_type
     {
@@ -100,7 +101,13 @@ namespace ProtoZero
       httpVersion = 24,
       workerId = 25,
       packetCacheHit = 26,
-      outgoingQueries = 27
+      outgoingQueries = 27,
+      headerFlags = 28,
+      ednsVersion = 29,
+      openTelemetryData = 30,
+      ede = 31,
+      edeText = 32,
+      openTelemetryTraceID = 33,
     };
     enum class QuestionField : protozero::pbf_tag_type
     {
@@ -300,6 +307,40 @@ namespace ProtoZero
     void setOutgoingQueries(uint32_t num)
     {
       add_uint32(d_message, Field::outgoingQueries, num);
+    }
+
+    void setHeaderFlags(uint16_t flags)
+    {
+      add_uint32(d_message, Field::headerFlags, flags);
+    }
+
+    void setEDNSVersion(uint32_t version)
+    {
+      add_uint32(d_message, Field::ednsVersion, version);
+    }
+
+    void setOpenTelemetryData(const std::string& data)
+    {
+      if (!data.empty()) {
+        add_string(d_message, Field::openTelemetryData, data);
+      }
+    }
+
+    void setEDE(const uint16_t ede)
+    {
+      add_uint32(d_message, Field::ede, ede);
+    }
+
+    void setEDEText(const std::string edeText)
+    {
+      if (!edeText.empty()) {
+        add_string(d_message, Field::edeText, edeText);
+      }
+    }
+
+    void setOpenTelemetryTraceID(const std::array<uint8_t, 16>& traceID)
+    {
+      add_bytes(d_message, Field::openTelemetryTraceID, reinterpret_cast<const char*>(traceID.data()), traceID.size()); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): it's the API
     }
 
     void startResponse()

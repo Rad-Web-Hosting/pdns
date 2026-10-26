@@ -45,10 +45,8 @@ void doCarbonDump(void*)
       Socket s(remote.sin4.sin_family, SOCK_STREAM);
       s.setNonBlocking();
       std::shared_ptr<TLSCtx> tlsCtx{nullptr};
-      const struct timeval timeout
-      {
-        g_networkTimeoutMsec / 1000, static_cast<suseconds_t>(g_networkTimeoutMsec) % 1000 * 1000
-      };
+      const struct timeval timeout{
+        g_networkTimeoutMsec / 1000, static_cast<suseconds_t>(g_networkTimeoutMsec) % 1000 * 1000};
       auto handler = std::make_shared<TCPIOHandler>("", false, s.releaseHandle(), timeout, tlsCtx);
       handler->tryConnect(SyncRes::s_tcp_fast_open_connect, remote); // we do the connect so the first attempt happens while we gather stats
 
@@ -67,27 +65,22 @@ void doCarbonDump(void*)
 
       auto ret = asendtcp(msg, handler); // this will actually do the right thing waiting on the connect
       if (ret == LWResult::Result::Timeout) {
-        SLOG(g_log << Logger::Warning << "Timeout connecting/writing carbon data to " << remote.toStringWithPort() << endl,
-             log->info(Logr::Warning, "Timeout connecting/writing carbon data", "address", Logging::Loggable(remote)));
+        log->info(Logr::Warning, "Timeout connecting/writing carbon data", "address", Logging::Loggable(remote));
       }
       else if (ret != LWResult::Result::Success) {
         int err = errno;
-        SLOG(g_log << Logger::Warning << "Error writing carbon data to " << remote.toStringWithPort() << ": " << stringerror(err) << endl,
-             log->error(Logr::Warning, err, "Error writing carbon data", "address", Logging::Loggable(remote)));
+        log->error(Logr::Warning, err, "Error writing carbon data", "address", Logging::Loggable(remote));
       }
       handler->close();
     }
   }
   catch (const PDNSException& e) {
-    SLOG(g_log << Logger::Error << "Error in carbon thread: " << e.reason << endl,
-         log->error(Logr::Error, e.reason, "Error in carbon thread", "exception", Logging::Loggable("PDNSException")));
+    log->error(Logr::Error, e.reason, "Error in carbon thread", "exception", Logging::Loggable("PDNSException"));
   }
   catch (const std::exception& e) {
-    SLOG(g_log << Logger::Error << "Error in carbon thread: " << e.what() << endl,
-         log->error(Logr::Error, e.what(), "Error in carbon thread", "exception", Logging::Loggable("std::exception")));
+    log->error(Logr::Error, e.what(), "Error in carbon thread", "exception", Logging::Loggable("std::exception"));
   }
   catch (...) {
-    SLOG(g_log << Logger::Error << "Unknown error in carbon thread" << endl,
-         log->info(Logr::Error, "Error in carbon thread"));
+    log->info(Logr::Error, "Error in carbon thread");
   }
 }

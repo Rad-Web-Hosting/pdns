@@ -55,6 +55,7 @@ AC_DEFUN([PDNS_CHECK_LIBCRYPTO], [
                     LIBCRYPTO_LIBS=`$PKG_CONFIG libcrypto --libs-only-l 2>/dev/null`
                     LIBCRYPTO_INCLUDES=`$PKG_CONFIG libcrypto --cflags-only-I 2>/dev/null`
                     ssldir=`$PKG_CONFIG libcrypto --variable=prefix 2>/dev/null`
+                    sslincdir=`$PKG_CONFIG libcrypto --variable=includedir 2>/dev/null`
                     found=true
                 fi
             fi
@@ -78,6 +79,7 @@ AC_DEFUN([PDNS_CHECK_LIBCRYPTO], [
                 LIBCRYPTO_INCLUDES="-I$ssldir/include"
                 LIBCRYPTO_LDFLAGS="-L$ssldir/lib"
                 LIBCRYPTO_LIBS="-lcrypto"
+                sslincdir="$ssldir/include"
                 found=true
                 AC_MSG_RESULT([yes])
                 break
@@ -111,7 +113,7 @@ AC_DEFUN([PDNS_CHECK_LIBCRYPTO], [
         [AC_LANG_PROGRAM([#include <openssl/bn.h>], [BN_new()])],
         [
             AC_MSG_RESULT([yes])
-            AC_CHECK_FUNCS([RAND_bytes RAND_pseudo_bytes CRYPTO_memcmp OPENSSL_init_crypto EVP_MD_CTX_new EVP_MD_CTX_free RSA_get0_key])
+            AC_CHECK_FUNCS([RAND_bytes CRYPTO_memcmp])
             # you might be wondering why the stdarg.h and stddef.h includes,
             # in which case please have a look at https://github.com/PowerDNS/pdns/issues/12926
             # and weep, yelling at Red Hat

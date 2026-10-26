@@ -18,6 +18,7 @@ import clientsubnetoption
 import dns
 import dns.message
 
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 import libnacl
 import libnacl.utils
 
@@ -28,40 +29,52 @@ import h2.config
 import pycurl
 from io import BytesIO
 
-from doqclient import quic_query
 from doh3client import doh3_query
+import doqclient
 
 from eqdnsmessage import AssertEqualDNSMessageMixin
 from proxyprotocol import ProxyProtocol
 
 # Python2/3 compatibility hacks
 try:
-  from queue import Queue
+    from queue import Queue
 except ImportError:
-  from Queue import Queue
+    from Queue import Queue
 
 try:
-  range = xrange
+    range = xrange
 except NameError:
-  pass
+    pass
+
 
 def getWorkerID():
-    if not 'PYTEST_XDIST_WORKER' in os.environ:
-      return 0
-    workerName = os.environ['PYTEST_XDIST_WORKER']
+    if not "PYTEST_XDIST_WORKER" in os.environ:
+        return 0
+    workerName = os.environ["PYTEST_XDIST_WORKER"]
     return int(workerName[2:])
 
+
 workerPorts = {}
+
 
 def pickAvailablePort():
     global workerPorts
     workerID = getWorkerID()
     if workerID in workerPorts:
-      port = workerPorts[workerID] + 1
+        port = workerPorts[workerID] + 1
     else:
-      port = 11000 + (workerID * 1000)
+        port = 11000 + (workerID * 1000)
     workerPorts[workerID] = port
     return port
+
+
+class ResponderDropAction(object):
+    """
+    An object to indicate a drop action shall be taken
+    """
+
+    pass
+
 
 class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
     """
@@ -72,6 +85,10 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
     from dnsdist on a separate queue, allowing the tests to check
     that the queries sent from dnsdist were as expected.
     """
+
+    NONCE_SIZE_12 = 12
+    NONCE_SIZE_24 = 24
+
     _dnsDistListeningAddr = "127.0.0.1"
     _toResponderQueue = Queue()
     _fromResponderQueue = Queue()
@@ -80,13 +97,17 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
     _responsesCounter = {}
     _config_template = """
     """
-    _config_params = ['_testServerPort']
-    _acl = ['127.0.0.1/32']
+    _config_params = ["_testServerPort"]
+    _yaml_config_template = None
+    _yaml_config_params = []
+    _acl = ["127.0.0.1/32"]
     _consoleKey = None
-    _healthCheckName = 'a.root-servers.net.'
+    _nonceSize = None
+    _healthCheckName = "a.root-servers.net."
     _healthCheckCounter = 0
     _answerUnexpected = True
     _checkConfigExpectedOutput = None
+    _checkConfigExpectedOutputPrefix = None
     _verboseMode = False
     _sudoMode = False
     _skipListeningOnCL = False
@@ -96,9 +117,19 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
     _UDPResponder = None
     _TCPResponder = None
     _extraStartupSleep = 0
+    _enableStructuredLoggingOnCL = True
     _dnsDistPort = pickAvailablePort()
-    _consolePort = pickAvailablePort()
     _testServerPort = pickAvailablePort()
+
+    @staticmethod
+    def filterLoadedConfigurationFromLines(output):
+        output_without_loading_lines = b""
+        for line in output.splitlines():
+            print("got line:")
+            print(line)
+            if not b"Loading configuration from " in line:
+                output_without_loading_lines += line + b"\n"
+        return output_without_loading_lines
 
     @classmethod
     def waitForTCPSocket(cls, ipaddress, port):
@@ -111,85 +142,155 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
                 return
             except Exception as err:
                 if err.errno != errno.ECONNREFUSED:
-                    print(f'Error occurred: {try_number} {err}', file=sys.stderr)
+                    print(f"Error occurred: {try_number} {err}", file=sys.stderr)
             time.sleep(0.1)
-       # We assume the dnsdist instance does not listen. That's fine.
+
+    # We assume the dnsdist instance does not listen. That's fine.
 
     @classmethod
     def startResponders(cls):
         print("Launching responders..")
         cls._testServerPort = pickAvailablePort()
 
-        cls._UDPResponder = threading.Thread(name='UDP Responder', target=cls.UDPResponder, args=[cls._testServerPort, cls._toResponderQueue, cls._fromResponderQueue])
+        cls._UDPResponder = threading.Thread(
+            name="UDP Responder",
+            target=cls.UDPResponder,
+            args=[cls._testServerPort, cls._toResponderQueue, cls._fromResponderQueue],
+        )
         cls._UDPResponder.daemon = True
         cls._UDPResponder.start()
-        cls._TCPResponder = threading.Thread(name='TCP Responder', target=cls.TCPResponder, args=[cls._testServerPort, cls._toResponderQueue, cls._fromResponderQueue])
+        cls._TCPResponder = threading.Thread(
+            name="TCP Responder",
+            target=cls.TCPResponder,
+            args=[cls._testServerPort, cls._toResponderQueue, cls._fromResponderQueue],
+        )
         cls._TCPResponder.daemon = True
         cls._TCPResponder.start()
-        cls.waitForTCPSocket("127.0.0.1", cls._testServerPort);
+        cls.waitForTCPSocket("127.0.0.1", cls._testServerPort)
 
     @classmethod
     def startDNSDist(cls):
         cls._dnsDistPort = pickAvailablePort()
-        cls._consolePort = pickAvailablePort()
 
         print("Launching dnsdist..")
-        confFile = os.path.join('configs', 'dnsdist_%s.conf' % (cls.__name__))
+        if cls._yaml_config_template:
+            if "SKIP_YAML_TESTS" in os.environ:
+                raise unittest.SkipTest("YAML tests are disabled")
+
+            params = tuple([getattr(cls, param) for param in cls._yaml_config_params])
+            confFile = os.path.join("configs", "dnsdist_%s.yml" % (cls.__name__))
+            with open(confFile, "w") as conf:
+                conf.write(cls._yaml_config_template % params)
+                conf.write("\nsecurity_polling:\n  suffix: ''\n")
+
         params = tuple([getattr(cls, param) for param in cls._config_params])
         print(params)
-        with open(confFile, 'w') as conf:
-            conf.write("-- Autogenerated by dnsdisttests.py\n")
-            conf.write(f"-- dnsdist will listen on {cls._dnsDistPort}")
-            conf.write(cls._config_template % params)
-            conf.write("setSecurityPollSuffix('')")
+        extension = "lua" if cls._yaml_config_template else "conf"
+        luaConfFile = os.path.join("configs", "dnsdist_%s.%s" % (cls.__name__, extension))
+        if not cls._yaml_config_template:
+            confFile = luaConfFile
+
+        if len(cls._config_template.strip(" \n\t")) > 0:
+            with open(luaConfFile, "w") as conf:
+                conf.write("-- Autogenerated by dnsdisttests.py\n")
+                conf.write(f"-- dnsdist will listen on {cls._dnsDistPort}\n")
+                conf.write(cls._config_template % params)
+                if not cls._yaml_config_template:
+                    conf.write("\n")
+                    conf.write("setSecurityPollSuffix('')")
+        else:
+            try:
+                os.unlink(luaConfFile)
+            except OSError:
+                pass
 
         if cls._skipListeningOnCL:
-          dnsdistcmd = [os.environ['DNSDISTBIN'], '--supervised', '-C', confFile ]
+            dnsdistcmd = [os.environ["DNSDISTBIN"], "--supervised", "-C", confFile]
         else:
-          dnsdistcmd = [os.environ['DNSDISTBIN'], '--supervised', '-C', confFile,
-                        '-l', '%s:%d' % (cls._dnsDistListeningAddr, cls._dnsDistPort) ]
+            dnsdistcmd = [
+                os.environ["DNSDISTBIN"],
+                "--supervised",
+                "-C",
+                confFile,
+                "-l",
+                "%s:%d" % (cls._dnsDistListeningAddr, cls._dnsDistPort),
+            ]
 
         if cls._verboseMode:
-            dnsdistcmd.append('-v')
+            dnsdistcmd.append("-v")
+
+        dnsdistcmd.append("--structured-logging")
+        dnsdistcmd.append("true" if cls._enableStructuredLoggingOnCL else "false")
+
         if cls._sudoMode:
-            preserve_env_values = ['LD_LIBRARY_PATH', 'LLVM_PROFILE_FILE']
+            preserve_env_values = ["LD_LIBRARY_PATH", "LLVM_PROFILE_FILE"]
             for value in preserve_env_values:
                 if value in os.environ:
-                    dnsdistcmd.insert(0, value + '=' + os.environ[value])
-            dnsdistcmd.insert(0, 'sudo')
+                    dnsdistcmd.insert(0, value + "=" + os.environ[value])
+            dnsdistcmd.insert(0, "sudo")
 
         for acl in cls._acl:
-            dnsdistcmd.extend(['--acl', acl])
-        print(' '.join(dnsdistcmd))
+            dnsdistcmd.extend(["--acl", acl])
+        print(" ".join(dnsdistcmd))
 
         # validate config with --check-config, which sets client=true, possibly exposing bugs.
-        testcmd = dnsdistcmd + ['--check-config']
+        testcmd = dnsdistcmd + ["--check-config"]
         try:
             output = subprocess.check_output(testcmd, stderr=subprocess.STDOUT, close_fds=True)
         except subprocess.CalledProcessError as exc:
-            raise AssertionError('dnsdist --check-config failed (%d): %s' % (exc.returncode, exc.output))
-        if cls._checkConfigExpectedOutput is not None:
-          expectedOutput = cls._checkConfigExpectedOutput
-        else:
-          expectedOutput = ('Configuration \'%s\' OK!\n' % (confFile)).encode()
-        if not cls._verboseMode and output != expectedOutput:
-            raise AssertionError('dnsdist --check-config failed: %s (expected %s)' % (output, expectedOutput))
+            output = cls.filterLoadedConfigurationFromLines(exc.output)
+            raise AssertionError("dnsdist --check-config failed (%d): %s" % (exc.returncode, output))
 
-        logFile = os.path.join('configs', 'dnsdist_%s.log' % (cls.__name__))
-        with open(logFile, 'w') as fdLog:
-          cls._dnsdist = subprocess.Popen(dnsdistcmd, close_fds=True, stdout=fdLog, stderr=fdLog)
+        output = cls.filterLoadedConfigurationFromLines(output)
+
+        if cls._checkConfigExpectedOutputPrefix is not None:
+            if not output.startswith(cls._checkConfigExpectedOutputPrefix):
+                raise AssertionError(
+                    "dnsdist --check-config failed: %s (expected prefix %s)"
+                    % (output, cls._checkConfigExpectedOutputPrefix)
+                )
+        else:
+            if cls._checkConfigExpectedOutput is not None:
+                expectedOutput = cls._checkConfigExpectedOutput
+                if not cls._verboseMode and output != expectedOutput:
+                    raise AssertionError("dnsdist --check-config failed: %s (expected %s)" % (output, expectedOutput))
+            elif not cls._verboseMode:
+                if cls._enableStructuredLoggingOnCL:
+                    expectedPrefix = b'msg="Configuration OK" subsystem="setup" level="0" prio="Info" ts="'
+                    if not output.startswith(expectedPrefix):
+                        raise AssertionError(
+                            "dnsdist --check-config failed: %s (expected prefix %s)" % (output, expectedPrefix)
+                        )
+                else:
+                    expectedOutput = ("Configuration '%s' OK!\n" % (confFile)).encode()
+                    if output != expectedOutput:
+                        raise AssertionError(
+                            "dnsdist --check-config failed: %s (expected %s)" % (output, expectedOutput)
+                        )
+
+        logFile = os.path.join("configs", "dnsdist_%s.log" % (cls.__name__))
+        with open(logFile, "w") as fdLog:
+            cls._dnsdist = subprocess.Popen(dnsdistcmd, close_fds=True, stdout=fdLog, stderr=fdLog)
 
         if cls._alternateListeningAddr and cls._alternateListeningPort:
             cls.waitForTCPSocket(cls._alternateListeningAddr, cls._alternateListeningPort)
         else:
             cls.waitForTCPSocket(cls._dnsDistListeningAddr, cls._dnsDistPort)
 
+        consolePort = getattr(cls, "_consolePort", None)
+        if consolePort:
+            cls.waitForTCPSocket(cls._dnsDistListeningAddr, consolePort)
+
+        webPort = getattr(cls, "_webServerPort", None)
+        if webPort:
+            cls.waitForTCPSocket(cls._dnsDistListeningAddr, webPort)
+
         if cls._dnsdist.poll() is not None:
             print(f"\n*** startDNSDist log for {logFile} ***")
-            with open(logFile, 'r') as fdLog:
+            with open(logFile, "r") as fdLog:
                 print(fdLog.read())
             print(f"*** End startDNSDist log for {logFile} ***")
-            raise AssertionError('%s failed (%d)' % (dnsdistcmd, cls._dnsdist.returncode))
+            raise AssertionError("%s failed (%d)" % (dnsdistcmd, cls._dnsdist.returncode))
         time.sleep(cls._extraStartupSleep)
 
     @classmethod
@@ -197,7 +298,7 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         print("Setting up UDP socket..")
         cls._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         cls._sock.settimeout(2.0)
-        cls._sock.connect(("127.0.0.1", cls._dnsDistPort))
+        cls._sock.connect((cls._dnsDistListeningAddr, cls._dnsDistPort))
 
     @classmethod
     def killProcess(cls, p):
@@ -206,7 +307,7 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
             return
         try:
             p.terminate()
-            for count in range(20):
+            for count in range(50):
                 x = p.poll()
                 if x is not None:
                     break
@@ -216,7 +317,10 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
                 p.kill()
                 p.wait()
             if p.returncode != 0:
-              raise AssertionError('Process exited with return code %d' % (p.returncode))
+                if p.returncode < 0:
+                    raise AssertionError("Process was killed by signal %d" % (-p.returncode))
+                else:
+                    raise AssertionError("Process exited with return code %d" % (p.returncode))
         except OSError as e:
             # There is a race-condition with the poll() and
             # kill() statements, when the process is dead on the
@@ -225,8 +329,14 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
                 raise
 
     @classmethod
-    def setUpClass(cls):
+    def _detectNonceSize(cls):
+        output = subprocess.check_output([os.environ["DNSDISTBIN"], "-V"], stderr=subprocess.STDOUT).decode()
+        if "libsodium" in output:
+            return cls.NONCE_SIZE_24
+        return cls.NONCE_SIZE_12
 
+    @classmethod
+    def setUpClass(cls):
         cls.startResponders()
         cls.startDNSDist()
         cls.setUpSockets()
@@ -257,23 +367,23 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         healthCheck = str(request.question[0].name).endswith(cls._healthCheckName)
         if healthCheck:
             cls._healthCheckCounter += 1
-            response = dns.message.make_response(request)
+            response = dns.message.make_response(request, pad=0)
         else:
             cls._ResponderIncrementCounter()
             if not fromQueue.empty():
                 toQueue.put(request, True, cls._queueTimeout)
                 response = fromQueue.get(True, cls._queueTimeout)
                 if response:
-                  response = copy.copy(response)
-                  response.id = request.id
+                    response = copy.copy(response)
+                    response.id = request.id
 
         if synthesize is not None:
-          response = dns.message.make_response(request)
-          response.set_rcode(synthesize)
+            response = dns.message.make_response(request, pad=0)
+            response.set_rcode(synthesize)
 
         if not response:
             if cls._answerUnexpected:
-                response = dns.message.make_response(request)
+                response = dns.message.make_response(request, pad=0)
                 response.set_rcode(dns.rcode.SERVFAIL)
 
         return response
@@ -293,19 +403,19 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         sock.settimeout(0.5)
         while True:
             try:
-              data, addr = sock.recvfrom(4096)
+                data, addr = sock.recvfrom(4096)
             except socket.timeout:
-              if cls._backgroundThreads.get(threading.get_native_id(), False) == False:
-                del cls._backgroundThreads[threading.get_native_id()]
-                break
-              else:
-                continue
+                if cls._backgroundThreads.get(threading.get_native_id(), False) == False:
+                    del cls._backgroundThreads[threading.get_native_id()]
+                    break
+                else:
+                    continue
 
             forceRcode = None
             try:
                 request = dns.message.from_wire(data, ignore_trailing=ignoreTrailing)
             except dns.message.TrailingJunk as e:
-                print('trailing data exception in UDPResponder')
+                print("trailing data exception in UDPResponder")
                 if trailingDataResponse is False or forceRcode is True:
                     raise
                 print("UDP query with trailing data, synthesizing response")
@@ -314,92 +424,118 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
 
             wire = None
             if callback:
-              wire = callback(request)
+                wire = callback(request)
             else:
-              if request.edns > 1:
-                forceRcode = dns.rcode.BADVERS
-              response = cls._getResponse(request, fromQueue, toQueue, synthesize=forceRcode)
-              if response:
-                wire = response.to_wire()
+                if request.edns > 1:
+                    forceRcode = dns.rcode.BADVERS
+                response = cls._getResponse(request, fromQueue, toQueue, synthesize=forceRcode)
+                if response:
+                    wire = response.to_wire()
 
             if not wire:
-              continue
+                continue
+            elif isinstance(wire, ResponderDropAction):
+                continue
 
             sock.sendto(wire, addr)
 
         sock.close()
 
     @classmethod
-    def handleTCPConnection(cls, conn, fromQueue, toQueue, trailingDataResponse=False, multipleResponses=False, callback=None, partialWrite=False):
-      ignoreTrailing = trailingDataResponse is True
-      try:
-        data = conn.recv(2)
-      except Exception as err:
-        data = None
-        print(f'Error while reading query size in TCP responder thread {err=}, {type(err)=}')
-      if not data:
-        conn.close()
-        return
-
-      (datalen,) = struct.unpack("!H", data)
-      data = conn.recv(datalen)
-      forceRcode = None
-      try:
-        request = dns.message.from_wire(data, ignore_trailing=ignoreTrailing)
-      except dns.message.TrailingJunk as e:
-        if trailingDataResponse is False or forceRcode is True:
-          raise
-        print("TCP query with trailing data, synthesizing response")
-        request = dns.message.from_wire(data, ignore_trailing=True)
-        forceRcode = trailingDataResponse
-
-      if callback:
-        wire = callback(request)
-      else:
-        if request.edns > 1:
-          forceRcode = dns.rcode.BADVERS
-        response = cls._getResponse(request, fromQueue, toQueue, synthesize=forceRcode)
-        if response:
-          wire = response.to_wire(max_size=65535)
-
-      if not wire:
-        conn.close()
-        return
-
-      wireLen = struct.pack("!H", len(wire))
-      if partialWrite:
-        for b in wireLen:
-          conn.send(bytes([b]))
-          time.sleep(0.5)
-      else:
-        conn.send(wireLen)
-      conn.send(wire)
-
-      while multipleResponses:
-        # do not block, and stop as soon as the queue is empty, either the next response is already here or we are done
-        # otherwise we might read responses intended for the next connection
-        if fromQueue.empty():
-          break
-
-        response = fromQueue.get(False)
-        if not response:
-          break
-
-        response = copy.copy(response)
-        response.id = request.id
-        wire = response.to_wire(max_size=65535)
+    def handleTCPConnection(
+        cls,
+        conn,
+        fromQueue,
+        toQueue,
+        trailingDataResponse=False,
+        multipleResponses=False,
+        callback=None,
+        partialWrite=False,
+    ):
+        ignoreTrailing = trailingDataResponse is True
         try:
-          conn.send(struct.pack("!H", len(wire)))
-          conn.send(wire)
-        except socket.error as e:
-          # some of the tests are going to close
-          # the connection on us, just deal with it
-          break
+            data = conn.recv(2)
+        except Exception as err:
+            data = None
+            print(f"Error while reading query size in TCP responder thread {err=}, {type(err)=}")
+        if not data:
+            conn.close()
+            return
 
-      conn.close()
+        (datalen,) = struct.unpack("!H", data)
+        data = conn.recv(datalen)
+        forceRcode = None
+        try:
+            request = dns.message.from_wire(data, ignore_trailing=ignoreTrailing)
+        except dns.message.TrailingJunk as e:
+            if trailingDataResponse is False or forceRcode is True:
+                raise
+            print("TCP query with trailing data, synthesizing response")
+            request = dns.message.from_wire(data, ignore_trailing=True)
+            forceRcode = trailingDataResponse
+
+        if callback:
+            wire = callback(request)
+        else:
+            if request.edns > 1:
+                forceRcode = dns.rcode.BADVERS
+            response = cls._getResponse(request, fromQueue, toQueue, synthesize=forceRcode)
+            if response:
+                wire = response.to_wire(max_size=65535)
+
+        if not wire:
+            conn.close()
+            return
+        elif isinstance(wire, ResponderDropAction):
+            return
+
+        wireLen = struct.pack("!H", len(wire))
+        if partialWrite:
+            for b in wireLen:
+                conn.send(bytes([b]))
+                time.sleep(0.5)
+        else:
+            conn.send(wireLen)
+        conn.send(wire)
+
+        while multipleResponses:
+            # do not block, and stop as soon as the queue is empty, either the next response is already here or we are done
+            # otherwise we might read responses intended for the next connection
+            if fromQueue.empty():
+                break
+
+            response = fromQueue.get(False)
+            if not response:
+                break
+
+            response = copy.copy(response)
+            response.id = request.id
+            wire = response.to_wire(max_size=65535)
+            try:
+                conn.send(struct.pack("!H", len(wire)))
+                conn.send(wire)
+            except socket.error as e:
+                # some of the tests are going to close
+                # the connection on us, just deal with it
+                break
+
+        conn.close()
 
     @classmethod
-    def TCPResponder(cls, port, fromQueue, toQueue, trailingDataResponse=False, multipleResponses=False, callback=None, tlsContext=None, multipleConnections=False, listeningAddr='127.0.0.1', partialWrite=False):
+    def TCPResponder(
+        cls,
+        port,
+        fromQueue,
+        toQueue,
+        trailingDataResponse=False,
+        multipleResponses=False,
+        callback=None,
+        tlsContext=None,
+        multipleConnections=False,
+        listeningAddr="127.0.0.1",
+        partialWrite=False,
+        expectedALPN=None,
+    ):
         cls._backgroundThreads[threading.get_native_id()] = True
         # trailingDataResponse=True means "ignore trailing data".
         # Other values are either False (meaning "raise an exception")
@@ -418,47 +554,69 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         sock.listen(100)
         sock.settimeout(0.5)
         if tlsContext:
-          sock = tlsContext.wrap_socket(sock, server_side=True)
+            sock = tlsContext.wrap_socket(sock, server_side=True)
 
         while True:
             try:
-              (conn, _) = sock.accept()
+                (conn, _) = sock.accept()
             except ssl.SSLError:
-              continue
-            except ConnectionResetError:
-              continue
-            except socket.timeout:
-              if cls._backgroundThreads.get(threading.get_native_id(), False) == False:
-                 del cls._backgroundThreads[threading.get_native_id()]
-                 break
-              else:
                 continue
+            except ConnectionResetError:
+                continue
+            except socket.timeout:
+                if cls._backgroundThreads.get(threading.get_native_id(), False) == False:
+                    del cls._backgroundThreads[threading.get_native_id()]
+                    break
+                else:
+                    continue
 
             conn.settimeout(5.0)
+            if tlsContext and expectedALPN:
+                alpn = conn.selected_alpn_protocol()
+                if alpn != expectedALPN:
+                    print(f"Wrong ALPN, got {alpn}, expected {expectedALPN}")
+                    continue
+
             if multipleConnections:
-              thread = threading.Thread(name='TCP Connection Handler',
-                                        target=cls.handleTCPConnection,
-                                        args=[conn, fromQueue, toQueue, trailingDataResponse, multipleResponses, callback, partialWrite])
-              thread.daemon = True
-              thread.start()
+                thread = threading.Thread(
+                    name="TCP Connection Handler",
+                    target=cls.handleTCPConnection,
+                    args=[conn, fromQueue, toQueue, trailingDataResponse, multipleResponses, callback, partialWrite],
+                )
+                thread.daemon = True
+                thread.start()
             else:
-              cls.handleTCPConnection(conn, fromQueue, toQueue, trailingDataResponse, multipleResponses, callback, partialWrite)
+                cls.handleTCPConnection(
+                    conn, fromQueue, toQueue, trailingDataResponse, multipleResponses, callback, partialWrite
+                )
 
         sock.close()
 
     @classmethod
-    def handleDoHConnection(cls, config, conn, fromQueue, toQueue, trailingDataResponse, multipleResponses, callback, tlsContext, useProxyProtocol):
+    def handleDoHConnection(
+        cls,
+        config,
+        conn,
+        fromQueue,
+        toQueue,
+        trailingDataResponse,
+        multipleResponses,
+        callback,
+        tlsContext,
+        useProxyProtocol,
+        closeConnCallback,
+    ):
         ignoreTrailing = trailingDataResponse is True
         try:
-          h2conn = h2.connection.H2Connection(config=config)
-          h2conn.initiate_connection()
-          conn.sendall(h2conn.data_to_send())
+            h2conn = h2.connection.H2Connection(config=config)
+            h2conn.initiate_connection()
+            conn.sendall(h2conn.data_to_send())
         except ssl.SSLEOFError as e:
-          print("Unexpected EOF: %s" % (e))
-          return
+            print("Unexpected EOF: %s" % (e))
+            return
         except Exception as err:
-          print(f'Unexpected exception in DoH responder thread (connection init) {err=}, {type(err)=}')
-          return
+            print(f"Unexpected exception in DoH responder thread (connection init) {err=}, {type(err)=}")
+            return
 
         dnsData = {}
 
@@ -467,19 +625,25 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
             proxy = ProxyProtocol()
             header = conn.recv(proxy.HEADER_SIZE)
             if not header:
-                print('unable to get header')
+                print("unable to get header")
+                if closeConnCallback:
+                    closeConnCallback(conn)
                 conn.close()
                 return
 
             if not proxy.parseHeader(header):
-                print('unable to parse header')
+                print("unable to parse header")
                 print(header)
+                if closeConnCallback:
+                    closeConnCallback(conn)
                 conn.close()
                 return
 
             proxyContent = conn.recv(proxy.contentLen)
             if not proxyContent:
-                print('unable to get content')
+                print("unable to get content")
+                if closeConnCallback:
+                    closeConnCallback(conn)
                 conn.close()
                 return
 
@@ -490,21 +654,23 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         requestHeaders = None
         while True:
             try:
-              data = conn.recv(65535)
+                data = conn.recv(65535)
             except Exception as err:
-              data = None
-              print(f'Unexpected exception in DoH responder thread {err=}, {type(err)=}')
+                data = None
+                print(f"Unexpected exception in DoH responder thread {err=}, {type(err)=}")
             if not data:
                 break
 
             events = h2conn.receive_data(data)
             for event in events:
+                if isinstance(event, h2.events.ConnectionTerminated):
+                    break
                 if isinstance(event, h2.events.RequestReceived):
                     requestHeaders = event.headers
                 if isinstance(event, h2.events.DataReceived):
                     h2conn.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
                     if not event.stream_id in dnsData:
-                      dnsData[event.stream_id] = b''
+                        dnsData[event.stream_id] = b""
                     dnsData[event.stream_id] = dnsData[event.stream_id] + (event.data)
                     if event.stream_ended:
                         forceRcode = None
@@ -519,21 +685,25 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
                             forceRcode = trailingDataResponse
 
                         if callback:
-                            status, wire = callback(request, requestHeaders, fromQueue, toQueue)
+                            status, wire = callback(request, requestHeaders, fromQueue, toQueue, conn)
                         else:
                             response = cls._getResponse(request, fromQueue, toQueue, synthesize=forceRcode)
                             if response:
                                 wire = response.to_wire(max_size=65535)
 
                         if not wire:
+                            if closeConnCallback:
+                                closeConnCallback(conn)
                             conn.close()
                             conn = None
                             break
+                        elif isinstance(wire, ResponderDropAction):
+                            break
 
                         headers = [
-                          (':status', str(status)),
-                          ('content-length', str(len(wire))),
-                          ('content-type', 'application/dns-message'),
+                            (":status", str(status)),
+                            ("content-length", str(len(wire))),
+                            ("content-type", "application/dns-message"),
                         ]
                         h2conn.send_headers(stream_id=event.stream_id, headers=headers)
                         h2conn.send_data(stream_id=event.stream_id, data=wire, end_stream=True)
@@ -546,10 +716,25 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
                 break
 
         if conn is not None:
+            if closeConnCallback:
+                closeConnCallback(conn)
             conn.close()
 
     @classmethod
-    def DOHResponder(cls, port, fromQueue, toQueue, trailingDataResponse=False, multipleResponses=False, callback=None, tlsContext=None, useProxyProtocol=False):
+    def DOHResponder(
+        cls,
+        port,
+        fromQueue,
+        toQueue,
+        trailingDataResponse=False,
+        multipleResponses=False,
+        callback=None,
+        tlsContext=None,
+        useProxyProtocol=False,
+        closeConnCallback=False,
+        connTimeout=5.0,
+        expectedALPN=None,
+    ):
         cls._backgroundThreads[threading.get_native_id()] = True
         # trailingDataResponse=True means "ignore trailing data".
         # Other values are either False (meaning "raise an exception")
@@ -578,7 +763,7 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
             except ssl.SSLError:
                 continue
             except ConnectionResetError:
-              continue
+                continue
             except socket.timeout:
                 if cls._backgroundThreads.get(threading.get_native_id(), False) == False:
                     del cls._backgroundThreads[threading.get_native_id()]
@@ -586,10 +771,30 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
                 else:
                     continue
 
-            conn.settimeout(5.0)
-            thread = threading.Thread(name='DoH Connection Handler',
-                                      target=cls.handleDoHConnection,
-                                      args=[config, conn, fromQueue, toQueue, trailingDataResponse, multipleResponses, callback, tlsContext, useProxyProtocol])
+            conn.settimeout(connTimeout)
+
+            if tlsContext and expectedALPN:
+                alpn = conn.selected_alpn_protocol()
+                if alpn != expectedALPN:
+                    print(f"Wrong ALPN, got {alpn}, expected {expectedALPN}")
+                    continue
+
+            thread = threading.Thread(
+                name="DoH Connection Handler",
+                target=cls.handleDoHConnection,
+                args=[
+                    config,
+                    conn,
+                    fromQueue,
+                    toQueue,
+                    trailingDataResponse,
+                    multipleResponses,
+                    callback,
+                    tlsContext,
+                    useProxyProtocol,
+                    closeConnCallback,
+                ],
+            )
             thread.daemon = True
             thread.start()
 
@@ -623,39 +828,40 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         return (receivedQuery, message)
 
     @classmethod
-    def openTCPConnection(cls, timeout=None, port=None):
+    def openTCPConnection(cls, timeout=2.0, port=None):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         if timeout:
             sock.settimeout(timeout)
 
         if not port:
-          port = cls._dnsDistPort
+            port = cls._dnsDistPort
 
-        sock.connect(("127.0.0.1", port))
+        sock.connect((cls._dnsDistListeningAddr, port))
         return sock
 
     @classmethod
-    def openTLSConnection(cls, port, serverName, caCert=None, timeout=None, alpn=[]):
+    def openTLSConnection(cls, port, serverName, caCert=None, timeout=2.0, alpn=[], sslctx=None, session=None):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         if timeout:
             sock.settimeout(timeout)
 
         # 2.7.9+
-        if hasattr(ssl, 'create_default_context'):
-            sslctx = ssl.create_default_context(cafile=caCert)
-            if len(alpn)> 0 and hasattr(sslctx, 'set_alpn_protocols'):
-              sslctx.set_alpn_protocols(alpn)
-            sslsock = sslctx.wrap_socket(sock, server_hostname=serverName)
+        if hasattr(ssl, "create_default_context"):
+            if not sslctx:
+                sslctx = ssl.create_default_context(cafile=caCert)
+                if len(alpn) > 0 and hasattr(sslctx, "set_alpn_protocols"):
+                    sslctx.set_alpn_protocols(alpn)
+            sslsock = sslctx.wrap_socket(sock, server_hostname=serverName, session=session)
         else:
             sslsock = ssl.wrap_socket(sock, ca_certs=caCert, cert_reqs=ssl.CERT_REQUIRED)
 
-        sslsock.connect(("127.0.0.1", port))
+        sslsock.connect((cls._dnsDistListeningAddr, port))
         return sslsock
 
     @classmethod
-    def sendTCPQueryOverConnection(cls, sock, query, rawQuery=False, response=None, timeout=2.0):
+    def sendTCPQueryOverConnection(cls, sock, query, rawQuery=False, response=None, timeout=2.0, prependPayload=None):
         if not rawQuery:
             wire = query.to_wire()
         else:
@@ -664,6 +870,8 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         if response:
             cls._toResponderQueue.put(response, True, timeout)
 
+        if prependPayload:
+            sock.send(prependPayload)
         sock.send(struct.pack("!H", len(wire)))
         sock.send(wire)
 
@@ -689,15 +897,15 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
             return message
 
     @classmethod
-    def sendDOTQuery(cls, port, serverName, query, response, caFile, useQueue=True):
-        conn = cls.openTLSConnection(port, serverName, caFile)
-        cls.sendTCPQueryOverConnection(conn, query, response=response)
+    def sendDOTQuery(cls, port, serverName, query, response, caFile, useQueue=True, timeout=None):
+        conn = cls.openTLSConnection(port, serverName, caFile, timeout=timeout)
+        cls.sendTCPQueryOverConnection(conn, query, response=response, timeout=timeout)
         if useQueue:
-          return cls.recvTCPResponseOverConnection(conn, useQueue=useQueue)
-        return None, cls.recvTCPResponseOverConnection(conn, useQueue=useQueue)
+            return cls.recvTCPResponseOverConnection(conn, useQueue=useQueue, timeout=timeout)
+        return None, cls.recvTCPResponseOverConnection(conn, useQueue=useQueue, timeout=timeout)
 
     @classmethod
-    def sendTCPQuery(cls, query, response, useQueue=True, timeout=2.0, rawQuery=False):
+    def sendTCPQuery(cls, query, response, useQueue=True, timeout=2.0, rawQuery=False, prependPayload=None):
         message = None
         if useQueue:
             cls._toResponderQueue.put(response, True, timeout)
@@ -709,7 +917,7 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
             return (None, None)
 
         try:
-            cls.sendTCPQueryOverConnection(sock, query, rawQuery, timeout=timeout)
+            cls.sendTCPQueryOverConnection(sock, query, rawQuery, timeout=timeout, prependPayload=prependPayload)
             message = cls.recvTCPResponseOverConnection(sock, timeout=timeout)
         except socket.timeout as e:
             print("Timeout while sending or receiving TCP data: %s" % (str(e)))
@@ -724,7 +932,7 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
             print(receivedQuery)
             receivedQuery = cls._fromResponderQueue.get(True, timeout)
         else:
-          print("queue is empty")
+            print("queue is empty")
 
         return (receivedQuery, message)
 
@@ -738,7 +946,7 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         if timeout:
             sock.settimeout(timeout)
 
-        sock.connect(("127.0.0.1", cls._dnsDistPort))
+        sock.connect((cls._dnsDistListeningAddr, cls._dnsDistPort))
         messages = []
 
         try:
@@ -804,22 +1012,37 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
 
     @classmethod
     def _encryptConsole(cls, command, nonce):
-        command = command.encode('UTF-8')
+        command = command.encode("UTF-8")
         if cls._consoleKey is None:
             return command
+        if cls._nonceSize == cls.NONCE_SIZE_12:
+            cipher = ChaCha20Poly1305(cls._consoleKey)
+            ciphertext_with_tag = cipher.encrypt(nonce, command, None)
+            # cryptography puts tag at the end, dnsdist expects it at the beginning
+            tag = ciphertext_with_tag[-16:]
+            ciphertext = ciphertext_with_tag[:-16]
+            return tag + ciphertext
         return libnacl.crypto_secretbox(command, nonce, cls._consoleKey)
 
     @classmethod
     def _decryptConsole(cls, command, nonce):
         if cls._consoleKey is None:
             result = command
+        elif cls._nonceSize == cls.NONCE_SIZE_12:
+            # dnsdist puts tag at the beginning, cryptography expects it at the end
+            tag = command[:16]
+            ciphertext = command[16:]
+            cipher = ChaCha20Poly1305(cls._consoleKey)
+            result = cipher.decrypt(nonce, ciphertext + tag, None)
         else:
             result = libnacl.crypto_secretbox_open(command, nonce, cls._consoleKey)
-        return result.decode('UTF-8')
+        return result.decode("UTF-8")
 
     @classmethod
     def sendConsoleCommand(cls, command, timeout=5.0, IPv6=False):
-        ourNonce = libnacl.utils.rand_nonce()
+        if cls._nonceSize is None:
+            cls._nonceSize = cls._detectNonceSize()
+        ourNonce = os.urandom(cls._nonceSize)
         theirNonce = None
         sock = socket.socket(socket.AF_INET if not IPv6 else socket.AF_INET6, socket.SOCK_STREAM)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -830,9 +1053,14 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         sock.send(ourNonce)
         theirNonce = sock.recv(len(ourNonce))
         if len(theirNonce) != len(ourNonce):
-            print("Received a nonce of size %d, expecting %d, console command will not be sent!" % (len(theirNonce), len(ourNonce)))
+            print(
+                "Received a nonce of size %d, expecting %d, console command will not be sent!"
+                % (len(theirNonce), len(ourNonce))
+            )
             if len(theirNonce) == 0:
-                raise socket.error("Got EOF while reading a nonce of size %d, console command will not be sent!" % (len(ourNonce)))
+                raise socket.error(
+                    "Got EOF while reading a nonce of size %d, console command will not be sent!" % (len(ourNonce))
+                )
             return None
 
         halfNonceSize = int(len(ourNonce) / 2)
@@ -928,35 +1156,97 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
     @staticmethod
     def generateNewCertificateAndKey(filePrefix):
         # generate and sign a new cert
-        cmd = ['openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-keyout', filePrefix + '.key', '-out', filePrefix + '.csr', '-config', 'configServer.conf']
-        output = None
+        cmd = [
+            "openssl",
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            filePrefix + ".key",
+            "-out",
+            filePrefix + ".csr",
+            "-config",
+            "configServer.conf",
+        ]
         try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True)
-            output = process.communicate(input='')
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True
+            )
+            process.communicate(input="")
         except subprocess.CalledProcessError as exc:
-            raise AssertionError('openssl req failed (%d): %s' % (exc.returncode, exc.output))
-        cmd = ['openssl', 'x509', '-req', '-days', '1', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-CAcreateserial', '-in', filePrefix + '.csr', '-out', filePrefix + '.pem', '-extfile', 'configServer.conf', '-extensions', 'v3_req']
-        output = None
+            raise AssertionError("openssl req failed (%d): %s" % (exc.returncode, exc.output))
+        cmd = [
+            "openssl",
+            "x509",
+            "-req",
+            "-days",
+            "1",
+            "-CA",
+            "ca.pem",
+            "-CAkey",
+            "ca.key",
+            "-CAcreateserial",
+            "-in",
+            filePrefix + ".csr",
+            "-out",
+            filePrefix + ".pem",
+            "-extfile",
+            "configServer.conf",
+            "-extensions",
+            "v3_req",
+        ]
         try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True)
-            output = process.communicate(input='')
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True
+            )
+            process.communicate(input="")
         except subprocess.CalledProcessError as exc:
-            raise AssertionError('openssl x509 failed (%d): %s' % (exc.returncode, exc.output))
+            raise AssertionError("openssl x509 failed (%d): %s" % (exc.returncode, exc.output))
 
-        with open(filePrefix + '.chain', 'w') as outFile:
-            for inFileName in [filePrefix + '.pem', 'ca.pem']:
+        with open(filePrefix + ".chain", "w") as outFile:
+            for inFileName in [filePrefix + ".pem", "ca.pem"]:
                 with open(inFileName) as inFile:
                     outFile.write(inFile.read())
 
-        cmd = ['openssl', 'pkcs12', '-export', '-passout', 'pass:passw0rd', '-clcerts', '-in', filePrefix + '.pem', '-CAfile', 'ca.pem', '-inkey', filePrefix + '.key', '-out', filePrefix + '.p12']
-        output = None
+        cmd = [
+            "openssl",
+            "pkcs12",
+            "-export",
+            "-passout",
+            "pass:passw0rd",
+            "-clcerts",
+            "-in",
+            filePrefix + ".pem",
+            "-CAfile",
+            "ca.pem",
+            "-inkey",
+            filePrefix + ".key",
+            "-out",
+            filePrefix + ".p12",
+        ]
         try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True)
-            output = process.communicate(input='')
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True
+            )
+            process.communicate(input="")
         except subprocess.CalledProcessError as exc:
-            raise AssertionError('openssl pkcs12 failed (%d): %s' % (exc.returncode, exc.output))
+            raise AssertionError("openssl pkcs12 failed (%d): %s" % (exc.returncode, exc.output))
 
-    def checkMessageProxyProtocol(self, receivedProxyPayload, source, destination, isTCP, values=[], v6=False, sourcePort=None, destinationPort=None):
+    def checkMessageProxyProtocol(
+        self,
+        receivedProxyPayload,
+        source,
+        destination,
+        isTCP,
+        values=None,
+        v6=False,
+        sourcePort=None,
+        destinationPort=None,
+    ):
+        if values is None:
+            values = []
         proxy = ProxyProtocol()
         self.assertTrue(proxy.parseHeader(receivedProxyPayload))
         self.assertEqual(proxy.version, 0x02)
@@ -992,7 +1282,7 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
             wire = query
         else:
             wire = query.to_wire()
-        param = base64.urlsafe_b64encode(wire).decode('UTF8').rstrip('=')
+        param = base64.urlsafe_b64encode(wire).decode("UTF8").rstrip("=")
         return baseurl + "?dns=" + param
 
     @classmethod
@@ -1000,12 +1290,31 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         conn = pycurl.Curl()
         conn.setopt(pycurl.HTTP_VERSION, pycurl.CURL_HTTP_VERSION_2)
 
-        conn.setopt(pycurl.HTTPHEADER, ["Content-type: application/dns-message",
-                                         "Accept: application/dns-message"])
+        conn.setopt(pycurl.HTTPHEADER, ["Content-type: application/dns-message", "Accept: application/dns-message"])
+        if timeout:
+            conn.setopt(pycurl.TIMEOUT_MS, int(timeout * 1000))
+
         return conn
 
     @classmethod
-    def sendDOHQuery(cls, port, servername, baseurl, query, response=None, timeout=2.0, caFile=None, useQueue=True, rawQuery=False, rawResponse=False, customHeaders=[], useHTTPS=True, fromQueue=None, toQueue=None, conn=None):
+    def sendDOHQuery(
+        cls,
+        port,
+        servername,
+        baseurl,
+        query,
+        response=None,
+        timeout=2.0,
+        caFile=None,
+        useQueue=True,
+        rawQuery=False,
+        rawResponse=False,
+        customHeaders=[],
+        useHTTPS=True,
+        fromQueue=None,
+        toQueue=None,
+        conn=None,
+    ):
         url = cls.getDOHGetURL(baseurl, query, rawQuery)
 
         if not conn:
@@ -1020,9 +1329,9 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
                 conn.setopt(pycurl.CAINFO, caFile)
 
         response_headers = BytesIO()
-        #conn.setopt(pycurl.VERBOSE, True)
+        # conn.setopt(pycurl.VERBOSE, True)
         conn.setopt(pycurl.URL, url)
-        conn.setopt(pycurl.RESOLVE, ["%s:%d:127.0.0.1" % (servername, port)])
+        conn.setopt(pycurl.RESOLVE, ["%s:%d:%s" % (servername, port, cls._dnsDistListeningAddr)])
 
         conn.setopt(pycurl.HTTPHEADER, customHeaders)
         conn.setopt(pycurl.HEADERFUNCTION, response_headers.write)
@@ -1035,7 +1344,7 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
 
         receivedQuery = None
         message = None
-        cls._response_headers = ''
+        cls._response_headers = ""
         data = conn.perform_rb()
         cls._rcode = conn.getinfo(pycurl.RESPONSE_CODE)
         if cls._rcode == 200 and not rawResponse:
@@ -1055,13 +1364,27 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         return (receivedQuery, message)
 
     @classmethod
-    def sendDOHPostQuery(cls, port, servername, baseurl, query, response=None, timeout=2.0, caFile=None, useQueue=True, rawQuery=False, rawResponse=False, customHeaders=[], useHTTPS=True):
+    def sendDOHPostQuery(
+        cls,
+        port,
+        servername,
+        baseurl,
+        query,
+        response=None,
+        timeout=2.0,
+        caFile=None,
+        useQueue=True,
+        rawQuery=False,
+        rawResponse=False,
+        customHeaders=[],
+        useHTTPS=True,
+    ):
         url = baseurl
         conn = cls.openDOHConnection(port, caFile=caFile, timeout=timeout)
         response_headers = BytesIO()
-        #conn.setopt(pycurl.VERBOSE, True)
+        # conn.setopt(pycurl.VERBOSE, True)
         conn.setopt(pycurl.URL, url)
-        conn.setopt(pycurl.RESOLVE, ["%s:%d:127.0.0.1" % (servername, port)])
+        conn.setopt(pycurl.RESOLVE, ["%s:%d:%s" % (servername, port, cls._dnsDistListeningAddr)])
         # this means "really do HTTP/2, not HTTP/1 with Upgrade headers"
         conn.setopt(pycurl.HTTP_VERSION, pycurl.CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE)
         if useHTTPS:
@@ -1084,7 +1407,7 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
 
         receivedQuery = None
         message = None
-        cls._response_headers = ''
+        cls._response_headers = ""
         data = conn.perform_rb()
         cls._rcode = conn.getinfo(pycurl.RESPONSE_CODE)
         if cls._rcode == 200 and not rawResponse:
@@ -1098,34 +1421,89 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         cls._response_headers = response_headers.getvalue()
         return (receivedQuery, message)
 
-    def sendDOHQueryWrapper(self, query, response, useQueue=True):
-        return self.sendDOHQuery(self._dohServerPort, self._serverName, self._dohBaseURL, query, response=response, caFile=self._caCert, useQueue=useQueue)
+    def sendDOHQueryWrapper(self, query, response, useQueue=True, timeout=2, serverName=None):
+        return self.sendDOHQuery(
+            self._dohServerPort,
+            self._serverName if not serverName else serverName,
+            self._dohBaseURL,
+            query,
+            response=response,
+            caFile=self._caCert,
+            useQueue=useQueue,
+            timeout=timeout,
+        )
 
-    def sendDOHWithNGHTTP2QueryWrapper(self, query, response, useQueue=True):
-        return self.sendDOHQuery(self._dohWithNGHTTP2ServerPort, self._serverName, self._dohWithNGHTTP2BaseURL, query, response=response, caFile=self._caCert, useQueue=useQueue)
+    def sendDOHWithNGHTTP2QueryWrapper(self, query, response, useQueue=True, timeout=2, serverName=None):
+        return self.sendDOHQuery(
+            self._dohWithNGHTTP2ServerPort,
+            self._serverName if not serverName else serverName,
+            self._dohWithNGHTTP2BaseURL,
+            query,
+            response=response,
+            caFile=self._caCert,
+            useQueue=useQueue,
+            timeout=timeout,
+        )
 
-    def sendDOHWithH2OQueryWrapper(self, query, response, useQueue=True):
-        return self.sendDOHQuery(self._dohWithH2OServerPort, self._serverName, self._dohWithH2OBaseURL, query, response=response, caFile=self._caCert, useQueue=useQueue)
+    def sendDOTQueryWrapper(self, query, response, useQueue=True, timeout=2, serverName=None):
+        return self.sendDOTQuery(
+            self._tlsServerPort,
+            self._serverName if not serverName else serverName,
+            query,
+            response,
+            self._caCert,
+            useQueue=useQueue,
+            timeout=timeout,
+        )
 
-    def sendDOTQueryWrapper(self, query, response, useQueue=True):
-        return self.sendDOTQuery(self._tlsServerPort, self._serverName, query, response, self._caCert, useQueue=useQueue)
+    def sendDOQQueryWrapper(self, query, response, useQueue=True, timeout=2, serverName=None, passExceptions=False):
+        return self.sendDOQQuery(
+            self._doqServerPort,
+            query,
+            response=response,
+            caFile=self._caCert,
+            useQueue=useQueue,
+            serverName=self._serverName if not serverName else serverName,
+            timeout=timeout,
+            passExceptions=passExceptions,
+        )
 
-    def sendDOQQueryWrapper(self, query, response, useQueue=True):
-        return self.sendDOQQuery(self._doqServerPort, query, response=response, caFile=self._caCert, useQueue=useQueue, serverName=self._serverName)
+    def sendDOH3QueryWrapper(self, query, response, useQueue=True, timeout=2, serverName=None, passExceptions=False):
+        return self.sendDOH3Query(
+            self._doh3ServerPort,
+            self._dohBaseURL,
+            query,
+            response=response,
+            caFile=self._caCert,
+            useQueue=useQueue,
+            serverName=self._serverName if not serverName else serverName,
+            timeout=timeout,
+            passExceptions=passExceptions,
+        )
 
-    def sendDOH3QueryWrapper(self, query, response, useQueue=True):
-        return self.sendDOH3Query(self._doh3ServerPort, self._dohBaseURL, query, response=response, caFile=self._caCert, useQueue=useQueue, serverName=self._serverName)
     @classmethod
     def getDOQConnection(cls, port, caFile=None, source=None, source_port=0):
 
-        manager = dns.quic.SyncQuicManager(
-            verify_mode=caFile
-        )
+        manager = dns.quic.SyncQuicManager(verify_mode=caFile)
 
-        return manager.connect('127.0.0.1', port, source, source_port)
+        return manager.connect(cls._dnsDistListeningAddr, port, source, source_port)
 
     @classmethod
-    def sendDOQQuery(cls, port, query, response=None, timeout=2.0, caFile=None, useQueue=True, rawQuery=False, fromQueue=None, toQueue=None, connection=None, serverName=None):
+    def sendDOQQuery(
+        cls,
+        port,
+        query,
+        response=None,
+        timeout=2.0,
+        caFile=None,
+        useQueue=True,
+        rawQuery=False,
+        fromQueue=None,
+        toQueue=None,
+        connection=None,
+        serverName=None,
+        passExceptions=False,
+    ):
 
         if response:
             if toQueue:
@@ -1133,7 +1511,20 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
             else:
                 cls._toResponderQueue.put(response, True, timeout)
 
-        (message, _) = quic_query(query, '127.0.0.1', timeout, port, verify=caFile, server_hostname=serverName)
+        try:
+            (message, _) = doqclient.quic_query(
+                query,
+                cls._dnsDistListeningAddr,
+                timeout,
+                port,
+                verify=caFile,
+                server_hostname=serverName,
+                rawQuery=rawQuery,
+            )
+        except doqclient.StreamResetError as e:
+            if passExceptions:
+                raise
+            return (None, None)
 
         receivedQuery = None
 
@@ -1148,7 +1539,25 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
         return (receivedQuery, message)
 
     @classmethod
-    def sendDOH3Query(cls, port, baseurl, query, response=None, timeout=2.0, caFile=None, useQueue=True, rawQuery=False, fromQueue=None, toQueue=None, connection=None, serverName=None, post=False):
+    def sendDOH3Query(
+        cls,
+        port,
+        baseurl,
+        query,
+        response=None,
+        timeout=2.0,
+        caFile=None,
+        useQueue=True,
+        rawQuery=False,
+        fromQueue=None,
+        toQueue=None,
+        connection=None,
+        serverName=None,
+        post=False,
+        customHeaders=None,
+        rawResponse=False,
+        passExceptions=False,
+    ):
 
         if response:
             if toQueue:
@@ -1156,7 +1565,42 @@ class DNSDistTest(AssertEqualDNSMessageMixin, unittest.TestCase):
             else:
                 cls._toResponderQueue.put(response, True, timeout)
 
-        message = doh3_query(query, baseurl, timeout, port, verify=caFile, server_hostname=serverName, post=post)
+        if rawQuery:
+            rawResponse = True
+
+        if rawResponse:
+            return doh3_query(
+                query,
+                cls._dnsDistListeningAddr,
+                baseurl,
+                timeout,
+                port,
+                verify=caFile,
+                server_hostname=serverName,
+                post=post,
+                additional_headers=customHeaders,
+                raw_response=rawResponse,
+                raw_query=rawQuery,
+            )
+
+        try:
+            message = doh3_query(
+                query,
+                cls._dnsDistListeningAddr,
+                baseurl,
+                timeout,
+                port,
+                verify=caFile,
+                server_hostname=serverName,
+                post=post,
+                additional_headers=customHeaders,
+                raw_response=rawResponse,
+                raw_query=rawQuery,
+            )
+        except doqclient.StreamResetError as e:
+            if passExceptions:
+                raise
+            return (None, None)
 
         receivedQuery = None
 

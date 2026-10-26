@@ -21,19 +21,22 @@
  */
 #pragma once
 
-#include <memory>
+#include <cstdint>
 #include <string>
 
 class SensitiveData
 {
 public:
+  SensitiveData(const SensitiveData&) = delete;
+  SensitiveData(SensitiveData&&) = delete;
+  SensitiveData& operator=(const SensitiveData&) = delete;
   SensitiveData(size_t bytes);
   SensitiveData(std::string&& data);
   SensitiveData& operator=(SensitiveData&&) noexcept;
 
   ~SensitiveData();
   void clear();
-  const std::string& getString() const
+  [[nodiscard]] const std::string& getString() const
   {
     return d_data;
   }
@@ -41,6 +44,8 @@ public:
   {
     return d_data;
   }
+
+  static void reallyClearContent(void* data, size_t size) noexcept;
 
 private:
   std::string d_data;
@@ -55,10 +60,12 @@ bool isPasswordHashed(const std::string& password);
 class CredentialsHolder
 {
 public:
+  CredentialsHolder(CredentialsHolder&&) = delete;
+  CredentialsHolder& operator=(CredentialsHolder&&) = delete;
   /* if hashPlaintext is true, the password is in cleartext and hashing is available,
      the hashed form will be kept in memory.
      Note that accepting hashed password from an untrusted source might open
-     us to a denial of service, since we currently don't cap the the parameters,
+     us to a denial of service, since we currently don't cap the parameters,
      including the work factor */
   CredentialsHolder(std::string&& password, bool hashPlaintext);
   ~CredentialsHolder();
@@ -66,14 +73,14 @@ public:
   CredentialsHolder(const CredentialsHolder&) = delete;
   CredentialsHolder& operator=(const CredentialsHolder&) = delete;
 
-  bool matches(const std::string& password) const;
+  [[nodiscard]] bool matches(const std::string& password) const;
   /* whether it was constructed from a hashed and salted string */
-  bool wasHashed() const
+  [[nodiscard]] bool wasHashed() const
   {
     return d_wasHashed;
   }
   /* whether it is hashed in memory */
-  bool isHashed() const
+  [[nodiscard]] bool isHashed() const
   {
     return d_isHashed;
   }

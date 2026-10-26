@@ -59,21 +59,20 @@ static int bpf_load_pinned_map(const std::string& path)
 
 static void bpf_check_map_sizes(int descriptor, uint32_t expectedKeySize, uint32_t expectedValueSize)
 {
-  struct bpf_map_info info;
-  uint32_t info_len = sizeof(info);
+  bpf_map_info info{};
   memset(&info, 0, sizeof(info));
 
-  union bpf_attr attr;
+  bpf_attr attr{};
   memset(&attr, 0, sizeof(attr));
   attr.info.bpf_fd = descriptor;
-  attr.info.info_len = info_len;
+  attr.info.info_len = sizeof(info);
   attr.info.info = ptr_to_u64(&info);
 
   int err = syscall(SYS_bpf, BPF_OBJ_GET_INFO_BY_FD, &attr, sizeof(attr));
   if (err != 0) {
     throw std::runtime_error("Error checking the size of eBPF map: " + stringerror());
   }
-  if (info_len != sizeof(info)) {
+  if (attr.info.info_len != sizeof(info)) {
     throw std::runtime_error("Error checking the size of eBPF map: invalid info size returned");
   }
   if (info.key_size != expectedKeySize) {
@@ -357,7 +356,7 @@ BPFFilter::BPFFilter(std::unordered_map<std::string, MapConfiguration>& configs,
     throw std::runtime_error("Unsupported eBPF map format, the current internal implemenation only supports the legacy format");
   }
 
-  struct rlimit old_limit;
+  struct rlimit old_limit{};
   if (getrlimit(RLIMIT_MEMLOCK, &old_limit) != 0) {
     throw std::runtime_error("Unable to get memory lock limit: " + stringerror());
   }
@@ -366,14 +365,16 @@ BPFFilter::BPFFilter(std::unordered_map<std::string, MapConfiguration>& configs,
 
   /* Check if the current soft memlock limit is at least the limit */
   if (old_limit.rlim_cur < new_limit_size) {
-    infolog("The current limit of locked memory (soft: %d, hard: %d) is too low for eBPF, trying to raise it to %d", old_limit.rlim_cur, old_limit.rlim_max, new_limit_size);
+    SLOG(infolog("The current limit of locked memory (soft: %d, hard: %d) is too low for eBPF, trying to raise it to %d", old_limit.rlim_cur, old_limit.rlim_max, new_limit_size),
+         dnsdist::logging::getTopLogger("bpf")->info(Logr::Info, "The current limit of locked memory is too low for eBPF, trying to raise it", "soft", Logging::Loggable(old_limit.rlim_cur), "hard", Logging::Loggable(old_limit.rlim_max), "target", Logging::Loggable(new_limit_size)));
 
-    struct rlimit new_limit;
+    struct rlimit new_limit{};
     new_limit.rlim_cur = new_limit_size;
     new_limit.rlim_max = new_limit_size;
 
     if (setrlimit(RLIMIT_MEMLOCK, &new_limit) != 0) {
-      warnlog("Unable to raise the maximum amount of locked memory for eBPF from %d to %d, consider raising RLIMIT_MEMLOCK or setting LimitMEMLOCK in the systemd unit: %d", old_limit.rlim_cur, new_limit.rlim_cur, stringerror());
+      SLOG(warnlog("Unable to raise the maximum amount of locked memory for eBPF from %d to %d, consider raising RLIMIT_MEMLOCK or setting LimitMEMLOCK in the systemd unit: %d", old_limit.rlim_cur, new_limit.rlim_cur, stringerror()),
+           dnsdist::logging::getTopLogger("bpf")->info(Logr::Warning, "Unable to raise the maximum amount of locked memory for eBPF, consider raising RLIMIT_MEMLOCK or setting LimitMEMLOCK in the systemd unit", "current", Logging::Loggable(old_limit.rlim_cur), "target", Logging::Loggable(new_limit_size)));
     }
   }
 
@@ -398,9 +399,46 @@ BPFFilter::BPFFilter(std::unordered_map<std::string, MapConfiguration>& configs,
 #include "bpf-filter.main.ebpf"
     };
 
-    const struct bpf_insn qname_filter[] = {
+    // ABANDON EVERY HOPE - SCARY CODE STARTS HERE
+
+    // This EBF program is huge, and unfortunately not constant; this causes
+    // the compiler to emit a lot of code (and eat a lot of memory to do so).
+    // Therefore we include an incomplete but constant version of the program
+    // and patch it locally, relying upon the fact that there is only one place
+    // to change.
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+    struct bpf_insn qname_filter[] = {
 #include "bpf-filter.qname.ebpf"
     };
+
+    // The program above contains
+    //   BPF_LD_MAP_FD(BPF_REG_1,0)
+    // instead of
+    //   BPF_LD_MAP_FD(BPF_REG_1,maps->d_qnames.d_fd.getHandle())
+    // and this is the only use of BPF_LD_MAP_FD in the program.
+    // We will search for that instruction, relying upon the fact that,
+    // in that particular program, there is only one such instruction.
+    {
+      unsigned int pos{0};
+      unsigned int limit{sizeof(qname_filter) / sizeof(struct bpf_insn)};
+      for (; pos < limit; ++pos) {
+        if (qname_filter[pos].code == (BPF_LD | BPF_DW | BPF_IMM)) { // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
+          // We have found our instruction.
+          break;
+        }
+      }
+      // BPF_LD_MAP_FP actually is a sequence of two bpf instructions,
+      // because it loads a 64-bit value. So it can't be the last
+      // instruction either...
+      if (pos >= limit - 1) {
+        throw std::runtime_error("Assumption in the layout of the eBPF filter program no longer stands");
+      }
+      auto data = static_cast<__u64>(maps->d_qnames.d_fd.getHandle());
+      qname_filter[pos].imm = static_cast<__s32>(data); // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
+      qname_filter[pos + 1].imm = static_cast<__s32>(data >> 32); // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
+    }
+
+    // SCARY CODE ENDS HERE
 
     try {
       d_mainfilter = loadProgram(main_filter,
@@ -549,16 +587,20 @@ void BPFFilter::addRangeRule(const Netmask& addr, bool force, BPFFilter::MatchAc
       throw std::runtime_error("Table full when trying to add this rule: " + addr.toString());
     }
 
+    bool entryExisted = false;
     res = bpf_lookup_elem(map.d_fd.getHandle(), &key, &value);
-    if (((res != -1 && value.action == action) || (res == -1 && value.action == BPFFilter::MatchAction::Pass)) && !force) {
+    if (((res != -1 && value.action == action) || (res == -1 && action == BPFFilter::MatchAction::Pass)) && !force) {
       throw std::runtime_error("Trying to add a useless rule: " + addr.toString());
+    }
+    if (res != -1) {
+      entryExisted = true;
     }
 
     value.counter = 0;
     value.action = action;
 
     res = bpf_update_elem(map.d_fd.getHandle(), &key, &value, force ? BPF_ANY : BPF_NOEXIST);
-    if (res == 0) {
+    if (res == 0 && !entryExisted) {
       ++map.d_count;
     }
   }
@@ -574,16 +616,20 @@ void BPFFilter::addRangeRule(const Netmask& addr, bool force, BPFFilter::MatchAc
       throw std::runtime_error("Table full when trying to add this rule: " + addr.toString());
     }
 
+    bool entryExisted = false;
     res = bpf_lookup_elem(map.d_fd.getHandle(), &key, &value);
-    if (((res != -1 && value.action == action) || (res == -1 && value.action == BPFFilter::MatchAction::Pass)) && !force) {
+    if (((res != -1 && value.action == action) || (res == -1 && action == BPFFilter::MatchAction::Pass)) && !force) {
       throw std::runtime_error("Trying to add a useless rule: " + addr.toString());
+    }
+    if (res != -1) {
+      entryExisted = true;
     }
 
     value.counter = 0;
     value.action = action;
 
     res = bpf_update_elem(map.d_fd.getHandle(), &key, &value, BPF_NOEXIST);
-    if (res == 0) {
+    if (res == 0 && !entryExisted) {
       map.d_count++;
     }
   }
@@ -687,7 +733,7 @@ void BPFFilter::block(const DNSName& qname, BPFFilter::MatchAction action, uint1
 
 void BPFFilter::unblock(const DNSName& qname, uint16_t qtype)
 {
-  QNameAndQTypeKey key;
+  QNameAndQTypeKey key{};
   memset(&key, 0, sizeof(key));
   std::string keyStr = qname.toDNSStringLC();
 
@@ -739,7 +785,7 @@ std::vector<std::pair<ComboAddress, uint64_t>> BPFFilter::getAddrStats()
 
   {
     auto& map = maps->d_v4;
-    int res = bpf_get_next_key(map.d_fd.getHandle(), &v4Key, &nextV4Key);
+    int res = bpf_get_next_key(map.d_fd.getHandle(), nullptr, &nextV4Key);
 
     while (res == 0) {
       v4Key = nextV4Key;
@@ -754,7 +800,7 @@ std::vector<std::pair<ComboAddress, uint64_t>> BPFFilter::getAddrStats()
 
   {
     auto& map = maps->d_v6;
-    int res = bpf_get_next_key(map.d_fd.getHandle(), v6Key.data(), nextV6Key.data());
+    int res = bpf_get_next_key(map.d_fd.getHandle(), nullptr, nextV6Key.data());
 
     while (res == 0) {
       if (bpf_lookup_elem(map.d_fd.getHandle(), nextV6Key.data(), &value) == 0) {
@@ -772,16 +818,16 @@ std::vector<std::pair<ComboAddress, uint64_t>> BPFFilter::getAddrStats()
 
 std::vector<std::pair<Netmask, CounterAndActionValue>> BPFFilter::getRangeRule()
 {
-  CIDR4 cidr4[2];
-  CIDR6 cidr6[2];
+  CIDR4 cidr4{};
+  CIDR6 cidr6{};
   std::vector<std::pair<Netmask, CounterAndActionValue>> result;
 
-  sockaddr_in v4Addr;
-  sockaddr_in6 v6Addr;
+  sockaddr_in v4Addr{};
+  sockaddr_in6 v6Addr{};
   CounterAndActionValue value;
 
-  memset(cidr4, 0, sizeof(cidr4));
-  memset(cidr6, 0, sizeof(cidr6));
+  memset(&cidr4, 0, sizeof(cidr4));
+  memset(&cidr6, 0, sizeof(cidr6));
   memset(&v4Addr, 0, sizeof(v4Addr));
   memset(&v6Addr, 0, sizeof(v6Addr));
   v4Addr.sin_family = AF_INET;
@@ -790,27 +836,27 @@ std::vector<std::pair<Netmask, CounterAndActionValue>> BPFFilter::getRangeRule()
   result.reserve(maps->d_cidr4.d_count + maps->d_cidr6.d_count);
   {
     auto& map = maps->d_cidr4;
-    int res = bpf_get_next_key(map.d_fd.getHandle(), &cidr4[0], &cidr4[1]);
+    int res = bpf_get_next_key(map.d_fd.getHandle(), nullptr, &cidr4);
     while (res == 0) {
-      if (bpf_lookup_elem(map.d_fd.getHandle(), &cidr4[1], &value) == 0) {
-        v4Addr.sin_addr.s_addr = cidr4[1].addr.s_addr;
-        result.emplace_back(Netmask(&v4Addr, cidr4[1].cidr), value);
+      if (bpf_lookup_elem(map.d_fd.getHandle(), &cidr4, &value) == 0) {
+        v4Addr.sin_addr.s_addr = cidr4.addr.s_addr;
+        result.emplace_back(Netmask(&v4Addr, cidr4.cidr), value);
       }
 
-      res = bpf_get_next_key(map.d_fd.getHandle(), &cidr4[1], &cidr4[1]);
+      res = bpf_get_next_key(map.d_fd.getHandle(), &cidr4, &cidr4);
     }
   }
 
   {
     auto& map = maps->d_cidr6;
-    int res = bpf_get_next_key(map.d_fd.getHandle(), &cidr6[0], &cidr6[1]);
+    int res = bpf_get_next_key(map.d_fd.getHandle(), nullptr, &cidr6);
     while (res == 0) {
-      if (bpf_lookup_elem(map.d_fd.getHandle(), &cidr6[1], &value) == 0) {
-        v6Addr.sin6_addr = cidr6[1].addr;
-        result.emplace_back(Netmask(&v6Addr, cidr6[1].cidr), value);
+      if (bpf_lookup_elem(map.d_fd.getHandle(), &cidr6, &value) == 0) {
+        v6Addr.sin6_addr = cidr6.addr;
+        result.emplace_back(Netmask(&v6Addr, cidr6.cidr), value);
       }
 
-      res = bpf_get_next_key(map.d_fd.getHandle(), &cidr6[1], &cidr6[1]);
+      res = bpf_get_next_key(map.d_fd.getHandle(), &cidr6, &cidr6);
     }
   }
   return result;
@@ -821,18 +867,18 @@ std::vector<std::tuple<DNSName, uint16_t, uint64_t>> BPFFilter::getQNameStats()
   std::vector<std::tuple<DNSName, uint16_t, uint64_t>> result;
 
   if (d_mapFormat == MapFormat::Legacy) {
-    QNameKey key = {{0}};
     QNameKey nextKey = {{0}};
     QNameValue value;
 
     auto maps = d_maps.lock();
     auto& map = maps->d_qnames;
     result.reserve(map.d_count);
-    int res = bpf_get_next_key(map.d_fd.getHandle(), &key, &nextKey);
+    int res = bpf_get_next_key(map.d_fd.getHandle(), nullptr, &nextKey);
 
     while (res == 0) {
       if (bpf_lookup_elem(map.d_fd.getHandle(), &nextKey, &value) == 0) {
         nextKey.qname[sizeof(nextKey.qname) - 1] = '\0';
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         result.emplace_back(DNSName(reinterpret_cast<const char*>(nextKey.qname), sizeof(nextKey.qname), 0, false), value.qtype, value.counter);
       }
 
@@ -840,21 +886,20 @@ std::vector<std::tuple<DNSName, uint16_t, uint64_t>> BPFFilter::getQNameStats()
     }
   }
   else {
-    QNameAndQTypeKey key;
-    QNameAndQTypeKey nextKey;
-    memset(&key, 0, sizeof(key));
+    QNameAndQTypeKey nextKey{};
     memset(&nextKey, 0, sizeof(nextKey));
     CounterAndActionValue value;
 
     auto maps = d_maps.lock();
     auto& map = maps->d_qnames;
     result.reserve(map.d_count);
-    int res = bpf_get_next_key(map.d_fd.getHandle(), &key, &nextKey);
+    int res = bpf_get_next_key(map.d_fd.getHandle(), nullptr, &nextKey);
 
     while (res == 0) {
       if (bpf_lookup_elem(map.d_fd.getHandle(), &nextKey, &value) == 0) {
         nextKey.qname[sizeof(nextKey.qname) - 1] = '\0';
-        result.emplace_back(DNSName(reinterpret_cast<const char*>(nextKey.qname), sizeof(nextKey.qname), 0, false), key.qtype, value.counter);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        result.emplace_back(DNSName(reinterpret_cast<const char*>(nextKey.qname), sizeof(nextKey.qname), 0, false), nextKey.qtype, value.counter);
       }
 
       res = bpf_get_next_key(map.d_fd.getHandle(), &nextKey, &nextKey);
@@ -900,6 +945,9 @@ uint64_t BPFFilter::getHits(const ComboAddress& requestor)
 
 BPFFilter::BPFFilter(std::unordered_map<std::string, MapConfiguration>& configs, BPFFilter::MapFormat format, bool external)
 {
+  (void)configs;
+  (void)format;
+  (void)external;
 }
 
 void BPFFilter::addSocket(int)
@@ -971,8 +1019,10 @@ bool BPFFilter::supportsMatchAction(MatchAction action) const
     return true;
   }
   return d_mapFormat == BPFFilter::MapFormat::WithActions;
-#endif /* HAVE_EBPF */
+#else
+  (void)action;
   return false;
+#endif /* HAVE_EBPF */
 }
 
 bool BPFFilter::isExternal() const

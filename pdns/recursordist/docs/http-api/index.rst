@@ -14,33 +14,47 @@ The following documents contain the information for the PowerDNS API:
     zone
     ../common/api/configsetting
     ../common/api/statisticitem
-
+    ottracecondition
 
 Webserver
 ---------
 
-To launch the internal webserver, add a :ref:`setting-webserver` to the configuration file.
+To launch the internal webserver, set :ref:`setting-yaml-webservice.webserver` to ``true`` the configuration file.
 This will instruct PowerDNS to start a webserver on localhost at port 8081, without password protection.
-By default the webserver listens on localhost, meaning only local users (on the same host) will be able to access the webserver. Since the default ACL before 4.1.0 allows access from everywhere if :ref:`setting-webserver-address` is set to a different value, we strongly advise the use of a password protection.
+By default the webserver listens on localhost, meaning only local users (on the same host) will be able to access the webserver.
+
 The webserver lists a lot of potentially sensitive information about the PowerDNS process, including frequent queries, frequently failing queries, lists of remote hosts sending queries, hosts sending corrupt queries etc.
-The webserver does not allow remote management.
+The webserver does allow very limited remote management.
+
 The following webserver related configuration items are available:
 
-* :ref:`setting-webserver`: If set to anything but 'no', a webserver is launched.
-* :ref:`setting-webserver-address`: Address to bind the webserver to. Defaults to 127.0.0.1, which implies that only the local computer is able to connect to the nameserver! To allow remote hosts to connect, change to 0.0.0.0 or the physical IP address of your nameserver.
-* :ref:`setting-webserver-password`: If set, viewers will have to enter this password in order to gain access to the statistics.
-* :ref:`setting-webserver-port`: Port to bind the webserver to.
-* :ref:`setting-webserver-allow-from`: Netmasks that are allowed to connect to the webserver
+* :ref:`setting-yaml-webservice.webserver`: If set to ``yes`` a webserver is launched.
+* :ref:`setting-yaml-webservice.address`: Address to bind the webserver to. Defaults to 127.0.0.1, which implies that only the local computer is able to connect to the nameserver! To allow remote hosts to connect, change to 0.0.0.0 or the physical IP address of your nameserver.
+* :ref:`setting-yaml-webservice.password`: If set, viewers will have to enter this password in order to gain access to the statistics.
+* :ref:`setting-yaml-webservice.port`: Port to bind the webserver to.
+* :ref:`setting-yaml-webservice.allow_from`: Netmasks that are allowed to connect to the webserver
+
+.. warning::
+
+   To achieve defense-in-depth, expose the webserver only to client addresses that have a real need for access.
+   Network access is configured by setting :ref:`setting-yaml-webservice.address` and :ref:`setting-yaml-webservice.allow_from`. Starting with version 5.3.0 :ref:`setting-yaml-webservice.listen` has been introduced, superseding :ref:`setting-yaml-webservice.address` if set.
+
+.. warning::
+
+   Not setting a password will allow passwordless access to the frontpage showing statistics, the :doc:`endpoint-jsonstat`, the :doc:`../common/api/endpoint-statistics` and the ``localhost`` specific endpoint of the :doc:`../common/api/endpoint-servers`.
 
 Enabling the API
 ----------------
 
 To enable the API, the webserver and the HTTP API need to be enabled.
-Add these lines to the ``recursor.conf``::
+Add these lines to the configuration file:
 
-    webserver=yes
-    webserver-port=8082
-    api-key=changeme
+.. code-block:: yaml
+
+   webservice:
+     webserver: true
+     port: 8082
+     api_key: changeme
 
 And restart ``pdns_recursor``, the following examples should start working::
 
@@ -97,3 +111,4 @@ All API endpoints for the PowerDNS Recursor are documented here:
   endpoint-failure
   endpoint-rpz-stats
   endpoint-jsonstat
+  endpoint-ottraceconditions

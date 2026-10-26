@@ -19,7 +19,7 @@ endif
 # libcrypto using the mechanisms provided by meson (e.g. pkg-config). If that cannot be
 # found, then look in some hard-coded paths below.
 if opt_libcrypto_path == ''
-  dep_libcrypto = dependency('libcrypto', required: false)
+  dep_libcrypto = dependency('libcrypto', version: '>= 1.1', required: true)
 else
   ssldirs = [opt_libcrypto_path]
 endif
@@ -44,8 +44,7 @@ if not dep_libcrypto.found()
     have = cxx.has_header(dir / 'include/openssl/crypto.h')
     if have
       dep_libcrypto = declare_dependency(
-        compile_args: ['-L' + dir / 'lib'],
-        link_args: ['-lcrypto'],
+        link_args: ['-L' + dir / 'lib', '-lcrypto'],
         include_directories: include_directories(dir / 'include', is_system: false),
       )
       break
@@ -81,13 +80,7 @@ endif
 
 funcs = [
   'RAND_bytes',
-  'RAND_pseudo_bytes',
   'CRYPTO_memcmp',
-  'OPENSSL_init_crypto',
-  'EVP_MD_CTX_new',
-  'EVP_MD_CTX_free',
-  'RSA_get0_key',
-  'OCSP_basic_sign',
 ]
 
 foreach func: funcs
@@ -113,7 +106,8 @@ conf.set(
 )
 
 conf.set('HAVE_LIBCRYPTO', dep_libcrypto.found(), description: 'OpenSSL libcrypto-based signers')
-summary('OpenSSL libcrypto', dep_libcrypto.found(), bool_yn: true, section: 'Crypto')
+summary('OpenSSL libcrypto version', dep_libcrypto.version(), section: 'Crypto')
 
 subdir('ecdsa')                 # ECDSA signers
 subdir('eddsa')                 # EDDSA signers
+subdir('mldsa')                 # MLDSA support

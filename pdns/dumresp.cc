@@ -30,6 +30,8 @@
 #include <thread>
 StatBag S;
 
+bool g_slogStructured{false};
+
 static std::atomic<uint64_t>* g_counter;
 
 static void printStatus()
@@ -100,6 +102,7 @@ try
 }
 catch(const std::exception& e) {
   cerr<<"TCP connection handler got an exception: "<<e.what()<<endl;
+  close(sock);
 }
 
 static void tcpAcceptor(const ComboAddress local)

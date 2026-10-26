@@ -24,27 +24,26 @@
 #include <fstream>
 #include "pdnsexception.hh"
 #include <iostream>
-#include <iomanip>
 #include <ctime>
 #include <thread>
 #include "threadname.hh"
 #include <cstdlib>
-#include "logger.hh"
+#include <sys/stat.h>
 #include "logging.hh"
 #include "misc.hh"
 
 using namespace nod;
-namespace filesystem = boost::filesystem;
+namespace filesystem = std::filesystem;
 
 // PersistentSBF Implementation
 
 std::mutex PersistentSBF::d_cachedir_mutex;
 
-void PersistentSBF::remove_tmp_files(const filesystem::path& path, std::lock_guard<std::mutex>& /* lock */)
+void PersistentSBF::remove_tmp_files(const filesystem::path& path, std::scoped_lock<std::mutex>& /* lock */)
 {
   Regex file_regex(d_prefix + ".*\\." + bf_suffix + "\\..{8}$");
   for (const auto& file : filesystem::directory_iterator(path)) {
-    if (filesystem::is_regular_file(file.path()) && file_regex.match(file.path().filename().string())) {
+    if (filesystem::is_regular_file(file.path()) && file_regex.match(file.path().filename())) {
       filesystem::remove(file);
     }
   }
@@ -58,33 +57,33 @@ void PersistentSBF::remove_tmp_files(const filesystem::path& path, std::lock_gua
 bool PersistentSBF::init(bool ignore_pid)
 {
   auto log = g_slog->withName("nod");
-  std::lock_guard<std::mutex> lock(d_cachedir_mutex);
+  std::scoped_lock<std::mutex> lock(d_cachedir_mutex);
   if (d_cachedir.length() != 0) {
     filesystem::path path(d_cachedir);
     try {
       if (filesystem::exists(path) && filesystem::is_directory(path)) {
         remove_tmp_files(path, lock);
         filesystem::path newest_file;
-        std::time_t newest_time = 0;
+        // Tricky business, some C++ libs do not use 0 as epoch!
+        filesystem::file_time_type newest_time{filesystem::file_time_type::min()};
         Regex file_regex(d_prefix + ".*\\." + bf_suffix + "$");
         for (const auto& file : filesystem::directory_iterator(path)) {
-          if (filesystem::is_regular_file(file.path()) && file_regex.match(file.path().filename().string())) {
+          if (filesystem::is_regular_file(file.path()) && file_regex.match(file.path().filename())) {
             if (ignore_pid || (file.path().filename().string().find(std::to_string(getpid())) == std::string::npos)) {
               // look for the newest file matching the regex
-              if (last_write_time(file.path()) > newest_time) {
-                newest_time = last_write_time(file.path());
+              if (file.last_write_time() > newest_time) {
+                newest_time = file.last_write_time();
                 newest_file = file.path();
               }
             }
           }
         }
         if (!newest_file.empty() && filesystem::exists(newest_file)) {
-          const std::string& filename = newest_file.string();
+          std::string filename = newest_file.string();
           std::ifstream infile;
           try {
             infile.open(filename, std::ios::in | std::ios::binary);
-            SLOG(g_log << Logger::Warning << "Found SBF file " << filename << endl,
-                 log->info(Logr::Warning, "Found SBF File", "file", Logging::Loggable(filename)));
+            log->info(Logr::Warning, "Found SBF File", "file", Logging::Loggable(filename));
             // read the file into the sbf
             d_sbf.lock()->restore(infile);
             infile.close();
@@ -96,15 +95,13 @@ bool PersistentSBF::init(bool ignore_pid)
           catch (const std::runtime_error& e) {
             infile.close();
             filesystem::remove(newest_file);
-            SLOG(g_log << Logger::Warning << "NODDB init: Cannot parse file: " << filename << ": " << e.what() << "; removed" << endl,
-                 log->error(Logr::Warning, e.what(), "NODDB init: Cannot parse file, removed", "file", Logging::Loggable(filename)));
+            log->error(Logr::Warning, e.what(), "NODDB init: Cannot parse file, removed", "file", Logging::Loggable(filename));
           }
         }
       }
     }
     catch (const filesystem::filesystem_error& e) {
-      SLOG(g_log << Logger::Warning << "NODDB init failed: " << e.what() << endl,
-           log->error(Logr::Warning, e.what(), "NODDB init failed", "exception", Logging::Loggable("filesystem::filesystem_error")));
+      log->error(Logr::Warning, e.what(), "NODDB init failed", "exception", Logging::Loggable("filesystem::filesystem_error"));
       return false;
     }
   }
@@ -145,14 +142,16 @@ bool PersistentSBF::snapshotCurrent(std::thread::id tid)
         }
         // Now write it out to the file
         std::string ftmp = file.string() + ".XXXXXXXX";
+        mode_t curmask = umask(S_IRWXG | S_IRWXO);
         auto fileDesc = FDWrapper(mkstemp(ftmp.data()));
+        umask(curmask);
         if (fileDesc == -1) {
           throw std::runtime_error("Cannot create temp file: " + stringerror());
         }
         const std::string str = oss.str(); // XXX creates a copy, with c++20 we can use view()
         ssize_t len = write(fileDesc, str.data(), str.length());
         if (len != static_cast<ssize_t>(str.length())) {
-          filesystem::remove(ftmp.c_str());
+          filesystem::remove(ftmp);
           throw std::runtime_error("Failed to write to file:" + ftmp);
         }
         if (fileDesc.reset() != 0) {
@@ -163,21 +162,18 @@ bool PersistentSBF::snapshotCurrent(std::thread::id tid)
           filesystem::rename(ftmp, file);
         }
         catch (const std::runtime_error& e) {
-          SLOG(g_log << Logger::Warning << "NODDB snapshot: Cannot rename file: " << e.what() << endl,
-               log->error(Logr::Warning, e.what(), "NODDB snapshot: Cannot rename file", "exception", Logging::Loggable("std::runtime_error")));
+          log->error(Logr::Warning, e.what(), "NODDB snapshot: Cannot rename file", "exception", Logging::Loggable("std::runtime_error"));
           filesystem::remove(ftmp);
           throw;
         }
         return true;
       }
       catch (const std::runtime_error& e) {
-        SLOG(g_log << Logger::Warning << "NODDB snapshot: Cannot write file: " << e.what() << endl,
-             log->error(Logr::Warning, e.what(), "NODDB snapshot: Cannot write file", "exception", Logging::Loggable("std::runtime_error")));
+        log->error(Logr::Warning, e.what(), "NODDB snapshot: Cannot write file", "exception", Logging::Loggable("std::runtime_error"));
       }
     }
     else {
-      SLOG(g_log << Logger::Warning << "NODDB snapshot: Cannot write file: " << file.string() << endl,
-           log->info(Logr::Warning, "NODDB snapshot: Cannot write file", "file", Logging::Loggable(file.string())));
+      log->info(Logr::Warning, "NODDB snapshot: Cannot write file", "file", Logging::Loggable(file));
     }
   }
   return false;

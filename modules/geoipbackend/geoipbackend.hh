@@ -35,14 +35,14 @@
 #include "pdns/dnsbackend.hh"
 #include "pdns/lock.hh"
 
-class GeoIPInterface;
-
 namespace YAML
 {
 class Node;
 };
 
 struct GeoIPDomain;
+
+class GeoIPInterface;
 
 struct GeoIPNetmask
 {
@@ -55,39 +55,58 @@ public:
   GeoIPBackend(const std::string& suffix = "");
   ~GeoIPBackend() override;
 
-  void lookup(const QType& qtype, const DNSName& qdomain, int zoneId, DNSPacket* pkt_p = nullptr) override;
-  bool list(const DNSName& /* target */, int /* domain_id */, bool /* include_disabled */ = false) override { return false; } // not supported
+  using filevec_t = std::vector<std::unique_ptr<GeoIPInterface>>;
+  using state_t = struct state_t
+  {
+    unsigned int instance_count{0};
+    std::vector<GeoIPDomain> domains;
+    filevec_t geoip_files;
+  };
+
+  // Needs to be public, for the Lua interface needs to access this outside
+  // of a backend instance.
+  static SharedLockGuarded<state_t> s_state;
+
+  unsigned int getCapabilities() override
+  {
+    unsigned int caps = 0;
+    if (d_dnssec) {
+      caps |= CAP_DNSSEC;
+    }
+    return caps;
+  }
+
+  void lookup(const QType& qtype, const DNSName& qdomain, domainid_t zoneId, DNSPacket* pkt_p = nullptr) override;
+  bool list(const ZoneName& /* target */, domainid_t /* domain_id */, bool /* include_disabled */ = false) override { return false; } // not supported
   bool get(DNSResourceRecord& r) override;
+  void lookupEnd() override;
   void reload() override;
   void rediscover(string* status = nullptr) override;
-  bool getDomainInfo(const DNSName& domain, DomainInfo& di, bool getSerial = true) override;
+  bool getDomainInfo(const ZoneName& domain, DomainInfo& info, bool getSerial = true) override;
   void getAllDomains(vector<DomainInfo>* domains, bool getSerial, bool include_disabled) override;
 
   // dnssec support
-  bool doesDNSSEC() override { return d_dnssec; };
-  bool getAllDomainMetadata(const DNSName& name, std::map<std::string, std::vector<std::string>>& meta) override;
-  bool getDomainMetadata(const DNSName& name, const std::string& kind, std::vector<std::string>& meta) override;
-  bool getDomainKeys(const DNSName& name, std::vector<DNSBackend::KeyData>& keys) override;
-  bool removeDomainKey(const DNSName& name, unsigned int id) override;
-  bool addDomainKey(const DNSName& name, const KeyData& key, int64_t& id) override;
-  bool activateDomainKey(const DNSName& name, unsigned int id) override;
-  bool deactivateDomainKey(const DNSName& name, unsigned int id) override;
-  bool publishDomainKey(const DNSName& name, unsigned int id) override;
-  bool unpublishDomainKey(const DNSName& name, unsigned int id) override;
+  bool getAllDomainMetadata(const ZoneName& name, std::map<std::string, std::vector<std::string>>& meta) override;
+  bool getDomainMetadata(const ZoneName& name, const std::string& kind, std::vector<std::string>& meta) override;
+  bool getDomainKeys(const ZoneName& name, std::vector<DNSBackend::KeyData>& keys) override;
+  bool removeDomainKey(const ZoneName& name, unsigned int keyId) override;
+  bool addDomainKey(const ZoneName& name, const KeyData& key, int64_t& keyId) override;
+  bool activateDomainKey(const ZoneName& name, unsigned int keyId) override;
+  bool deactivateDomainKey(const ZoneName& name, unsigned int keyId) override;
+  bool publishDomainKey(const ZoneName& name, unsigned int keyId) override;
+  bool unpublishDomainKey(const ZoneName& name, unsigned int keyId) override;
 
 private:
-  static ReadWriteLock s_state_lock;
-
-  void initialize();
-  string format2str(string format, const Netmask& addr, GeoIPNetmask& gl, const GeoIPDomain& dom);
+  void initialize(state_t& state);
+  string format2str(const filevec_t& geoip_files, string format, const Netmask& addr, GeoIPNetmask& gl, const GeoIPDomain& dom);
   bool d_dnssec{};
-  bool hasDNSSECkey(const DNSName& name);
-  bool lookup_static(const GeoIPDomain& dom, const DNSName& search, const QType& qtype, const DNSName& qdomain, const Netmask& addr, GeoIPNetmask& gl);
+  bool hasDNSSECkey(const ZoneName& name);
+  bool lookup_static(const filevec_t& geoip_files, const GeoIPDomain& dom, const DNSName& search, const QType& qtype, const DNSName& qdomain, const Netmask& addr, GeoIPNetmask& gl);
   void setupNetmasks(const YAML::Node& domain, GeoIPDomain& dom);
-  bool loadDomain(const YAML::Node& domain, std::uint32_t domainID, GeoIPDomain& dom);
+  bool loadDomain(const std::string& origin, const YAML::Node& domain, domainid_t domainID, GeoIPDomain& dom);
   void loadDomainsFromDirectory(const std::string& dir, vector<GeoIPDomain>& domains);
+
   vector<DNSResourceRecord> d_result;
-  vector<GeoIPInterface> d_files;
   std::vector<std::string> d_global_mapping_lookup_formats;
   std::map<std::string, std::string> d_global_custom_mapping;
 };

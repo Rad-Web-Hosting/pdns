@@ -44,6 +44,10 @@
 
 #include "test-remotebackend-keys.hh"
 
+bool g_slogStructured{false};
+bool g_logDNSQueries{false};
+bool g_views{false};
+
 extern std::unique_ptr<DNSBackend> backendUnderTest;
 
 BOOST_AUTO_TEST_SUITE(test_remotebackend_so)
@@ -52,7 +56,7 @@ BOOST_AUTO_TEST_CASE(test_method_lookup)
 {
   BOOST_TEST_MESSAGE("Testing lookup method");
   DNSResourceRecord resourceRecord;
-  backendUnderTest->lookup(QType(QType::SOA), DNSName("unit.test."));
+  backendUnderTest->lookup(QType(QType::SOA), DNSName("unit.test."), UnknownDomainID);
   // then try to get()
   BOOST_CHECK(backendUnderTest->get(resourceRecord)); // and this should be TRUE.
   // then we check rr contains what we expect
@@ -66,7 +70,7 @@ BOOST_AUTO_TEST_CASE(test_method_lookup_empty)
 {
   BOOST_TEST_MESSAGE("Testing lookup method with empty result");
   DNSResourceRecord resourceRecord;
-  backendUnderTest->lookup(QType(QType::SOA), DNSName("empty.unit.test."));
+  backendUnderTest->lookup(QType(QType::SOA), DNSName("empty.unit.test."), UnknownDomainID);
   // then try to get()
   BOOST_CHECK(!backendUnderTest->get(resourceRecord)); // and this should be FALSE
 }
@@ -77,7 +81,7 @@ BOOST_AUTO_TEST_CASE(test_method_list)
   DNSResourceRecord resourceRecord;
 
   BOOST_TEST_MESSAGE("Testing list method");
-  backendUnderTest->list(DNSName("unit.test."), -1);
+  backendUnderTest->list(ZoneName("unit.test."), -1);
   while (backendUnderTest->get(resourceRecord)) {
     record_count++;
   }
@@ -96,27 +100,27 @@ BOOST_AUTO_TEST_CASE(test_method_setDomainMetadata)
   std::vector<std::string> meta;
   meta.emplace_back("VALUE");
   BOOST_TEST_MESSAGE("Testing setDomainMetadata method");
-  BOOST_CHECK(backendUnderTest->setDomainMetadata(DNSName("unit.test."), "TEST", meta));
+  BOOST_CHECK(backendUnderTest->setDomainMetadata(ZoneName("unit.test."), "TEST", meta));
 }
 
 BOOST_AUTO_TEST_CASE(test_method_alsoNotifies)
 {
-  BOOST_CHECK(backendUnderTest->setDomainMetadata(DNSName("unit.test."), "ALSO-NOTIFY", {"192.0.2.1"}));
+  BOOST_CHECK(backendUnderTest->setDomainMetadata(ZoneName("unit.test."), "ALSO-NOTIFY", {"192.0.2.1"}));
   std::set<std::string> alsoNotifies;
   BOOST_TEST_MESSAGE("Testing alsoNotifies method");
-  backendUnderTest->alsoNotifies(DNSName("unit.test."), &alsoNotifies);
+  backendUnderTest->alsoNotifies(ZoneName("unit.test."), &alsoNotifies);
   BOOST_CHECK_EQUAL(alsoNotifies.size(), 1);
   if (!alsoNotifies.empty()) {
     BOOST_CHECK_EQUAL(alsoNotifies.count("192.0.2.1"), 1);
   }
-  BOOST_CHECK(backendUnderTest->setDomainMetadata(DNSName("unit.test."), "ALSO-NOTIFY", std::vector<std::string>()));
+  BOOST_CHECK(backendUnderTest->setDomainMetadata(ZoneName("unit.test."), "ALSO-NOTIFY", std::vector<std::string>()));
 }
 
 BOOST_AUTO_TEST_CASE(test_method_getDomainMetadata)
 {
   std::vector<std::string> meta;
   BOOST_TEST_MESSAGE("Testing getDomainMetadata method");
-  backendUnderTest->getDomainMetadata(DNSName("unit.test."), "TEST", meta);
+  backendUnderTest->getDomainMetadata(ZoneName("unit.test."), "TEST", meta);
   BOOST_CHECK_EQUAL(meta.size(), 1);
   // in case we got more than one value, which would be unexpected
   // but not fatal
@@ -129,7 +133,7 @@ BOOST_AUTO_TEST_CASE(test_method_getAllDomainMetadata)
 {
   std::map<std::string, std::vector<std::string>> meta;
   BOOST_TEST_MESSAGE("Testing getAllDomainMetadata method");
-  backendUnderTest->getAllDomainMetadata(DNSName("unit.test."), meta);
+  backendUnderTest->getAllDomainMetadata(ZoneName("unit.test."), meta);
   BOOST_CHECK_EQUAL(meta.size(), 1);
   // in case we got more than one value, which would be unexpected
   // but not fatal
@@ -142,9 +146,9 @@ BOOST_AUTO_TEST_CASE(test_method_addDomainKey)
 {
   BOOST_TEST_MESSAGE("Testing addDomainKey method");
   int64_t keyID = 0;
-  backendUnderTest->addDomainKey(DNSName("unit.test."), k1, keyID);
+  backendUnderTest->addDomainKey(ZoneName("unit.test."), k1, keyID);
   BOOST_CHECK_EQUAL(keyID, 1);
-  backendUnderTest->addDomainKey(DNSName("unit.test."), k2, keyID);
+  backendUnderTest->addDomainKey(ZoneName("unit.test."), k2, keyID);
   BOOST_CHECK_EQUAL(keyID, 2);
 }
 
@@ -153,7 +157,7 @@ BOOST_AUTO_TEST_CASE(test_method_getDomainKeys)
   std::vector<DNSBackend::KeyData> keys;
   BOOST_TEST_MESSAGE("Testing getDomainKeys method");
   // we expect to get two keys
-  backendUnderTest->getDomainKeys(DNSName("unit.test."), keys);
+  backendUnderTest->getDomainKeys(ZoneName("unit.test."), keys);
   BOOST_CHECK_EQUAL(keys.size(), 2);
   // in case we got more than 2 keys, which would be unexpected
   // but not fatal
@@ -172,19 +176,19 @@ BOOST_AUTO_TEST_CASE(test_method_getDomainKeys)
 BOOST_AUTO_TEST_CASE(test_method_deactivateDomainKey)
 {
   BOOST_TEST_MESSAGE("Testing deactivateDomainKey method");
-  BOOST_CHECK(backendUnderTest->deactivateDomainKey(DNSName("unit.test."), 1));
+  BOOST_CHECK(backendUnderTest->deactivateDomainKey(ZoneName("unit.test."), 1));
 }
 
 BOOST_AUTO_TEST_CASE(test_method_activateDomainKey)
 {
   BOOST_TEST_MESSAGE("Testing activateDomainKey method");
-  BOOST_CHECK(backendUnderTest->activateDomainKey(DNSName("unit.test."), 1));
+  BOOST_CHECK(backendUnderTest->activateDomainKey(ZoneName("unit.test."), 1));
 }
 
 BOOST_AUTO_TEST_CASE(test_method_removeDomainKey)
 {
-  BOOST_CHECK(backendUnderTest->removeDomainKey(DNSName("unit.test."), 2));
-  BOOST_CHECK(backendUnderTest->removeDomainKey(DNSName("unit.test."), 1));
+  BOOST_CHECK(backendUnderTest->removeDomainKey(ZoneName("unit.test."), 2));
+  BOOST_CHECK(backendUnderTest->removeDomainKey(ZoneName("unit.test."), 1));
 }
 
 BOOST_AUTO_TEST_CASE(test_method_getBeforeAndAfterNamesAbsolute)
@@ -223,7 +227,8 @@ BOOST_AUTO_TEST_CASE(test_method_deleteTSIGKey)
   std::string algorithm;
   std::string content;
   BOOST_TEST_MESSAGE("Testing deleteTSIGKey method");
-  BOOST_CHECK_MESSAGE(backendUnderTest->deleteTSIGKey(DNSName("unit.test.")), "did not return true");
+  BOOST_CHECK_MESSAGE(!backendUnderTest->deleteTSIGKey(DNSName("unit.test."), DNSName("my.fantastic.algorithm")), "did not return false");
+  BOOST_CHECK_MESSAGE(backendUnderTest->deleteTSIGKey(DNSName("unit.test."), DNSName()), "did not return true");
 }
 
 BOOST_AUTO_TEST_CASE(test_method_getTSIGKeys)
@@ -250,7 +255,7 @@ BOOST_AUTO_TEST_CASE(test_method_getDomainInfo)
 {
   DomainInfo domainInfo;
   BOOST_TEST_MESSAGE("Testing getDomainInfo method");
-  backendUnderTest->getDomainInfo(DNSName("unit.test."), domainInfo);
+  backendUnderTest->getDomainInfo(ZoneName("unit.test."), domainInfo);
   BOOST_CHECK_EQUAL(domainInfo.zone.toString(), "unit.test.");
   BOOST_CHECK_EQUAL(domainInfo.serial, 2);
   BOOST_CHECK_EQUAL(domainInfo.notified_serial, 2);
@@ -295,7 +300,7 @@ BOOST_AUTO_TEST_CASE(test_method_autoPrimaryBackend)
   resourceRecord.content = "ns2.example.com.";
   nsset.push_back(resourceRecord);
 
-  BOOST_CHECK(backendUnderTest->autoPrimaryBackend("10.0.0.1", DNSName("example.com."), nsset, nullptr, nullptr, &dbd));
+  BOOST_CHECK(backendUnderTest->autoPrimaryBackend("10.0.0.1", ZoneName("example.com."), nsset, nullptr, nullptr, &dbd));
 
   // let's see what we got
   BOOST_CHECK_EQUAL(dbd, backendUnderTest.get());
@@ -303,15 +308,16 @@ BOOST_AUTO_TEST_CASE(test_method_autoPrimaryBackend)
 
 BOOST_AUTO_TEST_CASE(test_method_createSecondaryDomain)
 {
+  DomainInfo unused;
   BOOST_TEST_MESSAGE("Testing createSecondaryDomain method");
-  BOOST_CHECK(backendUnderTest->createSecondaryDomain("10.0.0.1", DNSName("pirate.unit.test."), "", ""));
+  BOOST_CHECK(backendUnderTest->createSecondaryDomain("10.0.0.1", ZoneName("pirate.unit.test."), "", "", unused, false));
 }
 
 BOOST_AUTO_TEST_CASE(test_method_feedRecord)
 {
   DNSResourceRecord resourceRecord;
   BOOST_TEST_MESSAGE("Testing feedRecord method");
-  backendUnderTest->startTransaction(DNSName("example.com."), 3);
+  backendUnderTest->startDomainReplacementTransaction(ZoneName("example.com."), 3);
   resourceRecord.qname = DNSName("example.com.");
   resourceRecord.qtype = QType::SOA;
   resourceRecord.qclass = QClass::IN;
@@ -329,7 +335,7 @@ BOOST_AUTO_TEST_CASE(test_method_feedRecord)
 
 BOOST_AUTO_TEST_CASE(test_method_replaceRRSet)
 {
-  backendUnderTest->startTransaction(DNSName("example.com."), 3);
+  backendUnderTest->startDomainReplacementTransaction(ZoneName("example.com."), 3);
   DNSResourceRecord resourceRecord;
   std::vector<DNSResourceRecord> rrset;
   BOOST_TEST_MESSAGE("Testing replaceRRSet method");
@@ -346,7 +352,7 @@ BOOST_AUTO_TEST_CASE(test_method_replaceRRSet)
 BOOST_AUTO_TEST_CASE(test_method_feedEnts)
 {
   BOOST_TEST_MESSAGE("Testing feedEnts method");
-  backendUnderTest->startTransaction(DNSName("example.com."), 3);
+  backendUnderTest->startDomainReplacementTransaction(ZoneName("example.com."), 3);
   map<DNSName, bool> nonterm = boost::assign::map_list_of(DNSName("_udp"), true)(DNSName("_sip._udp"), true);
   BOOST_CHECK(backendUnderTest->feedEnts(2, nonterm));
   backendUnderTest->commitTransaction();
@@ -355,7 +361,7 @@ BOOST_AUTO_TEST_CASE(test_method_feedEnts)
 BOOST_AUTO_TEST_CASE(test_method_feedEnts3)
 {
   BOOST_TEST_MESSAGE("Testing feedEnts3 method");
-  backendUnderTest->startTransaction(DNSName("example.com"), 3);
+  backendUnderTest->startDomainReplacementTransaction(ZoneName("example.com"), 3);
   NSEC3PARAMRecordContent ns3prc;
   ns3prc.d_iterations = 1;
   ns3prc.d_salt = "\u00aa\u00bb\u00cc\u00dd";
@@ -367,7 +373,7 @@ BOOST_AUTO_TEST_CASE(test_method_feedEnts3)
 BOOST_AUTO_TEST_CASE(test_method_abortTransaction)
 {
   BOOST_TEST_MESSAGE("Testing abortTransaction method");
-  backendUnderTest->startTransaction(DNSName("example.com."), 3);
+  backendUnderTest->startDomainReplacementTransaction(ZoneName("example.com."), 3);
   BOOST_CHECK(backendUnderTest->abortTransaction());
 }
 

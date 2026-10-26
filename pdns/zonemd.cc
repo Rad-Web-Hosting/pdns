@@ -17,11 +17,11 @@ void pdns::ZoneMD::readRecords(ZoneParserTNG& zpt)
     }
     catch (const PDNSException& pe) {
       std::string err = "Bad record content in record for '" + dnsResourceRecord.qname.toStringNoDot() + "'|" + dnsResourceRecord.qtype.toString() + ": " + pe.reason;
-      throw PDNSException(err);
+      throw PDNSException(std::move(err));
     }
     catch (const std::exception& e) {
       std::string err = "Bad record content in record for '" + dnsResourceRecord.qname.toStringNoDot() + "|" + dnsResourceRecord.qtype.toString() + "': " + e.what();
-      throw PDNSException(err);
+      throw PDNSException(std::move(err));
     }
     DNSRecord rec;
     rec.d_name = dnsResourceRecord.qname;
@@ -43,7 +43,7 @@ void pdns::ZoneMD::readRecords(const vector<DNSRecord>& records)
 
 void pdns::ZoneMD::processRecord(const DNSRecord& record)
 {
-  if (record.d_class == QClass::IN && record.d_name == d_zone) {
+  if (record.d_class == QClass::IN && record.d_name == DNSName(d_zone)) {
     switch (record.d_type) {
     case QType::SOA: {
       d_soaRecordContent = getRR<SOARecordContent>(record);
@@ -104,8 +104,8 @@ void pdns::ZoneMD::processRecord(const DNSRecord& record)
         return;
       }
       d_nsec3params.emplace_back(param);
-      d_nsec3label = d_zone;
-      d_nsec3label.prependRawLabel(toBase32Hex(hashQNameWithSalt(param->d_salt, param->d_iterations, d_zone)));
+      d_nsec3label = DNSName(d_zone);
+      d_nsec3label.prependRawLabel(toBase32Hex(hashQNameWithSalt(param->d_salt, param->d_iterations, DNSName(d_zone))));
       // Zap the NSEC3 at labels that we now know are not relevant
       for (auto item = d_nsec3s.begin(); item != d_nsec3s.end();) {
         if (item->first != d_nsec3label) {
@@ -117,13 +117,16 @@ void pdns::ZoneMD::processRecord(const DNSRecord& record)
       }
       break;
     }
+    default:
+      // nothing
+      break;
     }
   }
 }
 
 void pdns::ZoneMD::readRecord(const DNSRecord& record)
 {
-  if (!record.d_name.isPartOf(d_zone) && record.d_name != d_zone) {
+  if (!record.d_name.isPartOf(d_zone)) {
     return;
   }
   if (record.d_class == QClass::IN && record.d_type == QType::SOA && d_soaRecordContent) {
@@ -153,6 +156,9 @@ void pdns::ZoneMD::readRecord(const DNSRecord& record)
       }
       break;
     }
+    default:
+      // nothing
+      break;
     }
   }
   RRSetKey_t key = std::pair(record.d_name, record.d_type);
@@ -218,7 +224,7 @@ void pdns::ZoneMD::verify(bool& validationDone, bool& validationOK)
   for (auto& rrset : d_resourceRecordSets) {
     const auto& qname = rrset.first.first;
     const auto& qtype = rrset.first.second;
-    if (qtype == QType::ZONEMD && qname == d_zone) {
+    if (qtype == QType::ZONEMD && qname == DNSName(d_zone)) {
       continue; // the apex ZONEMD is not digested
     }
 
@@ -226,7 +232,10 @@ void pdns::ZoneMD::verify(bool& validationDone, bool& validationOK)
     for (auto& resourceRecord : rrset.second) {
       if (qtype == QType::RRSIG) {
         const auto rrsig = std::dynamic_pointer_cast<const RRSIGRecordContent>(resourceRecord);
-        if (rrsig->d_type == QType::ZONEMD && qname == d_zone) {
+        if (rrsig == nullptr) {
+          continue;
+        }
+        if (rrsig->d_type == QType::ZONEMD && qname == DNSName(d_zone)) {
           continue;
         }
       }
@@ -248,7 +257,10 @@ void pdns::ZoneMD::verify(bool& validationDone, bool& validationOK)
       // RRSIG is special, since  original TTL depends on qtype covered by RRSIG
       // which can be different per record
       for (const auto& rrsig : sorted) {
-        auto rrsigc = std::dynamic_pointer_cast<const RRSIGRecordContent>(rrsig);
+        const auto rrsigc = std::dynamic_pointer_cast<const RRSIGRecordContent>(rrsig);
+        if (rrsigc == nullptr) {
+          continue;
+        }
         RRSIGRecordContent rrc;
         rrc.d_originalttl = d_resourceRecordSetTTLs[pair(rrset.first.first, rrsigc->d_type)];
         rrc.d_type = qtype;
@@ -259,9 +271,17 @@ void pdns::ZoneMD::verify(bool& validationDone, bool& validationOK)
   }
 
   // Final verify
-  for (const auto& [k, v] : d_zonemdRecords) {
-    auto [zonemd, duplicate] = v;
-    if (zonemd->d_hashalgo == 1) {
+  for (const auto& record : d_zonemdRecords) {
+    const auto scheme = record.first.first;
+    const auto duplicate = record.second.duplicate;
+    if (scheme != 1 || duplicate) {
+      continue;
+    }
+    const auto zonemd = record.second.record;
+    if (zonemd->d_serial != d_soaRecordContent->d_st.serial) {
+      continue;
+    }
+    if (zonemd->d_hashalgo == 1 && sha384digest) {
       validationDone = true;
       auto computed = sha384digest->digest();
       if (constantTimeStringEquals(zonemd->d_digest, computed)) {
@@ -269,7 +289,7 @@ void pdns::ZoneMD::verify(bool& validationDone, bool& validationOK)
         break; // Per RFC: a single succeeding validation is enough
       }
     }
-    else if (zonemd->d_hashalgo == 2) {
+    else if (zonemd->d_hashalgo == 2 && sha512digest) {
       validationDone = true;
       auto computed = sha512digest->digest();
       if (constantTimeStringEquals(zonemd->d_digest, computed)) {

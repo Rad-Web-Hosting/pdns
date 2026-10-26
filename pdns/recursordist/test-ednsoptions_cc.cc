@@ -28,8 +28,8 @@ static void getRawQueryWithECSAndCookie(const DNSName& name, const Netmask& ecs,
   EDNSCookiesOpt cookiesOpt(clientCookie + serverCookie);
   string cookiesOptionStr = cookiesOpt.makeOptString();
   EDNSSubnetOpts ecsOpts;
-  ecsOpts.source = ecs;
-  string origECSOptionStr = makeEDNSSubnetOptsString(ecsOpts);
+  ecsOpts.setSource(ecs);
+  string origECSOptionStr = ecsOpts.makeOptString();
   DNSPacketWriter::optvect_t opts;
   opts.emplace_back(EDNSOptionCode::COOKIE, cookiesOptionStr);
   opts.emplace_back(EDNSOptionCode::ECS, origECSOptionStr);
@@ -65,9 +65,9 @@ BOOST_AUTO_TEST_CASE(test_getEDNSOption)
   BOOST_CHECK_EQUAL(res, 0);
 
   EDNSSubnetOpts eso;
-  BOOST_REQUIRE(getEDNSSubnetOptsFromString(reinterpret_cast<const char*>(&query.at(pos + 9 + ecsStartPosition + 4)), ecsLen - 4, &eso));
+  BOOST_REQUIRE(EDNSSubnetOpts::getFromString(reinterpret_cast<const char*>(&query.at(pos + 9 + ecsStartPosition + 4)), ecsLen - 4, &eso)); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 
-  BOOST_CHECK(eso.source == ecs);
+  BOOST_CHECK(eso.getSource() == ecs);
 }
 
 BOOST_AUTO_TEST_CASE(test_getEDNSOptions)
@@ -105,8 +105,8 @@ BOOST_AUTO_TEST_CASE(test_getEDNSOptions)
   BOOST_REQUIRE_GT(it->second.values.at(0).size, 0U);
 
   EDNSSubnetOpts eso;
-  BOOST_REQUIRE(getEDNSSubnetOptsFromString(it->second.values.at(0).content, it->second.values.at(0).size, &eso));
-  BOOST_CHECK(eso.source == ecs);
+  BOOST_REQUIRE(EDNSSubnetOpts::getFromString(it->second.values.at(0).content, it->second.values.at(0).size, &eso));
+  BOOST_CHECK(eso.getSource() == ecs);
 
   it = options.find(EDNSOptionCode::COOKIE);
   BOOST_REQUIRE(it != options.end());
@@ -121,9 +121,9 @@ static void checkECSOptionValidity(const std::string& sourceStr, uint8_t sourceM
 {
   ComboAddress source(sourceStr);
   EDNSSubnetOpts ecsOpts;
-  ecsOpts.source = Netmask(source, sourceMask);
+  ecsOpts.setSource(Netmask(source, sourceMask));
 
-  string ecsOptionStr = makeEDNSSubnetOptsString(ecsOpts);
+  string ecsOptionStr = ecsOpts.makeOptString();
 
   /* 2 bytes for family, one for source mask and one for scope mask */
   const size_t ecsHeaderSize = 4;
@@ -157,9 +157,9 @@ static void checkECSOptionValidity(const std::string& sourceStr, uint8_t sourceM
   }
 
   EDNSSubnetOpts parsed;
-  BOOST_REQUIRE(getEDNSSubnetOptsFromString(ecsOptionStr, &parsed));
-  BOOST_REQUIRE(parsed.source == Netmask(truncated, sourceMask));
-  BOOST_REQUIRE_EQUAL(ecsOpts.scope.getBits(), parsed.scope.getBits());
+  BOOST_REQUIRE(EDNSSubnetOpts::getFromString(ecsOptionStr, &parsed));
+  BOOST_REQUIRE(parsed.getSource() == Netmask(truncated, sourceMask));
+  BOOST_REQUIRE_EQUAL(ecsOpts.getScopePrefixLength(), parsed.getScopePrefixLength());
 }
 
 BOOST_AUTO_TEST_CASE(test_makeEDNSSubnetOptsString)
@@ -211,6 +211,81 @@ BOOST_AUTO_TEST_CASE(test_makeEDNSExtendedErrorOptString)
   EDNSExtendedError parsed;
   std::string empty;
   BOOST_CHECK(!getEDNSExtendedErrorOptFromString(empty, parsed));
+}
+
+BOOST_AUTO_TEST_CASE(test_slowParseEDNSOptions_root_opt)
+{
+  const DNSName qname("example.com.");
+  std::vector<uint8_t> packet;
+  DNSPacketWriter packetWriter(packet, qname, QType::A, QClass::IN, 0);
+  packetWriter.commit();
+
+  /* make it look like a response: one answer record */
+  packetWriter.startRecord(qname, QType::A, 60, QClass::IN, DNSResourceRecord::ANSWER, true);
+  packetWriter.xfr32BitInt(0x01020304U);
+  packetWriter.commit();
+
+  EDNSSubnetOpts ecsOpts;
+  ecsOpts.setSource(Netmask("192.0.2.0/24"));
+  const std::string ecsOption = ecsOpts.makeOptString();
+
+  uint32_t ttl{0};
+  EDNS0Record stuff{};
+  stuff.version = 0;
+  stuff.extFlags = htons(0);
+  stuff.extRCode = 0;
+  memcpy(&ttl, &stuff, sizeof(stuff));
+  ttl = ntohl(ttl);
+  /* OPT RR with a non-root owner name */
+  packetWriter.startRecord(DNSName("."), QType::OPT, ttl, 512U, DNSResourceRecord::ADDITIONAL, false);
+  packetWriter.xfr16BitInt(EDNSOptionCode::ECS);
+  packetWriter.xfr16BitInt(ecsOption.length());
+  packetWriter.xfrBlob(ecsOption);
+  packetWriter.commit();
+
+  PacketBuffer pbuf(packet.begin(), packet.end());
+  EDNSOptionViewMap options;
+  const bool parsed = slowParseEDNSOptions(pbuf, options);
+  BOOST_CHECK_EQUAL(parsed, true);
+  BOOST_REQUIRE(options.find(EDNSOptionCode::ECS) != options.end());
+  BOOST_CHECK_EQUAL(options.at(EDNSOptionCode::ECS).values.size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(test_slowParseEDNSOptions_non_root_opt)
+{
+  const DNSName qname("example.com.");
+  std::vector<uint8_t> packet;
+  DNSPacketWriter packetWriter(packet, qname, QType::A, QClass::IN, 0);
+  packetWriter.commit();
+
+  /* make it look like a response: one answer record */
+  packetWriter.startRecord(qname, QType::A, 60, QClass::IN, DNSResourceRecord::ANSWER, true);
+  packetWriter.xfr32BitInt(0x01020304U);
+  packetWriter.commit();
+
+  EDNSSubnetOpts ecsOpts;
+  ecsOpts.setSource(Netmask("192.0.2.0/24"));
+  const std::string ecsOption = ecsOpts.makeOptString();
+
+  uint32_t ttl{0};
+  EDNS0Record stuff{};
+  stuff.version = 0;
+  stuff.extFlags = htons(0);
+  stuff.extRCode = 0;
+  memcpy(&ttl, &stuff, sizeof(stuff));
+  ttl = ntohl(ttl);
+  /* OPT RR with a non-root owner name */
+  packetWriter.startRecord(DNSName("evil.example."), QType::OPT, ttl, 512U, DNSResourceRecord::ADDITIONAL, false);
+  packetWriter.xfr16BitInt(EDNSOptionCode::ECS);
+  packetWriter.xfr16BitInt(ecsOption.length());
+  packetWriter.xfrBlob(ecsOption);
+  packetWriter.commit();
+
+  PacketBuffer pbuf(packet.begin(), packet.end());
+  EDNSOptionViewMap options;
+  const bool parsed = slowParseEDNSOptions(pbuf, options);
+  BOOST_CHECK_EQUAL(parsed, false);
+  BOOST_REQUIRE(options.find(EDNSOptionCode::ECS) == options.end());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

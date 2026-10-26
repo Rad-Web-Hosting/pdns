@@ -3,6 +3,9 @@
 if pgrep pdns_server; then
     echo 'There are (stray?) pdns_servers running that might interfere with these tests!'
 fi
+if pgrep pdns_recursor; then
+    echo 'There are (stray?) pdns_recursors running that might interfere with these tests!'
+fi
 
 export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
@@ -18,16 +21,21 @@ protoc -I=../pdns/ --python_out=. ../pdns/dnsmessage.proto
 protoc -I=../pdns/ --python_out=. ../pdns/dnstap.proto
 
 
+make clean-certs
+make certs
+
 mkdir -p configs
 
 [ -f ./vars ] && . ./vars
 
 export PDNS=${PDNS:-${PWD}/../pdns/pdns_server}
 export PDNSUTIL=${PDNSUTIL:-${PWD}/../pdns/pdnsutil}
-export PDNSRECURSOR=${PDNSRECURSOR:-${PWD}/../pdns/recursordist/pdns_recursor}
-export RECCONTROL=${RECCONTROL:-${PWD}/../pdns/recursordist/rec_control}
+export PDNSMODULEDIR=${PDNSMODULEDIR:-${PWD}/../regression-tests/modules}
 
-LIBFAKETIME_DEFAULT=/usr/lib/$(arch)-linux-gnu/faketime/libfaketimeMT.so.1 # ubuntu default
+export PDNSRECURSOR=${PDNSRECURSOR:-${PWD}/../pdns/recursordist/build/pdns_recursor}
+export RECCONTROL=${RECCONTROL:-${PWD}/../pdns/recursordist/build/rec_control}
+
+LIBFAKETIME_DEFAULT=/usr/local/lib/faketime/libfaketimeMT.so.1 # location after building and installing from https://github.com/wolfcw/libfaketime
 LIBAUTHBIND_DEFAULT=/usr/lib/authbind/libauthbind.so.1
 if [ $(uname -s) = "Darwin" ]; then
   # macOS is not /really/ supported here; it works for some tests, and then you might need sudo.
@@ -35,7 +43,7 @@ if [ $(uname -s) = "Darwin" ]; then
   LIBAUTHBIND_DEFAULT=""
 fi
 if [ $(uname -s) = "OpenBSD" ]; then
-  # OpenBSD is not /really/ supported here; it works for some tests, and then you might need sudo.
+  # OpenBSD is not /really/ supported here; it works for some tests, and then you might need doas.
   LIBFAKETIME_DEFAULT=""
   LIBAUTHBIND_DEFAULT=""
 fi
@@ -57,13 +65,13 @@ if [ "${PDNS_DEBUG}" = "YES" ]; then
   set -x
 fi
 
-if ! "$PDNSRECURSOR" --version 2>&1 | grep Features | grep -q dnstap-framestream; then
-  export NODNSTAPTESTS=1
-fi
+# Run with -m 'not external' to skip test that require external connectivity
+# Run with -m 'not unreliable_on_gh' to skip tests that are unreliable on GitHUb
+# Run with -m 'not (external or unreliable_on_gh)' to skip both categories
 
-# LIBFAKETIME is only added to LD_PRELOAD by the pyton code when needed
+# LIBFAKETIME is only added to LD_PRELOAD by the python code when needed
 if [ "${LIBASAN}" != "" -o "${LIBAUTHBIND}" != "" ]; then
-LD_PRELOAD="${LIBASAN} ${LIBAUTHBIND}" pytest --ignore=test_WellKnown.py --junitxml=pytest.xml $@
+LD_PRELOAD="${LIBASAN} ${LIBAUTHBIND}" authbind pytest --junitxml=pytest.xml "$@"
 else
-pytest --ignore=test_WellKnown.py  --junitxml=pytest.xml $@
+pytest --junitxml=pytest.xml "$@"
 fi

@@ -41,15 +41,12 @@
 #include "namespaces.hh"
 using namespace ::boost::multi_index;
 
+bool g_slogStructured{false};
+
 namespace po = boost::program_options;
 po::variables_map g_vm;
 
 StatBag S;
-ArgvMap &arg()
-{
-  static ArgvMap arg;
-  return arg;
-}
 
 static void usage() {
   cerr<<"Syntax: pdns_notify IP_ADDRESS/HOSTNAME[:PORT] DOMAIN"<<endl;
@@ -59,8 +56,6 @@ int main(int argc, char** argv)
 try
 {
   set<ComboAddress> addrs;
-  ::arg().set("rng")="auto";
-  ::arg().set("entropy-source")="/dev/urandom";
 
   for(int n=1 ; n < argc; ++n) {
     if ((string) argv[n] == "--help") {

@@ -7,7 +7,8 @@ import threading
 import time
 import dns
 import dnstap_pb2
-from unittest import SkipTest
+import pytest
+import traceback
 from recursortests import RecursorTest
 
 FSTRM_CONTROL_ACCEPT = 0x01
@@ -22,34 +23,29 @@ try:
 except ImportError:
     from Queue import Queue
 
-try:
-    range = xrange
-except NameError:
-    pass
-
 
 def checkDnstapBase(testinstance, dnstap, protocol, initiator, responder, response_port=53):
     testinstance.assertTrue(dnstap)
-    testinstance.assertTrue(dnstap.HasField('identity'))
-    #testinstance.assertEqual(dnstap.identity, b'a.server')
-    testinstance.assertTrue(dnstap.HasField('version'))
-    #testinstance.assertIn(b'dnsdist ', dnstap.version)
-    testinstance.assertTrue(dnstap.HasField('type'))
+    testinstance.assertTrue(dnstap.HasField("identity"))
+    # testinstance.assertEqual(dnstap.identity, b'a.server')
+    testinstance.assertTrue(dnstap.HasField("version"))
+    # testinstance.assertIn(b'dnsdist ', dnstap.version)
+    testinstance.assertTrue(dnstap.HasField("type"))
     testinstance.assertEqual(dnstap.type, dnstap.MESSAGE)
-    testinstance.assertTrue(dnstap.HasField('message'))
-    testinstance.assertTrue(dnstap.message.HasField('socket_protocol'))
+    testinstance.assertTrue(dnstap.HasField("message"))
+    testinstance.assertTrue(dnstap.message.HasField("socket_protocol"))
     testinstance.assertEqual(dnstap.message.socket_protocol, protocol)
-    testinstance.assertTrue(dnstap.message.HasField('socket_family'))
+    testinstance.assertTrue(dnstap.message.HasField("socket_family"))
     testinstance.assertEqual(dnstap.message.socket_family, dnstap_pb2.INET)
     #
-    # The query address and port are from the the recursor, we don't know the port
+    # The query address and port are from the recursor, we don't know the port
     #
-    testinstance.assertTrue(dnstap.message.HasField('query_address'))
+    testinstance.assertTrue(dnstap.message.HasField("query_address"))
     testinstance.assertEqual(socket.inet_ntop(socket.AF_INET, dnstap.message.query_address), initiator)
-    testinstance.assertTrue(dnstap.message.HasField('query_port'))
-    testinstance.assertTrue(dnstap.message.HasField('response_address'))
+    testinstance.assertTrue(dnstap.message.HasField("query_port"))
+    testinstance.assertTrue(dnstap.message.HasField("response_address"))
     testinstance.assertEqual(socket.inet_ntop(socket.AF_INET, dnstap.message.response_address), responder)
-    testinstance.assertTrue(dnstap.message.HasField('response_port'))
+    testinstance.assertTrue(dnstap.message.HasField("response_port"))
     testinstance.assertEqual(dnstap.message.response_port, response_port)
 
 
@@ -57,65 +53,72 @@ def checkDnstapQuery(testinstance, dnstap, protocol, initiator, responder):
     testinstance.assertEqual(dnstap.message.type, dnstap_pb2.Message.RESOLVER_QUERY)
     checkDnstapBase(testinstance, dnstap, protocol, initiator, responder)
 
-    testinstance.assertTrue(dnstap.message.HasField('query_time_sec'))
-    testinstance.assertTrue(dnstap.message.HasField('query_time_nsec'))
+    testinstance.assertTrue(dnstap.message.HasField("query_time_sec"))
+    testinstance.assertTrue(dnstap.message.HasField("query_time_nsec"))
 
-    testinstance.assertTrue(dnstap.message.HasField('query_message'))
+    testinstance.assertTrue(dnstap.message.HasField("query_message"))
     #
     # We cannot compare the incoming query with the outgoing one
     # The IDs and some other fields will be different
     #
-    #wire_message = dns.message.from_wire(dnstap.message.query_message)
-    #testinstance.assertEqual(wire_message, query)
+    # wire_message = dns.message.from_wire(dnstap.message.query_message)
+    # testinstance.assertEqual(wire_message, query)
+
 
 def checkDnstapNOD(testinstance, dnstap, protocol, initiator, responder, response_port, query_zone):
     testinstance.assertEqual(dnstap.message.type, dnstap_pb2.Message.CLIENT_QUERY)
     checkDnstapBase(testinstance, dnstap, protocol, initiator, responder, response_port)
 
-    testinstance.assertTrue(dnstap.message.HasField('query_time_sec'))
-    testinstance.assertTrue(dnstap.message.HasField('query_time_nsec'))
+    testinstance.assertTrue(dnstap.message.HasField("query_time_sec"))
+    testinstance.assertTrue(dnstap.message.HasField("query_time_nsec"))
 
-    testinstance.assertTrue(dnstap.message.HasField('query_zone'))
+    testinstance.assertTrue(dnstap.message.HasField("query_zone"))
     testinstance.assertEqual(dns.name.from_wire(dnstap.message.query_zone, 0)[0].to_text(), query_zone)
+
 
 def checkDnstapUDR(testinstance, dnstap, protocol, initiator, responder, response_port, query_zone):
     testinstance.assertEqual(dnstap.message.type, dnstap_pb2.Message.RESOLVER_RESPONSE)
     checkDnstapBase(testinstance, dnstap, protocol, initiator, responder, response_port)
 
-    testinstance.assertTrue(dnstap.message.HasField('query_time_sec'))
-    testinstance.assertTrue(dnstap.message.HasField('query_time_nsec'))
+    testinstance.assertTrue(dnstap.message.HasField("query_time_sec"))
+    testinstance.assertTrue(dnstap.message.HasField("query_time_nsec"))
 
-    testinstance.assertTrue(dnstap.message.HasField('query_zone'))
+    testinstance.assertTrue(dnstap.message.HasField("query_zone"))
     testinstance.assertEqual(dns.name.from_wire(dnstap.message.query_zone, 0)[0].to_text(), query_zone)
 
-    testinstance.assertTrue(dnstap.message.HasField('response_message'))
+    testinstance.assertTrue(dnstap.message.HasField("response_message"))
     wire_message = dns.message.from_wire(dnstap.message.response_message)
+    testinstance.assertTrue(isinstance(wire_message, dns.message.Message))
+
 
 def checkDnstapExtra(testinstance, dnstap, expected):
-    testinstance.assertTrue(dnstap.HasField('extra'))
+    testinstance.assertTrue(dnstap.HasField("extra"))
     testinstance.assertEqual(dnstap.extra, expected)
 
 
 def checkDnstapNoExtra(testinstance, dnstap):
-    testinstance.assertFalse(dnstap.HasField('extra'))
+    testinstance.assertFalse(dnstap.HasField("extra"))
 
 
 def checkDnstapResponse(testinstance, dnstap, protocol, response, initiator, responder):
     testinstance.assertEqual(dnstap.message.type, dnstap_pb2.Message.RESOLVER_RESPONSE)
     checkDnstapBase(testinstance, dnstap, protocol, initiator, responder)
 
-    testinstance.assertTrue(dnstap.message.HasField('query_time_sec'))
-    testinstance.assertTrue(dnstap.message.HasField('query_time_nsec'))
+    testinstance.assertTrue(dnstap.message.HasField("query_time_sec"))
+    testinstance.assertTrue(dnstap.message.HasField("query_time_nsec"))
 
-    testinstance.assertTrue(dnstap.message.HasField('response_time_sec'))
-    testinstance.assertTrue(dnstap.message.HasField('response_time_nsec'))
+    testinstance.assertTrue(dnstap.message.HasField("response_time_sec"))
+    testinstance.assertTrue(dnstap.message.HasField("response_time_nsec"))
 
-    testinstance.assertTrue(dnstap.message.response_time_sec > dnstap.message.query_time_sec or \
-                            dnstap.message.response_time_nsec > dnstap.message.query_time_nsec)
+    testinstance.assertTrue(
+        dnstap.message.response_time_sec > dnstap.message.query_time_sec
+        or dnstap.message.response_time_nsec > dnstap.message.query_time_nsec
+    )
 
-    testinstance.assertTrue(dnstap.message.HasField('response_message'))
+    testinstance.assertTrue(dnstap.message.HasField("response_message"))
     wire_message = dns.message.from_wire(dnstap.message.response_message)
     testinstance.assertEqual(wire_message, response)
+
 
 def fstrm_get_control_frame_type(data):
     (t,) = struct.unpack("!L", data[0:4])
@@ -125,21 +128,20 @@ def fstrm_get_control_frame_type(data):
 def fstrm_make_control_frame_reply(cft):
     if cft == FSTRM_CONTROL_READY:
         # Reply with ACCEPT frame and content-type
-        contenttype = b'protobuf:dnstap.Dnstap'
-        frame = struct.pack('!LLL', FSTRM_CONTROL_ACCEPT, 1,
-                            len(contenttype)) + contenttype
+        contenttype = b"protobuf:dnstap.Dnstap"
+        frame = struct.pack("!LLL", FSTRM_CONTROL_ACCEPT, 1, len(contenttype)) + contenttype
         buf = struct.pack("!LL", 0, len(frame)) + frame
         return buf
     elif cft == FSTRM_CONTROL_START:
         return None
     else:
-        raise Exception('unhandled control frame ' + cft)
+        raise Exception("unhandled control frame " + str(cft))
 
 
 def fstrm_read_and_dispatch_control_frame(conn):
     data = conn.recv(4)
     if not data:
-        raise Exception('length of control frame payload could not be read')
+        raise Exception("length of control frame payload could not be read")
     (datalen,) = struct.unpack("!L", data)
     data = conn.recv(datalen)
     cft = fstrm_get_control_frame_type(data)
@@ -170,7 +172,6 @@ def fstrm_handle_bidir_connection(conn, on_data):
             on_data(data)
 
 
-
 class DNSTapServerParams(object):
     def __init__(self, path):
         self.queue = Queue()
@@ -180,21 +181,20 @@ class DNSTapServerParams(object):
 DNSTapServerParameters = DNSTapServerParams("/tmp/dnstap.sock")
 DNSTapListeners = []
 
+
 class TestRecursorDNSTap(RecursorTest):
     @classmethod
     def FrameStreamUnixListener(cls, conn, param):
         while True:
             try:
-                fstrm_handle_bidir_connection(conn, lambda data: \
-                param.queue.put(data, True, timeout=2.0))
+                fstrm_handle_bidir_connection(conn, lambda data: param.queue.put(data, True, timeout=2.0))
             except socket.error as e:
                 if e.errno in (errno.EBADF, errno.EPIPE):
                     break
                 sys.stderr.write("Unexpected socket error %s\n" % str(e))
-                sys.exit(1)
-            except exception as e:
+            except Exception as e:
                 sys.stderr.write("Unexpected socket error %s\n" % str(e))
-                sys.exit(1)
+                break
         conn.close()
 
     @classmethod
@@ -203,18 +203,19 @@ class TestRecursorDNSTap(RecursorTest):
         try:
             try:
                 os.remove(param.path)
-            except:
+            except Exception:
                 pass
             sock.bind(param.path)
             sock.listen(100)
         except socket.error as e:
-            sys.stderr.write("Error binding/listening in the framestream listener: %s\n" % str(e))
-            sys.exit(1)
+            raise Exception("Error binding/listening in the framestream listener: %s\n" % str(e))
         DNSTapListeners.append(sock)
         while True:
             try:
                 (conn, addr) = sock.accept()
-                listener = threading.Thread(name='DNSTap Worker', target=cls.FrameStreamUnixListener, args=[conn, param])
+                listener = threading.Thread(
+                    name="DNSTap Worker", target=cls.FrameStreamUnixListener, args=[conn, param]
+                )
                 listener.daemon = True
                 listener.start()
             except socket.error as e:
@@ -225,19 +226,18 @@ class TestRecursorDNSTap(RecursorTest):
         sock.close()
 
     @classmethod
+    @pytest.mark.skipif("dnstap-framestream" not in RecursorTest.recFeatures(), reason="dnstap feature not available")
     def setUpClass(cls):
-        if os.environ.get("NODNSTAPTESTS") == "1":
-            raise SkipTest("Not Yet Supported")
-
         cls.setUpSockets()
-
         cls.startResponders()
 
-        listener = threading.Thread(name='DNSTap Listener', target=cls.FrameStreamUnixListenerMain, args=[DNSTapServerParameters])
+        listener = threading.Thread(
+            name="DNSTap Listener", target=cls.FrameStreamUnixListenerMain, args=[DNSTapServerParameters]
+        )
         listener.daemon = True
         listener.start()
 
-        confdir = os.path.join('configs', cls._confdir)
+        confdir = os.path.join("configs", cls._confdir)
         cls.createConfigDir(confdir)
 
         cls.generateRecursorConfig(confdir)
@@ -251,9 +251,10 @@ class TestRecursorDNSTap(RecursorTest):
 
     @classmethod
     def generateRecursorConfig(cls, confdir):
-        authzonepath = os.path.join(confdir, 'example.zone')
-        with open(authzonepath, 'w') as authzone:
-            authzone.write("""$ORIGIN example.
+        authzonepath = os.path.join(confdir, "example.zone")
+        with open(authzonepath, "w") as authzone:
+            authzone.write(
+                """$ORIGIN example.
 @ 3600 IN SOA {soa}
 a 3600 IN A 192.0.2.42
 tagged 3600 IN A 192.0.2.84
@@ -267,14 +268,26 @@ types 3600 IN SPF "v=spf1 -all"
 types 3600 IN SRV 10 20 443 a.example.
 cname 3600 IN CNAME a.example.
 
-""".format(soa=cls._SOA))
+""".format(soa=cls._SOA)
+            )
         super(TestRecursorDNSTap, cls).generateRecursorConfig(confdir)
 
     @classmethod
     def tearDownClass(cls):
-        cls.tearDownRecursor()
-        for listerner in DNSTapListeners:
-            listerner.close()
+        for listener in DNSTapListeners:
+            listener.close()
+        super().tearDownClass()
+
+    def getFirstDnstap(self):
+        try:
+            data = DNSTapServerParameters.queue.get(True, timeout=5.0)
+        except Exception:
+            data = False
+        self.assertTrue(data)
+        dnstap = dnstap_pb2.Dnstap()
+        dnstap.ParseFromString(data)
+        return dnstap
+
 
 class DNSTapDefaultTest(TestRecursorDNSTap):
     """
@@ -283,26 +296,22 @@ class DNSTapDefaultTest(TestRecursorDNSTap):
     that the recursor at least connects to the DNSTap server.
     """
 
-    _confdir = 'DNSTapDefault'
-    _config_template = """
-auth-zones=example=configs/%s/example.zone""" % _confdir
-    _lua_config_file = """
+    _confdir = "DNSTapDefault"
+    _config_template = (
+        """
+auth-zones=example=configs/%s/example.zone"""
+        % _confdir
+    )
+    _lua_config_file = (
+        """
 dnstapFrameStreamServer({"%s"})
-    """ % DNSTapServerParameters.path
-
-    def getFirstDnstap(self):
-        try:
-            data = DNSTapServerParameters.queue.get(True, timeout=2.0)
-        except:
-            data = False
-        self.assertTrue(data)
-        dnstap = dnstap_pb2.Dnstap()
-        dnstap.ParseFromString(data)
-        return dnstap
+    """
+        % DNSTapServerParameters.path
+    )
 
     def testA(self):
-        name = 'www.example.org.'
-        query = dns.message.make_query(name, 'A', want_dnssec=True)
+        name = "www.example.org."
+        query = dns.message.make_query(name, "A", want_dnssec=True)
         query.flags |= dns.flags.RD
         res = self.sendUDPQuery(query)
         self.assertNotEqual(res, None)
@@ -310,29 +319,47 @@ dnstapFrameStreamServer({"%s"})
         # check the dnstap message corresponding to the UDP query
         dnstap = self.getFirstDnstap()
 
-        checkDnstapQuery(self, dnstap, dnstap_pb2.UDP, '127.0.0.1', '127.0.0.8')
+        checkDnstapQuery(self, dnstap, dnstap_pb2.UDP, "127.0.0.1", "127.0.0.8")
         # We don't expect a response
         checkDnstapNoExtra(self, dnstap)
+        # We don't expect anything more, but we'll sleep anyway to avoid a LeakSanitizer race
+        time.sleep(1)
+
 
 class DNSTapLogNoQueriesTest(TestRecursorDNSTap):
-
-    _confdir = 'DNSTapLogNoQueries'
-    _config_template = """
-auth-zones=example=configs/%s/example.zone""" % _confdir
+    _confdir = "DNSTapLogNoQueries"
+    _config_template = (
+        """
+auth-zones=example=configs/%s/example.zone"""
+        % _confdir
+    )
     _lua_config_file = """
 dnstapFrameStreamServer({"%s"}, {logQueries=false})
     """ % (DNSTapServerParameters.path)
 
     def testA(self):
-        name = 'www.example.org.'
-        query = dns.message.make_query(name, 'A', want_dnssec=True)
+        print("Before test")
+        while not DNSTapServerParameters.queue.empty():
+            tap = DNSTapServerParameters.queue.get(False)
+            print("In queue:")
+            print(tap)
+        else:
+            print("Nothing in queue")
+        name = "www.example.org."
+        query = dns.message.make_query(name, "A", want_dnssec=True)
         query.flags |= dns.flags.RD
         res = self.sendUDPQuery(query)
         self.assertNotEqual(res, None)
 
-        # We don't expect anything
+        # We don't expect anything more
         time.sleep(1)
+        print("After test")
+        while not DNSTapServerParameters.queue.empty():
+            tap = DNSTapServerParameters.queue.get(False)
+            print("In queue:")
+            print(tap)
         self.assertTrue(DNSTapServerParameters.queue.empty())
+
 
 class DNSTapLogNODTest(TestRecursorDNSTap):
     """
@@ -341,7 +368,7 @@ class DNSTapLogNODTest(TestRecursorDNSTap):
     that the recursor at least connects to the DNSTap server.
     """
 
-    _confdir = 'DNSTapLogNOD'
+    _confdir = "DNSTapLogNOD"
     _config_template = """
 new-domain-tracking=yes
 new-domain-history-dir=configs/%s/nod
@@ -355,23 +382,13 @@ dnstapNODFrameStreamServer({"%s"})
     @classmethod
     def generateRecursorConfig(cls, confdir):
         for directory in ["nod", "udr"]:
-            path = os.path.join('configs', cls._confdir, directory)
+            path = os.path.join("configs", cls._confdir, directory)
             cls.createConfigDir(path)
         super(DNSTapLogNODTest, cls).generateRecursorConfig(confdir)
 
-    def getFirstDnstap(self):
-        try:
-            data = DNSTapServerParameters.queue.get(True, timeout=2.0)
-        except:
-            data = False
-        self.assertTrue(data)
-        dnstap = dnstap_pb2.Dnstap()
-        dnstap.ParseFromString(data)
-        return dnstap
-
     def testA(self):
-        name = 'types.example.'
-        query = dns.message.make_query(name, 'A', want_dnssec=True)
+        name = "types.example."
+        query = dns.message.make_query(name, "A", want_dnssec=True)
         query.flags |= dns.flags.RD
         res = self.sendUDPQuery(query)
         self.assertNotEqual(res, None)
@@ -379,13 +396,16 @@ dnstapNODFrameStreamServer({"%s"})
         # check the dnstap message corresponding to the UDP query
         dnstap = self.getFirstDnstap()
 
-        checkDnstapNOD(self, dnstap, dnstap_pb2.UDP, '127.0.0.1', '127.0.0.1', 5300, name)
+        checkDnstapNOD(self, dnstap, dnstap_pb2.UDP, "127.0.0.1", "127.0.0.1", 5300, name)
         # We don't expect a response
         checkDnstapNoExtra(self, dnstap)
+        # We don't expect anything more
+        time.sleep(1)
+        self.assertTrue(DNSTapServerParameters.queue.empty())
+
 
 class DNSTapLogUDRTest(TestRecursorDNSTap):
-
-    _confdir = 'DNSTapLogUDR'
+    _confdir = "DNSTapLogUDR"
     _config_template = """
 new-domain-tracking=yes
 new-domain-history-dir=configs/%s/nod
@@ -399,23 +419,13 @@ dnstapNODFrameStreamServer({"%s"}, {logNODs=false, logUDRs=true})
     @classmethod
     def generateRecursorConfig(cls, confdir):
         for directory in ["nod", "udr"]:
-            path = os.path.join('configs', cls._confdir, directory)
+            path = os.path.join("configs", cls._confdir, directory)
             cls.createConfigDir(path)
         super(DNSTapLogUDRTest, cls).generateRecursorConfig(confdir)
 
-    def getFirstDnstap(self):
-        try:
-            data = DNSTapServerParameters.queue.get(True, timeout=2.0)
-        except:
-            data = False
-        self.assertTrue(data)
-        dnstap = dnstap_pb2.Dnstap()
-        dnstap.ParseFromString(data)
-        return dnstap
-
     def testA(self):
-        name = 'types.example.'
-        query = dns.message.make_query(name, 'A', want_dnssec=True)
+        name = "types.example."
+        query = dns.message.make_query(name, "A", want_dnssec=True)
         query.flags |= dns.flags.RD
         res = self.sendUDPQuery(query)
         self.assertNotEqual(res, None)
@@ -423,13 +433,16 @@ dnstapNODFrameStreamServer({"%s"}, {logNODs=false, logUDRs=true})
         # check the dnstap message corresponding to the UDP query
         dnstap = self.getFirstDnstap()
 
-        checkDnstapUDR(self, dnstap, dnstap_pb2.UDP, '127.0.0.1', '127.0.0.1', 5300, name)
+        checkDnstapUDR(self, dnstap, dnstap_pb2.UDP, "127.0.0.1", "127.0.0.1", 5300, name)
         # We don't expect a rpasesponse
         checkDnstapNoExtra(self, dnstap)
+        # We don't expect anything more
+        time.sleep(1)
+        self.assertTrue(DNSTapServerParameters.queue.empty())
+
 
 class DNSTapLogNODUDRTest(TestRecursorDNSTap):
-
-    _confdir = 'DNSTapLogNODUDR'
+    _confdir = "DNSTapLogNODUDR"
     _config_template = """
 new-domain-tracking=yes
 new-domain-history-dir=configs/%s/nod
@@ -443,31 +456,24 @@ dnstapNODFrameStreamServer({"%s"}, {logNODs=true, logUDRs=true})
     @classmethod
     def generateRecursorConfig(cls, confdir):
         for directory in ["nod", "udr"]:
-            path = os.path.join('configs', cls._confdir, directory)
+            path = os.path.join("configs", cls._confdir, directory)
             cls.createConfigDir(path)
         super(DNSTapLogNODUDRTest, cls).generateRecursorConfig(confdir)
 
-    def getFirstDnstap(self):
-        try:
-            data = DNSTapServerParameters.queue.get(True, timeout=2.0)
-        except:
-            data = False
-        self.assertTrue(data)
-        dnstap = dnstap_pb2.Dnstap()
-        dnstap.ParseFromString(data)
-        return dnstap
-
     def testA(self):
-        name = 'types.example.'
-        query = dns.message.make_query(name, 'A', want_dnssec=True)
+        name = "types.example."
+        query = dns.message.make_query(name, "A", want_dnssec=True)
         query.flags |= dns.flags.RD
         res = self.sendUDPQuery(query)
         self.assertNotEqual(res, None)
 
         dnstap = self.getFirstDnstap()
-        checkDnstapUDR(self, dnstap, dnstap_pb2.UDP, '127.0.0.1', '127.0.0.1', 5300, name)
+        checkDnstapUDR(self, dnstap, dnstap_pb2.UDP, "127.0.0.1", "127.0.0.1", 5300, name)
 
         dnstap = self.getFirstDnstap()
-        checkDnstapNOD(self, dnstap, dnstap_pb2.UDP, '127.0.0.1', '127.0.0.1', 5300, name)
+        checkDnstapNOD(self, dnstap, dnstap_pb2.UDP, "127.0.0.1", "127.0.0.1", 5300, name)
 
         checkDnstapNoExtra(self, dnstap)
+        # We don't expect anything more
+        time.sleep(1)
+        self.assertTrue(DNSTapServerParameters.queue.empty())

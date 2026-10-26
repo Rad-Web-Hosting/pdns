@@ -26,7 +26,7 @@
 
 #include "dolog.hh"
 
-void setupLuaBindingsDNSCrypt(LuaContext& luaCtx, bool client)
+void setupLuaBindingsDNSCrypt([[maybe_unused]] LuaContext& luaCtx, [[maybe_unused]] bool client)
 {
 #ifdef HAVE_DNSCRYPT
   /* DNSCryptContext bindings */
@@ -35,14 +35,14 @@ void setupLuaBindingsDNSCrypt(LuaContext& luaCtx, bool client)
   luaCtx.registerFunction("markInactive", &DNSCryptContext::markInactive);
   luaCtx.registerFunction("reloadCertificates", &DNSCryptContext::reloadCertificates);
   luaCtx.registerFunction("removeInactiveCertificate", &DNSCryptContext::removeInactiveCertificate);
-  luaCtx.registerFunction<void (std::shared_ptr<DNSCryptContext>::*)(const std::string& certFile, const std::string& keyFile, boost::optional<bool> active)>("loadNewCertificate", [](std::shared_ptr<DNSCryptContext>& ctx, const std::string& certFile, const std::string& keyFile, boost::optional<bool> active) {
+  luaCtx.registerFunction<void (std::shared_ptr<DNSCryptContext>::*)(const std::string& certFile, const std::string& keyFile, std::optional<bool> active)>("loadNewCertificate", [](std::shared_ptr<DNSCryptContext>& ctx, const std::string& certFile, const std::string& keyFile, std::optional<bool> active) {
     if (ctx == nullptr) {
       throw std::runtime_error("DNSCryptContext::loadNewCertificate() called on a nil value");
     }
 
     ctx->loadNewCertificate(certFile, keyFile, active ? *active : true);
   });
-  luaCtx.registerFunction<void (std::shared_ptr<DNSCryptContext>::*)(const DNSCryptCert& newCert, const DNSCryptPrivateKey& newKey, boost::optional<bool> active)>("addNewCertificate", [](std::shared_ptr<DNSCryptContext>& ctx, const DNSCryptCert& newCert, const DNSCryptPrivateKey& newKey, boost::optional<bool> active) {
+  luaCtx.registerFunction<void (std::shared_ptr<DNSCryptContext>::*)(const DNSCryptCert& newCert, const DNSCryptPrivateKey& newKey, std::optional<bool> active)>("addNewCertificate", [](std::shared_ptr<DNSCryptContext>& ctx, const DNSCryptCert& newCert, const DNSCryptPrivateKey& newKey, std::optional<bool> active) {
     if (ctx == nullptr) {
       throw std::runtime_error("DNSCryptContext::addNewCertificate() called on a nil value");
     }
@@ -62,12 +62,12 @@ void setupLuaBindingsDNSCrypt(LuaContext& luaCtx, bool client)
     return result;
   });
 
-  luaCtx.registerFunction<std::shared_ptr<DNSCryptCertificatePair> (std::shared_ptr<DNSCryptContext>::*)(size_t idx)>("getCertificatePair", [](std::shared_ptr<DNSCryptContext>& ctx, size_t idx) {
+  luaCtx.registerFunction<std::optional<std::shared_ptr<DNSCryptCertificatePair>> (std::shared_ptr<DNSCryptContext>::*)(size_t idx)>("getCertificatePair", [](std::shared_ptr<DNSCryptContext>& ctx, size_t idx) {
     if (ctx == nullptr) {
       throw std::runtime_error("DNSCryptContext::getCertificatePair() called on a nil value");
     }
 
-    std::shared_ptr<DNSCryptCertificatePair> result = nullptr;
+    std::optional<std::shared_ptr<DNSCryptCertificatePair>> result{std::nullopt};
     auto pairs = ctx->getCertificates();
     if (idx < pairs.size()) {
       result = pairs.at(idx);
@@ -108,7 +108,7 @@ void setupLuaBindingsDNSCrypt(LuaContext& luaCtx, bool client)
     return ret.str();
   });
 
-  luaCtx.registerFunction<void (DNSCryptContext::*)(const std::string& providerPrivateKeyFile, uint32_t serial, time_t begin, time_t end, boost::optional<DNSCryptExchangeVersion> version)>("generateAndLoadInMemoryCertificate", [](DNSCryptContext& ctx, const std::string& providerPrivateKeyFile, uint32_t serial, time_t begin, time_t end, boost::optional<DNSCryptExchangeVersion> version) {
+  luaCtx.registerFunction<bool (DNSCryptContext::*)(const std::string& providerPrivateKeyFile, uint32_t serial, time_t begin, time_t end, std::optional<DNSCryptExchangeVersion> version)>("generateAndLoadInMemoryCertificate", [](DNSCryptContext& ctx, const std::string& providerPrivateKeyFile, uint32_t serial, time_t begin, time_t end, std::optional<DNSCryptExchangeVersion> version) -> bool {
     DNSCryptPrivateKey privateKey;
     DNSCryptCert cert;
 
@@ -118,9 +118,12 @@ void setupLuaBindingsDNSCrypt(LuaContext& luaCtx, bool client)
       }
     }
     catch (const std::exception& e) {
-      errlog("Error generating a DNSCrypt certificate: %s", e.what());
+      SLOG(errlog("Error generating a DNSCrypt certificate: %s", e.what()),
+           dnsdist::logging::getTopLogger("lua")->error(Logr::Error, e.what(), "Error generating a DNSCrypt certificate"));
       g_outputBuffer = "Error generating a DNSCrypt certificate: " + string(e.what()) + "\n";
+      return false;
     }
+    return true;
   });
 
   /* DNSCryptCertificatePair */
@@ -166,7 +169,7 @@ void setupLuaBindingsDNSCrypt(LuaContext& luaCtx, bool client)
   luaCtx.registerFunction<uint32_t (DNSCryptCert::*)() const>("getTSStart", [](const DNSCryptCert& cert) { return ntohl(cert.getTSStart()); });
   luaCtx.registerFunction<uint32_t (DNSCryptCert::*)() const>("getTSEnd", [](const DNSCryptCert& cert) { return ntohl(cert.getTSEnd()); });
 
-  luaCtx.writeFunction("generateDNSCryptCertificate", [client](const std::string& providerPrivateKeyFile, const std::string& certificateFile, const std::string& privateKeyFile, uint32_t serial, time_t begin, time_t end, boost::optional<DNSCryptExchangeVersion> version) {
+  luaCtx.writeFunction("generateDNSCryptCertificate", [client](const std::string& providerPrivateKeyFile, const std::string& certificateFile, const std::string& privateKeyFile, uint32_t serial, time_t begin, time_t end, std::optional<DNSCryptExchangeVersion> version) {
     setLuaNoSideEffect();
     if (client) {
       return;
@@ -181,7 +184,8 @@ void setupLuaBindingsDNSCrypt(LuaContext& luaCtx, bool client)
       }
     }
     catch (const std::exception& e) {
-      errlog("Error generating a DNSCrypt certificate: %s", e.what());
+      SLOG(errlog("Error generating a DNSCrypt certificate: %s", e.what()),
+           dnsdist::logging::getTopLogger("lua")->error(Logr::Error, e.what(), "Error generating a DNSCrypt certificate"));
       g_outputBuffer = "Error generating a DNSCrypt certificate: " + string(e.what()) + "\n";
     }
   });
@@ -211,7 +215,8 @@ void setupLuaBindingsDNSCrypt(LuaContext& luaCtx, bool client)
       g_outputBuffer = "Provider fingerprint is: " + DNSCryptContext::getProviderFingerprint(publicKey) + "\n";
     }
     catch (const std::exception& e) {
-      errlog("Error generating a DNSCrypt provider key: %s", e.what());
+      SLOG(errlog("Error generating a DNSCrypt provider key: %s", e.what()),
+           dnsdist::logging::getTopLogger("lua")->error(Logr::Error, e.what(), "Error generating a DNSCrypt provider key"));
       g_outputBuffer = "Error generating a DNSCrypt provider key: " + string(e.what()) + "\n";
     }
 
@@ -236,7 +241,8 @@ void setupLuaBindingsDNSCrypt(LuaContext& luaCtx, bool client)
       g_outputBuffer = "Provider fingerprint is: " + DNSCryptContext::getProviderFingerprint(publicKey) + "\n";
     }
     catch (const std::exception& e) {
-      errlog("Error getting a DNSCrypt provider fingerprint: %s", e.what());
+      SLOG(errlog("Error getting a DNSCrypt provider fingerprint: %s", e.what()),
+           dnsdist::logging::getTopLogger("lua")->error(Logr::Error, e.what(), "Error getting a DNSCrypt provider fingerprint"));
       g_outputBuffer = "Error getting a DNSCrypt provider fingerprint: " + string(e.what()) + "\n";
     }
   });

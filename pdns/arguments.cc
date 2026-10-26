@@ -111,7 +111,7 @@ bool ArgvMap::contains(const string& var, const string& val)
   vector<string> parts;
 
   stringtok(parts, param->second, ", \t");
-  return std::any_of(parts.begin(), parts.end(), [&](const std::string& str) { return str == val; });
+  return std::find(parts.begin(), parts.end(), val) != parts.end();
 }
 
 string ArgvMap::helpstring(string prefix)
@@ -288,27 +288,6 @@ uid_t ArgvMap::asUid(const string& arg)
   return uid;
 }
 
-int ArgvMap::asNum(const string& arg, int def)
-{
-  if (!parmIsset(arg)) {
-    throw ArgException(string("Undefined but needed argument: '") + arg + "'");
-  }
-
-  // use default for empty values
-  if (d_params[arg].empty()) {
-    return def;
-  }
-
-  const auto* cptr_orig = d_params[arg].c_str();
-  char* cptr_ret = nullptr;
-  auto retval = static_cast<int>(strtol(cptr_orig, &cptr_ret, 0));
-  if (retval == 0 && cptr_ret == cptr_orig) {
-    throw ArgException("'" + arg + "' value '" + string(cptr_orig) + string("' is not a valid number"));
-  }
-
-  return retval;
-}
-
 bool ArgvMap::isEmpty(const string& arg)
 {
   if (!parmIsset(arg)) {
@@ -350,15 +329,6 @@ bool ArgvMap::parmIsset(const string& var)
 
 // ATM Shared between Recursor and Auth, is that a good idea?
 static const map<string, string> deprecateList = {
-  {"stats-api-blacklist", "stats-api-disabled-list"},
-  {"stats-carbon-blacklist", "stats-carbon-disabled-list"},
-  {"stats-rec-control-blacklist", "stats-rec-control-disabled-list"},
-  {"stats-snmp-blacklist", "stats-snmp-disabled-list"},
-  {"edns-subnet-whitelist", "edns-subnet-allow-list"},
-  {"new-domain-whitelist", "new-domain-ignore-list"},
-  {"snmp-master-socket", "snmp-daemon-socket"},
-  {"xpf-allow-from", "Proxy Protocol"},
-  {"xpf-rr-code", "Proxy Protocol"},
   {"domain-metadata-cache-ttl", "zone-metadata-cache-ttl"},
 };
 
@@ -433,7 +403,7 @@ void ArgvMap::parseOne(const string& arg, const string& parseOnly, bool lax)
       }
       else {
         d_params[var] = val;
-        d_cleared.insert(var);
+        d_cleared.insert(std::move(var));
       }
     }
     else {
@@ -546,7 +516,7 @@ bool ArgvMap::file(const string& fname, bool lax, bool included)
 
   if (!parseFile(fname, "", lax)) {
     SLOG(g_log << Logger::Warning << "Unable to open " << fname << std::endl,
-         d_log->error(Logr::Warning, "Unable to open file", "name", Logging::Loggable(fname)));
+         d_log->info(Logr::Warning, "Unable to open file", "name", Logging::Loggable(fname)));
     return false;
   }
 
@@ -573,38 +543,7 @@ void ArgvMap::gatherIncludes(const std::string& directory, const std::string& su
     return; // nothing to do
   }
 
-  std::vector<std::string> vec;
-  auto directoryError = pdns::visit_directory(directory, [this, &directory, &suffix, &vec]([[maybe_unused]] ino_t inodeNumber, const std::string_view& name) {
-    (void)this;
-    if (boost::starts_with(name, ".")) {
-      return true; // skip any dots
-    }
-    if (boost::ends_with(name, suffix)) {
-      // build name
-      string fullName = directory + "/" + std::string(name);
-      // ensure it's readable file
-      struct stat statInfo
-      {
-      };
-      if (stat(fullName.c_str(), &statInfo) != 0 || !S_ISREG(statInfo.st_mode)) {
-        string msg = fullName + " is not a regular file";
-        SLOG(g_log << Logger::Error << msg << std::endl,
-             d_log->info(Logr::Error, "Unable to open non-regular file", "name", Logging::Loggable(fullName)));
-        throw ArgException(msg);
-      }
-      vec.emplace_back(fullName);
-    }
-    return true;
-  });
-
-  if (directoryError) {
-    int err = errno;
-    string msg = directory + " is not accessible: " + stringerror(err);
-    SLOG(g_log << Logger::Error << msg << std::endl,
-         d_log->error(Logr::Error, err, "Directory is not accessible", "name", Logging::Loggable(directory)));
-    throw ArgException(msg);
-  }
-
+  std::vector<std::string> vec = pdns::list_directory(directory, suffix, d_log);
   std::sort(vec.begin(), vec.end(), CIStringComparePOSIX());
   extraConfigs.insert(extraConfigs.end(), vec.begin(), vec.end());
 }

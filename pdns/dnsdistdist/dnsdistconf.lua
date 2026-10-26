@@ -70,7 +70,7 @@
 -- addAction(NetmaskGroupRule("192.0.2.0/24"), PoolAction("abuse"))
 
 -- Refuse incoming AXFR, IXFR, NOTIFY and UPDATE
--- Add trusted sources (slaves, masters) explicitely in front of this rule
+-- Add trusted sources (secondaries, primaries) explicitely in front of this rule
 -- addAction(OrRule({OpcodeRule(DNSOpcode.Notify), OpcodeRule(DNSOpcode.Update), QTypeRule(DNSQType.AXFR), QTypeRule(DNSQType.IXFR)}), RCodeAction(DNSRCode.REFUSED))
 
 -- == Dynamic Blocks ==
@@ -80,9 +80,9 @@
 
 -- local dbr = dynBlockRulesGroup()
 -- dbr:setQueryRate(30, 10, "Exceeded query rate", 60)
--- dbr:setRCodeRate(dnsdist.NXDOMAIN, 20, 10, "Exceeded NXD rate", 60)
--- dbr:setRCodeRate(dnsdist.SERVFAIL, 20, 10, "Exceeded ServFail rate", 60)
--- dbr:setQTypeRate(dnsdist.ANY, 5, 10, "Exceeded ANY rate", 60)
+-- dbr:setRCodeRate(DNSRCode.NXDOMAIN, 20, 10, "Exceeded NXD rate", 60)
+-- dbr:setRCodeRate(DNSRCode.SERVFAIL, 20, 10, "Exceeded ServFail rate", 60)
+-- dbr:setQTypeRate(DNSQType.ANY, 5, 10, "Exceeded ANY rate", 60)
 -- dbr:setResponseByteRate(10000, 10, "Exceeded resp BW rate", 60)
 -- function maintenance()
 --  dbr:apply()

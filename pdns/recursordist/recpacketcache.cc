@@ -11,6 +11,7 @@
 #include "rec-taskqueue.hh"
 
 unsigned int RecursorPacketCache::s_refresh_ttlperc{0};
+uint32_t RecursorPacketCache::s_maxEntrySize{8192};
 
 void RecursorPacketCache::setShardSizes(size_t shardSize)
 {
@@ -103,6 +104,25 @@ uint64_t RecursorPacketCache::doWipePacketCache(const DNSName& name, uint16_t qt
   return count;
 }
 
+uint64_t RecursorPacketCache::doWipePacketCache(const std::unordered_set<DNSName>& names)
+{
+  uint64_t count = 0;
+  for (const auto& name : names) {
+    if (name.isWildcard()) {
+      DNSName base{name};
+      if (base.chopOff()) {
+        count += doWipePacketCache(base, 0xffff, true); // will wipe too much but we don't have a proper method atm
+      }
+    }
+    else {
+      count += doWipePacketCache(name, 0xffff, false);
+    }
+  }
+  return count;
+}
+
+static const std::unordered_set<uint16_t> s_skipOptions = {EDNSOptionCode::ECS, EDNSOptionCode::COOKIE, EDNSOptionCode::TRACEPARENT};
+
 bool RecursorPacketCache::qrMatch(const packetCache_t::index<HashTag>::type::iterator& iter, const std::string& queryPacket, const DNSName& qname, uint16_t qtype, uint16_t qclass)
 {
   // this ignores checking on the EDNS subnet flags!
@@ -110,11 +130,10 @@ bool RecursorPacketCache::qrMatch(const packetCache_t::index<HashTag>::type::ite
     return false;
   }
 
-  static const std::unordered_set<uint16_t> optionsToSkip{EDNSOptionCode::COOKIE, EDNSOptionCode::ECS};
-  return queryMatches(iter->d_query, queryPacket, qname, optionsToSkip);
+  return queryMatches(iter->d_query, queryPacket, qname, s_skipOptions);
 }
 
-bool RecursorPacketCache::checkResponseMatches(MapCombo::LockedContent& shard, std::pair<packetCache_t::index<HashTag>::type::iterator, packetCache_t::index<HashTag>::type::iterator> range, const std::string& queryPacket, const DNSName& qname, uint16_t qtype, uint16_t qclass, time_t now, std::string* responsePacket, uint32_t* age, vState* valState, OptPBData* pbdata)
+bool RecursorPacketCache::checkResponseMatches(MapCombo::LockedContent& shard, std::pair<packetCache_t::index<HashTag>::type::iterator, packetCache_t::index<HashTag>::type::iterator> range, const std::string& queryPacket, const DNSName& qname, uint16_t qtype, uint16_t qclass, time_t now, std::string* responsePacket, uint32_t* age, vState* valState, OptPBData* pbdata, ECSInfo& ecsInfo)
 {
   for (auto iter = range.first; iter != range.second; ++iter) {
     // the possibility is VERY real that we get hits that are not right - birthday paradox
@@ -127,7 +146,9 @@ bool RecursorPacketCache::checkResponseMatches(MapCombo::LockedContent& shard, s
       *age = static_cast<uint32_t>(now - iter->d_creation);
       // we know ttl is > 0
       auto ttl = static_cast<uint32_t>(iter->d_ttd - now);
-      if (s_refresh_ttlperc > 0 && !iter->d_submitted && taskQTypeIsSupported(qtype)) {
+      // Be wary of refreshing NS records, it could lead to ghosts if the record cache entry expires between
+      // sending out the request and the reply coming back in, as then the TTL capping does not work.
+      if (s_refresh_ttlperc > 0 && !iter->d_submitted && taskQTypeIsSupported(qtype) && qtype != QType::NS) {
         const dnsheader_aligned header(iter->d_packet.data());
         const auto* headerPtr = header.get();
         if (headerPtr->rcode == RCode::NoError) {
@@ -156,10 +177,10 @@ bool RecursorPacketCache::checkResponseMatches(MapCombo::LockedContent& shard, s
           *pbdata = iter->d_pbdata;
         }
         else {
-          *pbdata = boost::none;
+          *pbdata = std::nullopt;
         }
       }
-
+      ecsInfo = iter->d_ecsInfo;
       return true;
     }
     // We used to move the item to the front of "the to be deleted" sequence,
@@ -171,10 +192,8 @@ bool RecursorPacketCache::checkResponseMatches(MapCombo::LockedContent& shard, s
   return false;
 }
 
-static const std::unordered_set<uint16_t> s_skipOptions = {EDNSOptionCode::ECS, EDNSOptionCode::COOKIE};
-
 bool RecursorPacketCache::getResponsePacket(unsigned int tag, const std::string& queryPacket, const DNSName& qname, uint16_t qtype, uint16_t qclass, time_t now,
-                                            std::string* responsePacket, uint32_t* age, vState* valState, uint32_t* qhash, OptPBData* pbdata, bool tcp)
+                                            std::string* responsePacket, uint32_t* age, vState* valState, uint32_t* qhash, OptPBData* pbdata, bool tcp, ECSInfo& ecsInfo)
 {
   *qhash = canHashPacket(queryPacket, s_skipOptions);
   auto& map = getMap(tag, *qhash, tcp);
@@ -187,11 +206,11 @@ bool RecursorPacketCache::getResponsePacket(unsigned int tag, const std::string&
     return false;
   }
 
-  return checkResponseMatches(*shard, range, queryPacket, qname, qtype, qclass, now, responsePacket, age, valState, pbdata);
+  return checkResponseMatches(*shard, range, queryPacket, qname, qtype, qclass, now, responsePacket, age, valState, pbdata, ecsInfo);
 }
 
 bool RecursorPacketCache::getResponsePacket(unsigned int tag, const std::string& queryPacket, DNSName& qname, uint16_t* qtype, uint16_t* qclass, time_t now,
-                                            std::string* responsePacket, uint32_t* age, vState* valState, uint32_t* qhash, OptPBData* pbdata, bool tcp)
+                                            std::string* responsePacket, uint32_t* age, vState* valState, uint32_t* qhash, OptPBData* pbdata, bool tcp, ECSInfo& ecsInfo)
 {
   *qhash = canHashPacket(queryPacket, s_skipOptions);
   auto& map = getMap(tag, *qhash, tcp);
@@ -206,10 +225,10 @@ bool RecursorPacketCache::getResponsePacket(unsigned int tag, const std::string&
 
   qname = DNSName(queryPacket.c_str(), static_cast<int>(queryPacket.length()), sizeof(dnsheader), false, qtype, qclass);
 
-  return checkResponseMatches(*shard, range, queryPacket, qname, *qtype, *qclass, now, responsePacket, age, valState, pbdata);
+  return checkResponseMatches(*shard, range, queryPacket, qname, *qtype, *qclass, now, responsePacket, age, valState, pbdata, ecsInfo);
 }
 
-void RecursorPacketCache::insertResponsePacket(unsigned int tag, uint32_t qhash, std::string&& query, const DNSName& qname, uint16_t qtype, uint16_t qclass, std::string&& responsePacket, time_t now, uint32_t ttl, const vState& valState, OptPBData&& pbdata, bool tcp)
+void RecursorPacketCache::insertResponsePacket(unsigned int tag, uint32_t qhash, std::string&& query, const DNSName& qname, uint16_t qtype, uint16_t qclass, std::string&& responsePacket, time_t now, uint32_t ttl, vState valState, OptPBData&& pbdata, bool tcp, ECSInfo ecsInfo)
 {
   auto& map = getMap(tag, qhash, tcp);
   auto shard = map.lock();
@@ -232,11 +251,11 @@ void RecursorPacketCache::insertResponsePacket(unsigned int tag, uint32_t qhash,
     if (pbdata) {
       iter->d_pbdata = std::move(*pbdata);
     }
-
+    iter->d_ecsInfo = ecsInfo;
     return;
   }
 
-  struct Entry entry(DNSName(qname), qtype, qclass, std::move(responsePacket), std::move(query), tcp, qhash, now + ttl, now, tag, valState);
+  struct Entry entry(DNSName(qname), qtype, qclass, std::move(responsePacket), std::move(query), tcp, qhash, now + ttl, now, tag, valState, ecsInfo);
   if (pbdata) {
     entry.d_pbdata = std::move(*pbdata);
   }

@@ -287,8 +287,8 @@ void Nonce::increment()
 {
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
   auto* ptr = reinterpret_cast<uint32_t*>(value.data());
-  uint32_t count = htonl(*ptr);
-  *ptr = ntohl(++count);
+  uint32_t count = htonl(*ptr) + 1;
+  *ptr = ntohl(count);
 }
 
 #else
@@ -296,7 +296,7 @@ void Nonce::init()
 {
 }
 
-void Nonce::merge(const Nonce& lower, const Nonce& higher)
+void Nonce::merge(const Nonce&, const Nonce&)
 {
 }
 
@@ -304,21 +304,21 @@ void Nonce::increment()
 {
 }
 
-std::string encryptSym(const std::string_view& msg, const std::string& key, Nonce& nonce, bool incrementNonce)
+std::string encryptSym(const std::string_view& msg, const std::string&, Nonce&, bool)
 {
   return std::string(msg);
 }
-std::string decryptSym(const std::string_view& msg, const std::string& key, Nonce& nonce, bool incrementNonce)
+std::string decryptSym(const std::string_view& msg, const std::string&, Nonce&, bool)
 {
   return std::string(msg);
 }
 
-string newKey(bool base64Encoded)
+string newKey(bool)
 {
   return "\"plaintext\"";
 }
 
-bool isValidKey(const std::string& key)
+bool isValidKey(const std::string&)
 {
   return true;
 }
@@ -452,6 +452,9 @@ int B64Decode(const std::string& strInput, Container& strOutput)
         }
         while (isspace(strInput.at(iInNum))) {
           iInNum++;
+          if (iInNum >= iInSize) {
+            return -1;
+          }
         }
         cChar = B64Decode1(strInput.at(iInNum++));
 
@@ -509,6 +512,9 @@ int B64Decode(const std::string& strInput, Container& strOutput)
 #endif
   } // while
   if (pad) {
+    if (pad > strOutput.size()) {
+      return -1; // padding-only (or otherwise invalid) Base64
+    }
     strOutput.resize(strOutput.size() - pad);
   }
 

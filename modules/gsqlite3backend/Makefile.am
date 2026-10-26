@@ -4,7 +4,8 @@ AM_CPPFLAGS += $(LIBCRYPTO_INCLUDES)
 
 EXTRA_DIST = \
 	OBJECTFILES \
-	OBJECTLIBS
+	OBJECTLIBS \
+	meson.build
 
 dist_doc_DATA = \
 	dnssec-3.x_to_3.4.0_schema.sqlite3.sql \
@@ -18,4 +19,8 @@ dist_doc_DATA = \
 
 libgsqlite3backend_la_SOURCES = gsqlite3backend.cc gsqlite3backend.hh
 
+if GSQLITE3BACKEND_DYNMODULE
 libgsqlite3backend_la_LDFLAGS = -module -avoid-version
+else
+libgsqlite3backend_la_LDFLAGS = -static -avoid-version
+endif

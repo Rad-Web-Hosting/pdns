@@ -3,17 +3,17 @@ import threading
 import socket
 import sys
 import time
-import os
 from queue import Queue
 
 from recursortests import RecursorTest
 
+
 class CarbonTest(RecursorTest):
-    _confdir = 'Carbon'
-    _carbonNamespace = 'NS'
-    _carbonInstance = 'Instance'
+    _confdir = "Carbon"
+    _carbonNamespace = "NS"
+    _carbonInstance = "Instance"
     _carbonServerName = "carbonname1"
-    _carbonInterval = 2
+    _carbonInterval = 1
     _carbonServer1Port = 8000
     _carbonServer2Port = 8001
     _carbonQueue1 = Queue()
@@ -25,23 +25,14 @@ class CarbonTest(RecursorTest):
     carbon-interval=%s
     carbon-ourname=%s
     carbon-server=127.0.0.1:%s,127.0.01:%s
-    """ % (_carbonNamespace, _carbonInstance, _carbonInterval, _carbonServerName, _carbonServer1Port,  _carbonServer2Port)
-    @classmethod
-    def setUpClass(cls):
-
-        # we don't need all the auth stuff
-        cls.setUpSockets()
-        cls.startResponders()
-
-        confdir = os.path.join('configs', cls._confdir)
-        cls.createConfigDir(confdir)
-
-        cls.generateRecursorConfig(confdir)
-        cls.startRecursor(confdir, cls._recursorPort)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.tearDownRecursor()
+    """ % (
+        _carbonNamespace,
+        _carbonInstance,
+        _carbonInterval,
+        _carbonServerName,
+        _carbonServer1Port,
+        _carbonServer2Port,
+    )
 
     @classmethod
     def CarbonResponder(cls, port):
@@ -57,7 +48,7 @@ class CarbonTest(RecursorTest):
         while True:
             (conn, _) = sock.accept()
             conn.settimeout(2.0)
-            lines = b''
+            lines = b""
             while True:
                 data = conn.recv(4096)
                 if not data:
@@ -74,15 +65,18 @@ class CarbonTest(RecursorTest):
                 cls._carbonCounters[threading.current_thread().name] = 1
 
             conn.close()
-        sock.close()
 
     @classmethod
     def startResponders(cls):
-        cls._CarbonResponder1 = threading.Thread(name='Carbon Responder 1', target=cls.CarbonResponder, args=[cls._carbonServer1Port])
+        cls._CarbonResponder1 = threading.Thread(
+            name="Carbon Responder 1", target=cls.CarbonResponder, args=[cls._carbonServer1Port]
+        )
         cls._CarbonResponder1.daemon = True
         cls._CarbonResponder1.start()
 
-        cls._CarbonResponder2 = threading.Thread(name='Carbon Responder 2', target=cls.CarbonResponder, args=[cls._carbonServer2Port])
+        cls._CarbonResponder2 = threading.Thread(
+            name="Carbon Responder 2", target=cls.CarbonResponder, args=[cls._carbonServer2Port]
+        )
         cls._CarbonResponder2.daemon = True
         cls._CarbonResponder2.start()
 
@@ -103,29 +97,36 @@ class CarbonTest(RecursorTest):
         after = time.time()
 
         self.assertTrue(data1)
-        self.assertTrue(len(data1.splitlines()) > 1)
-        expectedStart = b"%s.%s.%s." % (self._carbonNamespace.encode('UTF8'), self._carbonServerName.encode('UTF-8'), self._carbonInstance.encode('UTF8'))
+        self.assertGreater(len(data1.splitlines()), 1)
+        expectedStart = b"%s.%s.%s." % (
+            self._carbonNamespace.encode("UTF8"),
+            self._carbonServerName.encode("UTF-8"),
+            self._carbonInstance.encode("UTF8"),
+        )
         for line in data1.splitlines():
             self.assertTrue(line.startswith(expectedStart))
-            parts = line.split(b' ')
+            parts = line.split(b" ")
             self.assertEqual(len(parts), 3)
             self.assertTrue(parts[1].isdigit())
             self.assertTrue(parts[2].isdigit())
-            self.assertTrue(int(parts[2]) <= int(after))
+            self.assertLessEqual(int(parts[2]), int(after))
 
         self.assertTrue(data2)
-        self.assertTrue(len(data2.splitlines()) > 1)
-        expectedStart = b"%s.%s.%s." % (self._carbonNamespace.encode('UTF8'), self._carbonServerName.encode('UTF-8'), self._carbonInstance.encode('UTF8'))
+        self.assertGreater(len(data2.splitlines()), 1)
+        expectedStart = b"%s.%s.%s." % (
+            self._carbonNamespace.encode("UTF8"),
+            self._carbonServerName.encode("UTF-8"),
+            self._carbonInstance.encode("UTF8"),
+        )
         for line in data2.splitlines():
             self.assertTrue(line.startswith(expectedStart))
-            parts = line.split(b' ')
+            parts = line.split(b" ")
             self.assertEqual(len(parts), 3)
             self.assertTrue(parts[1].isdigit())
             self.assertTrue(parts[2].isdigit())
-            self.assertTrue(int(parts[2]) <= int(after))
+            self.assertLessEqual(int(parts[2]), int(after))
 
         # make sure every carbon server has received at least one connection
         for key in self._carbonCounters:
             value = self._carbonCounters[key]
-            self.assertTrue(value >= 1)
-
+            self.assertGreaterEqual(value, 1)

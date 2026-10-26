@@ -20,6 +20,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #pragma once
+
 #include <set>
 #include <boost/variant.hpp>
 
@@ -28,23 +29,35 @@
 #include "filterpo.hh"
 #include "validate.hh"
 #include "rec-zonetocache.hh"
-#include "logging.hh"
-#include "fstrm_logger.hh"
 #include "rpzloader.hh"
 
 struct ProtobufExportConfig
 {
+  enum class Strategy : uint8_t
+  {
+    All,
+    RoundRobin,
+    FirstAvailable,
+    Hashed,
+  };
+  static const std::array<std::string, 4> strategyNames;
+  static Strategy strategyFromString(const std::string& str);
+  static std::string toString(Strategy strategy);
+
   std::set<uint16_t> exportTypes = {QType::A, QType::AAAA, QType::CNAME};
   std::vector<ComboAddress> servers;
   uint64_t maxQueuedEntries{100};
+  uint64_t stalledWriteTimeout{5};
   uint16_t timeout{2};
   uint16_t reconnectWaitTime{1};
+  Strategy strategy{Strategy::All};
   bool asyncConnect{false};
   bool enabled{false};
   bool logQueries{true};
   bool logResponses{true};
   bool taggedOnly{false};
   bool logMappedFrom{false};
+  bool frame4{false};
 };
 
 bool operator==(const ProtobufExportConfig& configA, const ProtobufExportConfig& configB);
@@ -93,11 +106,22 @@ struct ProxyMappingCounts
 struct ProxyByTableValue
 {
   ComboAddress address;
-  boost::optional<SuffixMatchNode> suffixMatchNode;
+  std::optional<SuffixMatchNode> suffixMatchNode;
   mutable ProxyMappingCounts stats{};
 };
 
 using ProxyMapping = NetmaskTree<ProxyByTableValue, Netmask>;
+
+struct OpenTelemetryTraceCondition
+{
+  std::optional<SuffixMatchNode> d_qnames;
+  std::optional<std::unordered_set<QType>> d_qtypes;
+  std::optional<uint16_t> d_qid;
+  bool d_edns_option_required{false};
+  bool d_traceid_only{false};
+};
+
+using OpenTelemetryTraceConditions = NetmaskTree<OpenTelemetryTraceCondition>;
 
 using rpzOptions_t = std::unordered_map<std::string, boost::variant<bool, uint32_t, std::string, std::vector<std::pair<int, std::string>>>>;
 
@@ -108,6 +132,7 @@ public:
   SortList sortlist;
   DNSFilterEngine dfe;
   vector<RPZTrackerParams> rpzs;
+  vector<FWCatalogZone> catalogzones;
   TrustAnchorFileInfo trustAnchorFileInfo; // Used to update the Trust Anchors from file periodically
   map<DNSName, dsset_t> dsAnchors;
   map<DNSName, std::string> negAnchors;
@@ -117,6 +142,7 @@ public:
   ProtobufExportConfig outgoingProtobufExportConfig;
   FrameStreamExportConfig frameStreamExportConfig;
   FrameStreamExportConfig nodFrameStreamExportConfig;
+  std::vector<std::pair<DNSName, QType>> keepWarm;
   std::shared_ptr<Logr::Logger> d_slog;
   /* we need to increment this every time the configuration
      is reloaded, so we know if we need to reload the protobuf

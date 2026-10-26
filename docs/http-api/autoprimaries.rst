@@ -6,16 +6,16 @@ This API is used to manage :ref:`autoprimaries <autoprimary-operation>`.
 Autoprimary endpoints
 ---------------------
 
-.. openapi:: swagger/authoritative-api-swagger.yaml
+.. openapi:: openapi/authoritative-api-openapi.yaml
   :paths: /servers/{server_id}/autoprimaries /servers/{server_id}/autoprimaries/{ip}/{nameserver}
+  :examples:
 
 Objects
 -------
 
 An autoprimary object represents a single autoprimary server.
 
-.. openapi:: swagger/authoritative-api-swagger.yaml
-  :definitions: Autoprimary
+.. json:schema:: Autoprimary
 
 Examples
 --------

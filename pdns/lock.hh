@@ -65,7 +65,7 @@
 
   - ReadLock, WriteLock, TryReadLock and TryWriteLock are there as RAII
   objects allowing to take a lock and be sure that it will always be unlocked
-  when we exit the block, even with a unforeseen exception.
+  when we exit the block, even with an unforeseen exception.
   They are light wrappers around std::unique_lock and std::shared_lock
   since C++17.
 
@@ -248,7 +248,7 @@ public:
   }
 
 private:
-  std::lock_guard<std::mutex> d_lock;
+  std::scoped_lock<std::mutex> d_lock;
   T& d_value;
 };
 
@@ -353,7 +353,7 @@ public:
   }
 
 private:
-  std::lock_guard<std::recursive_mutex> d_lock;
+  std::scoped_lock<std::recursive_mutex> d_lock;
   T& d_value;
 };
 
@@ -458,7 +458,7 @@ public:
   }
 
 private:
-  std::lock_guard<std::shared_mutex> d_lock;
+  std::scoped_lock<std::shared_mutex> d_lock;
   T& d_value;
 };
 

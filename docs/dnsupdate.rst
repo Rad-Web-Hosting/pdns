@@ -2,12 +2,7 @@ Dynamic DNS Update (RFC 2136)
 =============================
 
 Starting with the PowerDNS Authoritative Server 3.4.0, DNS update
-support is available. There are a number of items NOT supported:
-
--  There is no support for SIG (TSIG and GSS\*TSIG are supported);
--  WKS records are specifically mentioned in the RFC, we don't
-   specifically care about WKS records;
--  Anything we forgot....
+support is available.
 
 The implementation requires the backend to support a number of new
 operations. Currently, the following backends have been modified to
@@ -17,14 +12,15 @@ support DNS update:
 - :doc:`gpgsql <backends/generic-postgresql>`
 - :doc:`gsqlite3 <backends/generic-sqlite3>`
 - :doc:`godbc <backends/generic-odbc>`
+- :doc:`lmdb <backends/lmdb>` (from version 5.0.0 onwards)
 
 .. _dnsupdate-configuration-options:
 
 Configuration options
 ---------------------
 
-There are two configuration parameters that can be used within the
-powerdns configuration file.
+There are several configuration parameters that can be used within the
+powerdns configuration file to influence DNS update behavior.
 
 ``dnsupdate``
 ~~~~~~~~~~~~~
@@ -46,6 +42,20 @@ combination with the ``ALLOW-DNSUPDATE-FROM`` :doc:`domain metadata <domainmetad
 zone. Setting a range here and in ``ALLOW-DNSUPDATE-FROM`` enables updates
 from either address range.
 
+The semantics are that first a dynamic update has to be allowed either
+by the global :ref:`setting-allow-dnsupdate-from` setting, or by a per-zone
+``ALLOW-DNSUPDATE-FROM`` metadata setting.
+
+Secondly, if a zone has a ``TSIG-ALLOW-DNSUPDATE`` metadata setting, that
+must match too.
+
+So to only allow dynamic DNS updates to a zone based on TSIG key, and
+regardless of IP address, set :ref:`setting-allow-dnsupdate-from` to empty, set
+``ALLOW-DNSUPDATE-FROM`` to "0.0.0.0/0" and "::/0" and set the
+``TSIG-ALLOW-DNSUPDATE`` to the proper key name.
+
+Further information can be found :ref:`below <dnsupdate-how-it-works>`.
+
 ``dnsupdate-require-tsig``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -58,8 +68,8 @@ unauthenticated agents operating from an allowed address range.
 ``forward-dnsupdate``
 ~~~~~~~~~~~~~~~~~~~~~
 
-Tell PowerDNS to forward to the master server if the zone is configured
-as slave. Masters are determined by the masters field in the domains
+Tell PowerDNS to forward to the primary server if the zone is configured
+as secondary. Primaries are determined by the masters field in the domains
 table. The default behaviour is enabled (yes), which means that it will
 try to forward. In the processing of the update packet, the
 ``allow-dnsupdate-from`` and ``TSIG-ALLOW-DNSUPDATE`` are processed
@@ -77,20 +87,6 @@ each update. This will ``TURN OFF`` all other
 authorization methods, and you are expected to take care of everything
 yourself. See :ref:`dnsupdate-update-policy` for details and
 examples.
-
-The semantics are that first a dynamic update has to be allowed either
-by the global :ref:`setting-allow-dnsupdate-from` setting, or by a per-zone
-``ALLOW-DNSUPDATE-FROM`` metadata setting.
-
-Secondly, if a zone has a ``TSIG-ALLOW-DNSUPDATE`` metadata setting, that
-must match too.
-
-So to only allow dynamic DNS updates to a zone based on TSIG key, and
-regardless of IP address, set :ref:`setting-allow-dnsupdate-from` to empty, set
-``ALLOW-DNSUPDATE-FROM`` to "0.0.0.0/0" and "::/0" and set the
-``TSIG-ALLOW-DNSUPDATE`` to the proper key name.
-
-Further information can be found :ref:`below <dnsupdate-how-it-works>`.
 
 .. _dnsupdate-metadata:
 
@@ -110,6 +106,10 @@ options (See :ref:`above <dnsupdate-configuration-options>`).
 This will allow 198.51.100.0/8 and 203.0.113.2/32 to send DNS update
 messages for the example.org domain::
 
+    pdnsutil metadata set example.org ALLOW-DNSUPDATE-FROM 198.51.100.0/8 203.0.113.2/32
+
+or, prior to version 5.0::
+
     pdnsutil set-meta example.org ALLOW-DNSUPDATE-FROM 198.51.100.0/8 203.0.113.2/32
 
 .. _metadata-tsig-allow-dnsupdate:
@@ -122,6 +122,14 @@ update. If you have GSS-TSIG enabled, you can use Kerberos principals
 here. Here is an example using :program:`pdnsutil` to create a key named
 `test`::
 
+    $ pdnsutil tsigkey generate test hmac-sha512
+    Create new TSIG key test hmac-sha512 [base64-encoded key]
+
+    $ pdnsutil tsigkey list | grep test
+    test. hmac-sha512. [base64-encoded key]
+
+or, prior to version 5.0::
+
     $ pdnsutil generate-tsig-key test hmac-sha512
     Create new TSIG key test hmac-sha512 [base64-encoded key]
 
@@ -129,8 +137,15 @@ here. Here is an example using :program:`pdnsutil` to create a key named
     test. hmac-sha512. [base64-encoded key]
 
 This adds the key with the name `test` to the zone's metadata. Note, the
-keys need to be added separately with `add-meta`, not as a comma or
-space-separated list::
+keys need to be added separately, not as a comma or space-separated list::
+
+    $ pdnsutil metadata add example.org TSIG-ALLOW-DNSUPDATE test
+    Set 'example.org' meta TSIG-ALLOW-DNSUPDATE = test
+
+    $ pdnsutil metadata get example.org TSIG-ALLOW-DNSUPDATE
+    TSIG-ALLOW-DNSUPDATE = test
+
+or, prior to version 5.0::
 
     $ pdnsutil add-meta example.org TSIG-ALLOW-DNSUPDATE test
     Set 'example.org' meta TSIG-ALLOW-DNSUPDATE = test
@@ -171,6 +186,10 @@ FORWARD-DNSUPDATE
 See :ref:`Configuration options <dnsupdate-configuration-options>` for what it does,
 but per domain::
 
+    pdnsutil metadata set example.org FORWARD-DNSUPDATE 'yes'
+
+or, prior to version 5.0::
+
     pdnsutil set-meta example.org FORWARD-DNSUPDATE 'yes'
 
 The existence of the entry (even with an empty value) enables the forwarding.
@@ -184,9 +203,13 @@ per domain.
 NOTIFY-DNSUPDATE
 ~~~~~~~~~~~~~~~~
 
-Send a notification to all slave servers after every update. This will
+Send a notification to all secondary servers after every update. This will
 speed up the propagation of changes and is very useful for acme
 verification::
+
+    pdnsutil metadata set example.org NOTIFY-DNSUPDATE 1
+
+or, prior to version 5.0::
 
     pdnsutil set-meta example.org NOTIFY-DNSUPDATE 1
 
@@ -218,6 +241,10 @@ logic to change the SOA is not executed.
   might have an unexpected result due to a SOA-EDIT setting.
 
 An example::
+
+    pdnsutil metadata set example.org SOA-EDIT-DNSUPDATE INCREASE
+
+or, prior to version 5.0::
 
     pdnsutil set-meta example.org SOA-EDIT-DNSUPDATE INCREASE
 
@@ -275,9 +302,9 @@ Kdhcpdupdate.*.private). You're interested in the .key file:
     dhcpdupdate. IN KEY 0 3 157 FYhvwsW1ZtFZqWzsMpqhbg==
 
 The important bits are the name of the key (**dhcpdupdate**) and the
-hash of the key (**FYhvwsW1ZtFZqWzsMpqhbg==**
+hash of the key (**FYhvwsW1ZtFZqWzsMpqhbg==**)
 
-Using the details from the key you've just generated. Add the following
+Using the details from the freshly generated key, add the following
 to your dhcpd.conf:
 
 ::
@@ -305,7 +332,7 @@ This tells dhcpd to:
 For more information on this, consult the dhcpd.conf manual.
 
 Per subnet, you also have to tell **dhcpd** which (reverse-)domain it
-should update and on which master domain server it is running.
+should update and on which primary domain server it is running.
 
 ::
 
@@ -338,10 +365,10 @@ configuration file.
 Setting up PowerDNS
 ~~~~~~~~~~~~~~~~~~~
 
-A number of small changes are needed to powerdns to make it accept
+A number of small changes are needed to PowerDNS to make it accept
 dynamic updates from **dhcpd**.
 
-Enabled DNS update (:rfc:`2136`) support functionality in PowerDNS by adding
+Enable DNS update (:rfc:`2136`) support functionality in PowerDNS by adding
 the following to the PowerDNS configuration file (pdns.conf).
 
 .. code-block:: ini
@@ -351,16 +378,23 @@ the following to the PowerDNS configuration file (pdns.conf).
 
 This tells PowerDNS to:
 
-1. Enable DNS update support(:ref:`setting-dnsupdate`)
+1. Enable DNS update support (:ref:`setting-dnsupdate`)
 2. Allow updates from NO ip-address (":ref:`setting-allow-dnsupdate-from`\ =")
 
-We just told powerdns (via the configuration file) that we accept
+We just told PowerDNS (via the configuration file) that we accept
 updates from nobody via the :ref:`setting-allow-dnsupdate-from`
 parameter. That's not very useful, so we're going to give permissions
 per zone (including the appropriate reverse zone), via the
 domainmetadata table.
 
-::
+.. code-block:: shell
+
+    pdnsutil metadata set example.org ALLOW-DNSUPDATE-FROM 127.0.0.1
+    pdnsutil metadata set 1.168.192.in-addr.arpa ALLOW-DNSUPDATE-FROM 127.0.0.1
+
+or, prior to version 5.0:
+
+.. code-block:: shell
 
     pdnsutil set-meta example.org ALLOW-DNSUPDATE-FROM 127.0.0.1
     pdnsutil set-meta 1.168.192.in-addr.arpa ALLOW-DNSUPDATE-FROM 127.0.0.1
@@ -371,7 +405,15 @@ you use the ip address of the machine that runs **dhcpd**.
 Another thing we want to do, is add TSIG security. This can only be done
 via the domainmetadata table:
 
-::
+.. code-block:: shell
+
+    pdnsutil tsigkey import dhcpdupdate hmac-md5 FYhvwsW1ZtFZqWzsMpqhbg==
+    pdnsutil metadata set example.org TSIG-ALLOW-DNSUPDATE dhcpdupdate
+    pdnsutil metadata set 1.168.192.in-addr.arpa TSIG-ALLOW-DNSUPDATE dhcpdupdate
+
+or, prior to version 5.0:
+
+.. code-block:: shell
 
     pdnsutil import-tsig-key dhcpdupdate hmac-md5 FYhvwsW1ZtFZqWzsMpqhbg==
     pdnsutil set-meta example.org TSIG-ALLOW-DNSUPDATE dhcpdupdate
@@ -409,19 +451,19 @@ PowerDNS.
     send. The TSIG-ALLOW-DNSUPDATE domainmetadata setting is used to
     find which key belongs to the domain.
 7.  The backends are queried to find the backend for the given domain.
-8.  If the domain is a slave domain, the **forward-dnsupdate** option
-    and domainmetadata settings are checked. If forwarding to a master
-    is enabled, the message is forward to the master. If that fails, the
-    next master is tried until all masters are tried. If all masters
-    fail, ServFail is returned. If a master succeeds, the result from
-    that master is returned.
+8.  If the domain is a secondary domain, the **forward-dnsupdate** option
+    and domainmetadata settings are checked. If forwarding to a primary
+    is enabled, the message is forward to the primary. If that fails, the
+    next primary is tried until all primaries are tried. If all primaries
+    fail, ServFail is returned. If a primary succeeds, the result from
+    that primary is returned.
 9.  A check is performed to make sure all updates/prerequisites are for
     the given zone. NotZone is returned if this is not the case.
 10. The transaction with the backend is started.
 11. The prerequisite checks are performed (section 3.2 of :rfc:`2136 <2136#section-3.2>`). If a
     check fails, the corresponding RCode is returned. No further
     processing will happen.
-12. Per record in the update message, a the prescan checks are
+12. Per record in the update message, the prescan checks are
     performed. If the prescan fails, the corresponding RCode is
     returned. If the prescan for the record is correct, the actual
     update/delete/modify of the record is performed. If the update fails
@@ -445,7 +487,7 @@ You can define a Lua script to handle DNS UPDATE message
 authorization. The Lua script is to contain at least function called
 ``updatepolicy`` which accepts one parameter. This parameter is an
 object, containing all the information for the request. To permit
-change, return true, otherwise return false. The script is called for
+change, return true; otherwise, return false. The script is called for
 each record at a time and you can approve or reject any or all.
 
 The object has following methods available:

@@ -21,8 +21,9 @@
  */
 #include "dns.hh"
 #include "ednsoptions.hh"
-#include "iputils.hh"
+#include "dnsparser.hh"
 
+// NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast,cppcoreguidelines-pro-bounds-pointer-arithmetic)
 bool getNextEDNSOption(const char* data, size_t dataLen, uint16_t& optionCode, uint16_t& optionLen)
 {
   if (data == nullptr || dataLen < (sizeof(uint16_t) + sizeof(uint16_t))) {
@@ -30,20 +31,20 @@ bool getNextEDNSOption(const char* data, size_t dataLen, uint16_t& optionCode, u
   }
 
   size_t pos = 0;
-  const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
+  const auto* ptr = reinterpret_cast<const uint8_t*>(data);
 
-  optionCode = (static_cast<uint16_t>(p[pos]) * 256) + p[pos + 1];
+  optionCode = (static_cast<uint16_t>(ptr[pos]) * 256) + ptr[pos + 1];
   pos += EDNS_OPTION_CODE_SIZE;
 
-  optionLen = (static_cast<uint16_t>(p[pos]) * 256) + p[pos + 1];
+  optionLen = (static_cast<uint16_t>(ptr[pos]) * 256) + ptr[pos + 1];
   pos += EDNS_OPTION_LENGTH_SIZE;
-  (void) pos;
+  (void)pos;
 
   return true;
 }
 
 /* extract the position (relative to the optRR pointer!) and size of a specific EDNS0 option from a pointer on the beginning rdLen of the OPT RR */
-int getEDNSOption(const char* optRR, const size_t len, uint16_t wantedOption, size_t* optionValuePosition, size_t * optionValueSize)
+int getEDNSOption(const char* optRR, const size_t len, uint16_t wantedOption, size_t* optionValuePosition, size_t* optionValueSize)
 {
   if (optRR == nullptr || optionValuePosition == nullptr || optionValueSize == nullptr) {
     return EINVAL;
@@ -54,18 +55,17 @@ int getEDNSOption(const char* optRR, const size_t len, uint16_t wantedOption, si
     return EINVAL;
   }
 
-  const uint16_t rdLen = (((unsigned char) optRR[pos]) * 256) + ((unsigned char) optRR[pos+1]);
+  const uint16_t rdLen = (((unsigned char)optRR[pos]) * 256) + ((unsigned char)optRR[pos + 1]);
   size_t rdPos = 0;
   pos += DNS_RDLENGTH_SIZE;
   if ((pos + rdLen) > len) {
     return EINVAL;
   }
 
-  while(len >= (pos + EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE) &&
-        rdLen >= (rdPos + EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE)) {
-    uint16_t optionCode;
-    uint16_t optionLen;
-    if (!getNextEDNSOption(optRR + pos, len-pos, optionCode, optionLen)) {
+  while (len >= (pos + EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE) && rdLen >= (rdPos + EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE)) {
+    uint16_t optionCode{};
+    uint16_t optionLen{};
+    if (!getNextEDNSOption(optRR + pos, len - pos, optionCode, optionLen)) {
       break;
     }
 
@@ -83,14 +83,76 @@ int getEDNSOption(const char* optRR, const size_t len, uint16_t wantedOption, si
       *optionValueSize = optionLen + EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE;
       return 0;
     }
-    else {
-      /* skip this option */
-      pos += optionLen;
-      rdPos += optionLen;
-    }
+    /* skip this option */
+    pos += optionLen;
+    rdPos += optionLen;
   }
 
   return ENOENT;
+}
+
+bool slowParseEDNSOptions(const PacketBuffer& packet, EDNSOptionViewMap& options)
+{
+  if (packet.size() < sizeof(dnsheader)) {
+    return false;
+  }
+
+  const dnsheader_aligned dnsHeader(packet.data());
+
+  if (ntohs(dnsHeader->qdcount) == 0) {
+    return false;
+  }
+
+  if (ntohs(dnsHeader->arcount) == 0) {
+    return false;
+  }
+
+  try {
+    uint64_t numrecords = ntohs(dnsHeader->ancount) + ntohs(dnsHeader->nscount) + ntohs(dnsHeader->arcount);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,cppcoreguidelines-pro-type-const-cast)
+    DNSPacketMangler dpm(const_cast<char*>(reinterpret_cast<const char*>(packet.data())), packet.size());
+    uint64_t index{};
+    for (index = 0; index < ntohs(dnsHeader->qdcount); ++index) {
+      dpm.skipDomainName();
+      /* type and class */
+      dpm.skipBytes(4);
+    }
+
+    for (index = 0; index < numrecords; ++index) {
+      const bool wasRoot = dpm.skipDomainName();
+
+      uint8_t section{};
+      if (index < ntohs(dnsHeader->ancount)) {
+        section = 1;
+      }
+      else if (index < ntohs(dnsHeader->ancount) + ntohs(dnsHeader->nscount)) {
+        section = 2;
+      }
+      else {
+        section = 3;
+      }
+      uint16_t dnstype = dpm.get16BitInt();
+      dpm.get16BitInt();
+      dpm.skipBytes(4); /* TTL */
+
+      if (section == 3 && dnstype == QType::OPT && wasRoot) {
+        uint32_t offset = dpm.getOffset();
+        if (offset >= packet.size()) {
+          return false;
+        }
+        /* if we survive this call, we can parse it safely */
+        dpm.skipRData();
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        return getEDNSOptions(reinterpret_cast<const char*>(&packet.at(offset)), packet.size() - offset, options) == 0;
+      }
+      dpm.skipRData();
+    }
+  }
+  catch (...) {
+    return false;
+  }
+
+  return false;
 }
 
 /* extract all EDNS0 options from a pointer on the beginning rdLen of the OPT RR */
@@ -101,24 +163,23 @@ int getEDNSOptions(const char* optRR, const size_t len, EDNSOptionViewMap& optio
     return EINVAL;
   }
 
-  const uint16_t rdLen = (((unsigned char) optRR[pos]) * 256) + ((unsigned char) optRR[pos+1]);
+  const uint16_t rdLen = (((unsigned char)optRR[pos]) * 256) + ((unsigned char)optRR[pos + 1]);
   size_t rdPos = 0;
   pos += DNS_RDLENGTH_SIZE;
   if ((pos + rdLen) > len) {
     return EINVAL;
   }
 
-  while(len >= (pos + EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE) &&
-        rdLen >= (rdPos + EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE)) {
-    const uint16_t optionCode = (((unsigned char) optRR[pos]) * 256) + ((unsigned char) optRR[pos+1]);
+  while (len >= (pos + EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE) && rdLen >= (rdPos + EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE)) {
+    const uint16_t optionCode = (((unsigned char)optRR[pos]) * 256) + ((unsigned char)optRR[pos + 1]);
     pos += EDNS_OPTION_CODE_SIZE;
     rdPos += EDNS_OPTION_CODE_SIZE;
-    const uint16_t optionLen = (((unsigned char) optRR[pos]) * 256) + ((unsigned char) optRR[pos+1]);
+    const uint16_t optionLen = (((unsigned char)optRR[pos]) * 256) + ((unsigned char)optRR[pos + 1]);
     pos += EDNS_OPTION_LENGTH_SIZE;
     rdPos += EDNS_OPTION_LENGTH_SIZE;
-    if (optionLen > (rdLen - rdPos) || optionLen > (len - pos))
+    if (optionLen > (rdLen - rdPos) || optionLen > (len - pos)) {
       return EINVAL;
-
+    }
     EDNSOptionViewValue value;
     value.content = optRR + pos;
     value.size = optionLen;
@@ -135,20 +196,19 @@ int getEDNSOptions(const char* optRR, const size_t len, EDNSOptionViewMap& optio
 bool getEDNSOptionsFromContent(const std::string& content, std::vector<std::pair<uint16_t, std::string>>& options)
 {
   size_t pos = 0;
-  uint16_t code, len;
   const size_t contentLength = content.size();
 
   while (pos < contentLength && (contentLength - pos) >= (EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE)) {
-    code = (static_cast<unsigned char>(content.at(pos)) * 256) + static_cast<unsigned char>(content.at(pos+1));
+    uint16_t code = (static_cast<unsigned char>(content.at(pos)) * 256) + static_cast<unsigned char>(content.at(pos + 1));
     pos += EDNS_OPTION_CODE_SIZE;
-    len = (static_cast<unsigned char>(content.at(pos)) * 256) + static_cast<unsigned char>(content.at(pos+1));
+    uint16_t len = (static_cast<unsigned char>(content.at(pos)) * 256) + static_cast<unsigned char>(content.at(pos + 1));
     pos += EDNS_OPTION_LENGTH_SIZE;
 
     if (pos > contentLength || len > (contentLength - pos)) {
       return false;
     }
 
-    options.emplace_back(code, std::string(&content.at(pos), len));
+    options.emplace_back(code, content.substr(pos, len));
     pos += len;
   }
 
@@ -159,7 +219,86 @@ void generateEDNSOption(uint16_t optionCode, const std::string& payload, std::st
 {
   const uint16_t ednsOptionCode = htons(optionCode);
   const uint16_t payloadLen = htons(payload.length());
-  res.append((const char *) &ednsOptionCode, sizeof ednsOptionCode);
-  res.append((const char *) &payloadLen, sizeof payloadLen);
+  res.append(reinterpret_cast<const char*>(&ednsOptionCode), sizeof ednsOptionCode);
+  res.append(reinterpret_cast<const char*>(&payloadLen), sizeof payloadLen);
   res.append(payload);
 }
+
+template <typename T>
+int locateEDNSOptRR(const T& packet, uint16_t* optStart, size_t* optLen, bool* last)
+{
+  if (optStart == nullptr || optLen == nullptr || last == nullptr) {
+    throw std::runtime_error("Invalid values passed to locateEDNSOptRR");
+  }
+
+  if (packet.size() < sizeof(dnsheader)) {
+    throw std::runtime_error("Packet passed to locateEDNSOptRR was too small");
+  }
+
+  const dnsheader_aligned dnsHeader(packet.data());
+
+  if (ntohs(dnsHeader->arcount) == 0) {
+    return ENOENT;
+  }
+
+  if (ntohs(dnsHeader->qdcount) != 1) {
+    throw std::runtime_error("Packet passed to locateEDNSOptRR did not have QDCOUNT=1");
+  }
+
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  PacketReader packetReader(std::string_view(reinterpret_cast<const char*>(packet.data()), packet.size()));
+
+  size_t idx = 0;
+  DNSName rrname;
+  uint16_t ancount = ntohs(dnsHeader->ancount);
+  uint16_t nscount = ntohs(dnsHeader->nscount);
+  uint16_t arcount = ntohs(dnsHeader->arcount);
+  dnsrecordheader recordHeader{};
+
+  /* consume query section */
+  rrname = packetReader.getName();
+  packetReader.skip(4); // Skip Type and Class
+
+  /* consume AN and NS */
+  for (idx = 0; idx < ancount + nscount; idx++) {
+    rrname = packetReader.getName();
+    packetReader.getDnsrecordheader(recordHeader);
+    packetReader.skip(recordHeader.d_clen);
+  }
+
+  /* consume AR, looking for OPT */
+  for (idx = 0; idx < arcount; idx++) {
+    uint16_t start = packetReader.getPosition();
+    rrname = packetReader.getName();
+    packetReader.getDnsrecordheader(recordHeader);
+
+    if (rrname.isRoot() && recordHeader.d_type == QType::OPT) {
+      *optStart = start;
+      *optLen = (packetReader.getPosition() - start) + recordHeader.d_clen;
+
+      if (packet.size() < (*optStart + *optLen)) {
+        throw std::range_error("Opt record overflow");
+      }
+
+      if (idx == ((size_t)arcount - 1)) {
+        *last = true;
+      }
+      else {
+        *last = false;
+      }
+      return 0;
+    }
+    packetReader.skip(recordHeader.d_clen);
+  }
+
+  return ENOENT;
+}
+
+#if defined(RECURSOR)
+template int locateEDNSOptRR(const std::vector<uint8_t>& packet, uint16_t* optStart, size_t* optLen, bool* last);
+#endif
+#if defined(DNSDIST)
+template int locateEDNSOptRR(const PacketBuffer& packet, uint16_t* optStart, size_t* optLen, bool* last);
+#endif
+
+// NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast,cppcoreguidelines-pro-bounds-pointer-arithmetic)

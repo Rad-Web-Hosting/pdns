@@ -19,8 +19,9 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
+#include <unordered_set>
+
 #include "lua-recursor4.hh"
-#include <fstream>
 #include "logger.hh"
 #include "logging.hh"
 #include "dnsparser.hh"
@@ -31,10 +32,10 @@
 #include "ednssubnet.hh"
 #include "filterpo.hh"
 #include "rec-snmp.hh"
-#include <unordered_set>
 #include "rec-main.hh"
+#include "arguments.hh"
 
-boost::optional<dnsheader> RecursorLua4::DNSQuestion::getDH() const
+std::optional<dnsheader> RecursorLua4::DNSQuestion::getDH() const
 {
   if (dh != nullptr) {
     return *dh;
@@ -71,7 +72,7 @@ vector<pair<uint16_t, string>> RecursorLua4::DNSQuestion::getEDNSOptions() const
   return {};
 }
 
-boost::optional<string> RecursorLua4::DNSQuestion::getEDNSOption(uint16_t code) const
+std::optional<string> RecursorLua4::DNSQuestion::getEDNSOption(uint16_t code) const
 {
   if (ednsOptions != nullptr) {
     for (const auto& option : *ednsOptions) {
@@ -83,14 +84,14 @@ boost::optional<string> RecursorLua4::DNSQuestion::getEDNSOption(uint16_t code) 
   return {};
 }
 
-boost::optional<Netmask> RecursorLua4::DNSQuestion::getEDNSSubnet() const
+std::optional<Netmask> RecursorLua4::DNSQuestion::getEDNSSubnet() const
 {
   if (ednsOptions != nullptr) {
     for (const auto& option : *ednsOptions) {
       if (option.first == EDNSOptionCode::ECS) {
         EDNSSubnetOpts eso;
-        if (getEDNSSubnetOptsFromString(option.second, &eso)) {
-          return eso.source;
+        if (EDNSSubnetOpts::getFromString(option.second, &eso)) {
+          return eso.getSource();
         }
         break;
       }
@@ -131,18 +132,28 @@ void RecursorLua4::DNSQuestion::setRecords(const vector<pair<int, DNSRecord>>& a
   }
 }
 
-void RecursorLua4::DNSQuestion::addRecord(uint16_t type, const std::string& content, DNSResourceRecord::Place place, boost::optional<int> ttl, boost::optional<string> name)
+void RecursorLua4::DNSQuestion::addRecord(uint16_t type, const std::string& content, DNSResourceRecord::Place place, std::optional<int> ttl, RecursorLua4::DNSQuestion::OptDNSNameOrString name)
 {
-  DNSRecord dnsRecord;
-  dnsRecord.d_name = name ? DNSName(*name) : qname;
-  dnsRecord.d_ttl = ttl.get_value_or(3600);
+  DNSRecord dnsRecord{};
+  if (name) {
+    if (const auto* ptr = boost::get<std::string>(&*name)) {
+      dnsRecord.d_name = DNSName(*ptr);
+    }
+    else {
+      dnsRecord.d_name = *boost::get<DNSName>(&*name);
+    }
+  }
+  else {
+    dnsRecord.d_name = qname;
+  }
+  dnsRecord.d_ttl = ttl.value_or(3600);
   dnsRecord.d_type = type;
   dnsRecord.d_place = place;
   dnsRecord.setContent(DNSRecordContent::make(type, QClass::IN, content));
-  records.push_back(dnsRecord);
+  records.push_back(std::move(dnsRecord));
 }
 
-void RecursorLua4::DNSQuestion::addAnswer(uint16_t type, const std::string& content, boost::optional<int> ttl, boost::optional<string> name)
+void RecursorLua4::DNSQuestion::addAnswer(uint16_t type, const std::string& content, std::optional<int> ttl, OptDNSNameOrString name)
 {
   addRecord(type, content, DNSResourceRecord::ANSWER, ttl, std::move(name));
 }
@@ -162,7 +173,7 @@ void RecursorLua4::postPrepareContext() // NOLINT(readability-function-cognitive
 {
   d_lw->registerMember<const DNSName (DNSQuestion::*)>("qname", [](const DNSQuestion& dnsQuestion) -> const DNSName& { return dnsQuestion.qname; }, [](DNSQuestion& /* dnsQuestion */, const DNSName& newName) { (void) newName; });
   d_lw->registerMember<uint16_t (DNSQuestion::*)>("qtype", [](const DNSQuestion& dnsQuestion) -> uint16_t { return dnsQuestion.qtype; }, [](DNSQuestion& /* dnsQuestion */, uint16_t newType) { (void) newType; });
-  d_lw->registerMember<bool (DNSQuestion::*)>("isTcp", [](const DNSQuestion& dnsQuestion) -> bool { return dnsQuestion.isTcp; }, [](DNSQuestion& /* dnsQuestion */, bool newTcp) { (void) newTcp; });
+  d_lw->registerMember<bool (DNSQuestion::*)>("isTcp", [](const DNSQuestion& dnsQuestion) -> bool { return dnsQuestion.isTcp; }, [](DNSQuestion& dnsQuestion, bool newTcp) { dnsQuestion.isTcp = newTcp; });
   d_lw->registerMember<const ComboAddress (DNSQuestion::*)>("localaddr", [](const DNSQuestion& dnsQuestion) -> const ComboAddress& { return dnsQuestion.local; }, [](DNSQuestion& /* dnsQuestion */, const ComboAddress& newLocal) { (void) newLocal; });
   d_lw->registerMember<const ComboAddress (DNSQuestion::*)>("remoteaddr", [](const DNSQuestion& dnsQuestion) -> const ComboAddress& { return dnsQuestion.remote; }, [](DNSQuestion& /* dnsQuestion */, const ComboAddress& newRemote) { (void) newRemote; });
   d_lw->registerMember<const ComboAddress (DNSQuestion::*)>("interface_localaddr", [](const DNSQuestion& dnsQuestion) -> const ComboAddress& { return dnsQuestion.interface_local; }, [](DNSQuestion& /* dnsQuestion */, const ComboAddress& newLocal) { (void) newLocal; });
@@ -303,8 +314,8 @@ void RecursorLua4::postPrepareContext() // NOLINT(readability-function-cognitive
       return std::string(option.values.at(0).content, option.values.at(0).size); });
 
   d_lw->registerFunction<string(DNSRecord::*)()>("getContent", [](const DNSRecord& dnsRecord) { return dnsRecord.getContent()->getZoneRepresentation(); });
-  d_lw->registerFunction<boost::optional<ComboAddress>(DNSRecord::*)()>("getCA", [](const DNSRecord& dnsRecord) { 
-      boost::optional<ComboAddress> ret;
+  d_lw->registerFunction<std::optional<ComboAddress>(DNSRecord::*)()>("getCA", [](const DNSRecord& dnsRecord) { 
+      std::optional<ComboAddress> ret;
 
       if (auto rec = getRR<ARecordContent>(dnsRecord)) {
         ret = rec->getCA(53);
@@ -370,8 +381,7 @@ void RecursorLua4::postPrepareContext() // NOLINT(readability-function-cognitive
         }
       }
       catch(std::exception& e) {
-        SLOG(g_log <<Logger::Error<<e.what()<<endl,
-             g_slog->withName("lua")->error(Logr::Error, e.what(), "Error in call to DNSSuffixMatchGroup:add"));
+        g_slog->withName("lua")->error(Logr::Error, e.what(), "Error in call to DNSSuffixMatchGroup:add");
       }
     }
   );
@@ -379,29 +389,29 @@ void RecursorLua4::postPrepareContext() // NOLINT(readability-function-cognitive
   d_lw->registerFunction("check",(bool (SuffixMatchNode::*)(const DNSName&) const) &SuffixMatchNode::check);
   d_lw->registerFunction("toString",(string (SuffixMatchNode::*)() const) &SuffixMatchNode::toString);
 
-  d_pd.push_back({"policykinds", in_t {
+  d_pd.emplace_back("policykinds", in_t {
     {"NoAction", (int)DNSFilterEngine::PolicyKind::NoAction},
     {"Drop",     (int)DNSFilterEngine::PolicyKind::Drop    },
     {"NXDOMAIN", (int)DNSFilterEngine::PolicyKind::NXDOMAIN},
     {"NODATA",   (int)DNSFilterEngine::PolicyKind::NODATA  },
     {"Truncate", (int)DNSFilterEngine::PolicyKind::Truncate},
     {"Custom",   (int)DNSFilterEngine::PolicyKind::Custom  }
-    }});
+    });
 
-  d_pd.push_back({"policytypes", in_t {
+  d_pd.emplace_back("policytypes", in_t {
     {"None",       (int)DNSFilterEngine::PolicyType::None       },
     {"QName",      (int)DNSFilterEngine::PolicyType::QName      },
     {"ClientIP",   (int)DNSFilterEngine::PolicyType::ClientIP   },
     {"ResponseIP", (int)DNSFilterEngine::PolicyType::ResponseIP },
     {"NSDName",    (int)DNSFilterEngine::PolicyType::NSDName    },
     {"NSIP",       (int)DNSFilterEngine::PolicyType::NSIP       }
-    }});
+    });
 
   for(const auto& name : QType::names) {
     d_pd.emplace_back(name.first, name.second);
   }
 
-  d_pd.push_back({"validationstates", in_t{
+  d_pd.emplace_back("validationstates", in_t{
         {"Indeterminate", static_cast<unsigned int>(vState::Indeterminate) },
         {"BogusNoValidDNSKEY", static_cast<unsigned int>(vState::BogusNoValidDNSKEY) },
         {"BogusInvalidDenial", static_cast<unsigned int>(vState::BogusInvalidDenial) },
@@ -422,7 +432,7 @@ void RecursorLua4::postPrepareContext() // NOLINT(readability-function-cognitive
         {"Secure", static_cast<unsigned int>(vState::Secure) },
         /* in order not to break compatibility with older scripts: */
         {"Bogus", static_cast<unsigned int>(255) },
-  }});
+  });
 
   d_lw->writeFunction("isValidationStateBogus", [](vState state) {
     return vStateIsBogus(state);
@@ -430,8 +440,25 @@ void RecursorLua4::postPrepareContext() // NOLINT(readability-function-cognitive
 
   d_pd.emplace_back("now", &g_now);
 
-  d_lw->writeFunction("getMetric", [](const std::string& str, boost::optional<std::string> prometheusName) {
-    return DynMetric{getDynMetric(str, prometheusName ? *prometheusName : "")};
+  d_lw->writeFunction("getMetric", [](const std::string& str, std::optional<boost::variant<std::string, std::unordered_map<std::string, std::string>>> opts){
+    std::string prometheusName;
+    std::string prometheusTypeName;
+    std::string prometheusDescr;
+
+    if (opts) {
+      if (const auto* optPrometheusName = boost::get<std::string>(&*opts); optPrometheusName != nullptr) {
+        prometheusName = *optPrometheusName;
+      } else if (auto* vars = boost::get<std::unordered_map<std::string, std::string>>(&*opts); vars != nullptr) {
+        prometheusName = (*vars)["prometheusName"];
+        prometheusTypeName = (*vars)["type"];
+        prometheusDescr = (*vars)["description"];
+      }
+    }
+
+    if (prometheusDescr.empty()) {
+      prometheusDescr = "N/A";
+    }
+    return DynMetric{getDynMetric(str, prometheusName, prometheusTypeName, prometheusDescr)};
     });
 
   d_lw->registerFunction("inc", &DynMetric::inc);
@@ -449,7 +476,7 @@ void RecursorLua4::postPrepareContext() // NOLINT(readability-function-cognitive
     });
 
   d_lw->writeFunction("getRecursorThreadId", []() {
-    return RecThreadInfo::id();
+    return RecThreadInfo::thread_local_id();
   });
 
   d_lw->writeFunction("sendCustomSNMPTrap", [](const std::string& str) {
@@ -493,6 +520,45 @@ void RecursorLua4::postPrepareContext() // NOLINT(readability-function-cognitive
       (*event.discardedPolicies)[policy] = true;
     }
   });
+
+  d_lw->writeFunction("getRecordCacheRecords", [](size_t perShard, size_t maxSize) {
+    std::string ret;
+    auto number = g_recCache->getRecordSets(perShard, maxSize, ret);
+    return std::tuple<std::string, size_t>{ret, number};
+  });
+
+  d_lw->writeFunction("putIntoRecordCache", [](const string& data) {
+    return g_recCache->putRecordSets(data);
+  });
+
+  d_lw->writeFunction("spawnThread", [](const string& scriptName) {
+    auto log = g_slog->withName("lua")->withValues("script", Logging::Loggable(scriptName));
+    log->info(Logr::Info, "Starting Lua script in separate thread");
+    std::thread thread([log = std::move(log), scriptName]() {
+      auto lua = std::make_shared<RecursorLua4>();
+      lua->loadFile(scriptName);
+      log->info(Logr::Notice, "Lua thread exiting");
+    });
+    thread.detach();
+  });
+
+  d_lw->writeFunction("getConfigDirAndName", []() -> std::tuple<std::string, std::string> {
+      std::string dir = ::arg()["config-dir"];
+      cleanSlashes(dir);
+      std::string name = ::arg()["config-name"];
+      return {dir, name};
+  });
+
+  d_lw->writeFunction("getNSSpeedTable", [](size_t maxSize) {
+    std::string ret;
+    auto number = SyncRes::getNSSpeedTable(maxSize, ret);
+    return std::tuple<std::string, size_t>{ret, number};
+  });
+
+  d_lw->writeFunction("putIntoNSSpeedTable", [](const string& data) {
+    return SyncRes::putIntoNSSpeedTable(data);
+  });
+
   if (!d_include_path.empty()) {
     includePath(d_include_path);
   }
@@ -502,20 +568,20 @@ void RecursorLua4::postPrepareContext() // NOLINT(readability-function-cognitive
 
 void RecursorLua4::postLoad()
 {
-  d_prerpz = d_lw->readVariable<boost::optional<luacall_t>>("prerpz").get_value_or(nullptr);
-  d_preresolve = d_lw->readVariable<boost::optional<luacall_t>>("preresolve").get_value_or(nullptr);
-  d_nodata = d_lw->readVariable<boost::optional<luacall_t>>("nodata").get_value_or(nullptr);
-  d_nxdomain = d_lw->readVariable<boost::optional<luacall_t>>("nxdomain").get_value_or(nullptr);
-  d_postresolve = d_lw->readVariable<boost::optional<luacall_t>>("postresolve").get_value_or(nullptr);
-  d_preoutquery = d_lw->readVariable<boost::optional<luacall_t>>("preoutquery").get_value_or(nullptr);
-  d_maintenance = d_lw->readVariable<boost::optional<luamaintenance_t>>("maintenance").get_value_or(nullptr);
+  d_prerpz = d_lw->readVariable<std::optional<luacall_t>>("prerpz").value_or(nullptr);
+  d_preresolve = d_lw->readVariable<std::optional<luacall_t>>("preresolve").value_or(nullptr);
+  d_nodata = d_lw->readVariable<std::optional<luacall_t>>("nodata").value_or(nullptr);
+  d_nxdomain = d_lw->readVariable<std::optional<luacall_t>>("nxdomain").value_or(nullptr);
+  d_postresolve = d_lw->readVariable<std::optional<luacall_t>>("postresolve").value_or(nullptr);
+  d_preoutquery = d_lw->readVariable<std::optional<luacall_t>>("preoutquery").value_or(nullptr);
+  d_maintenance = d_lw->readVariable<std::optional<luamaintenance_t>>("maintenance").value_or(nullptr);
 
-  d_ipfilter = d_lw->readVariable<boost::optional<ipfilter_t>>("ipfilter").get_value_or(nullptr);
-  d_gettag = d_lw->readVariable<boost::optional<gettag_t>>("gettag").get_value_or(nullptr);
-  d_gettag_ffi = d_lw->readVariable<boost::optional<gettag_ffi_t>>("gettag_ffi").get_value_or(nullptr);
-  d_postresolve_ffi = d_lw->readVariable<boost::optional<postresolve_ffi_t>>("postresolve_ffi").get_value_or(nullptr);
+  d_ipfilter = d_lw->readVariable<std::optional<ipfilter_t>>("ipfilter").value_or(nullptr);
+  d_gettag = d_lw->readVariable<std::optional<gettag_t>>("gettag").value_or(nullptr);
+  d_gettag_ffi = d_lw->readVariable<std::optional<gettag_ffi_t>>("gettag_ffi").value_or(nullptr);
+  d_postresolve_ffi = d_lw->readVariable<std::optional<postresolve_ffi_t>>("postresolve_ffi").value_or(nullptr);
 
-  d_policyHitEventFilter = d_lw->readVariable<boost::optional<policyEventFilter_t>>("policyEventFilter").get_value_or(nullptr);
+  d_policyHitEventFilter = d_lw->readVariable<std::optional<policyEventFilter_t>>("policyEventFilter").value_or(nullptr);
 }
 
 void RecursorLua4::getFeatures(Features& features)
@@ -527,11 +593,27 @@ void RecursorLua4::getFeatures(Features& features)
   features.emplace_back("PR8001_devicename", true);
 }
 
+void RecursorLua4::runStartStopFunction(const string& script, bool start, Logr::log_t log)
+{
+  const string func = start ? "on_recursor_start" : "on_recursor_stop";
+  auto mylog = log->withValues("script", Logging::Loggable(script), "function", Logging::Loggable(func));
+  loadFile(script);
+  // coverity[auto_causes_copy] does not work with &, despite what coverity thinks
+  const auto call = d_lw->readVariable<std::optional<std::function<void()>>>(func).value_or(nullptr);
+  if (call) {
+    mylog->info(Logr::Info, "Starting Lua function");
+    call();
+    mylog->info(Logr::Info, "Lua function done");
+  }
+  else {
+    mylog->info(Logr::Notice, "No Lua function found");
+  }
+}
+
 static void warnDrop(const RecursorLua4::DNSQuestion& dnsQuestion)
 {
   if (dnsQuestion.rcode == -2) {
-    SLOG(g_log << Logger::Error << "Returning -2 (pdns.DROP) is not supported anymore, see https://docs.powerdns.com/recursor/lua-scripting/hooks.html#hooksemantics" << endl,
-         g_slog->withName("lua")->info(Logr::Error, "Returning -2 (pdns.DROP) is not supported anymore, see https://docs.powerdns.com/recursor/lua-scripting/hooks.html#hooksemantics"));
+    g_slog->withName("lua")->info(Logr::Error, "Returning -2 (pdns.DROP) is not supported anymore, see https://docs.powerdns.com/recursor/lua-scripting/hooks.html#hooksemantics");
     // We *could* set policy here, but that would also mean interfering with rcode and the return code of the hook.
     // So leave it at the error message.
   }
@@ -549,9 +631,9 @@ bool RecursorLua4::prerpz(DNSQuestion& dnsQuestion, int& ret, RecEventTrace& eve
   if (!d_prerpz) {
     return false;
   }
-  eventTrace.add(RecEventTrace::LuaPreRPZ);
+  auto match = eventTrace.add(RecEventTrace::LuaPreRPZ);
   bool isOK = genhook(d_prerpz, dnsQuestion, ret);
-  eventTrace.add(RecEventTrace::LuaPreRPZ, isOK, false);
+  eventTrace.add(RecEventTrace::LuaPreRPZ, isOK, false, match);
   warnDrop(dnsQuestion);
   return isOK;
 }
@@ -561,9 +643,9 @@ bool RecursorLua4::preresolve(DNSQuestion& dnsQuestion, int& ret, RecEventTrace&
   if (!d_preresolve) {
     return false;
   }
-  eventTrace.add(RecEventTrace::LuaPreResolve);
+  auto match = eventTrace.add(RecEventTrace::LuaPreResolve);
   bool isOK = genhook(d_preresolve, dnsQuestion, ret);
-  eventTrace.add(RecEventTrace::LuaPreResolve, isOK, false);
+  eventTrace.add(RecEventTrace::LuaPreResolve, isOK, false, match);
   warnDrop(dnsQuestion);
   return isOK;
 }
@@ -573,9 +655,9 @@ bool RecursorLua4::nxdomain(DNSQuestion& dnsQuestion, int& ret, RecEventTrace& e
   if (!d_nxdomain) {
     return false;
   }
-  eventTrace.add(RecEventTrace::LuaNXDomain);
+  auto match = eventTrace.add(RecEventTrace::LuaNXDomain);
   bool isOK = genhook(d_nxdomain, dnsQuestion, ret);
-  eventTrace.add(RecEventTrace::LuaNXDomain, isOK, false);
+  eventTrace.add(RecEventTrace::LuaNXDomain, isOK, false, match);
   warnDrop(dnsQuestion);
   return isOK;
 }
@@ -585,9 +667,9 @@ bool RecursorLua4::nodata(DNSQuestion& dnsQuestion, int& ret, RecEventTrace& eve
   if (!d_nodata) {
     return false;
   }
-  eventTrace.add(RecEventTrace::LuaNoData);
+  auto match = eventTrace.add(RecEventTrace::LuaNoData);
   bool isOK = genhook(d_nodata, dnsQuestion, ret);
-  eventTrace.add(RecEventTrace::LuaNoData, isOK, false);
+  eventTrace.add(RecEventTrace::LuaNoData, isOK, false, match);
   warnDrop(dnsQuestion);
   return isOK;
 }
@@ -597,14 +679,14 @@ bool RecursorLua4::postresolve(DNSQuestion& dnsQuestion, int& ret, RecEventTrace
   if (!d_postresolve) {
     return false;
   }
-  eventTrace.add(RecEventTrace::LuaPostResolve);
+  auto match = eventTrace.add(RecEventTrace::LuaPostResolve);
   bool isOK = genhook(d_postresolve, dnsQuestion, ret);
-  eventTrace.add(RecEventTrace::LuaPostResolve, isOK, false);
+  eventTrace.add(RecEventTrace::LuaPostResolve, isOK, false, match);
   warnDrop(dnsQuestion);
   return isOK;
 }
 
-bool RecursorLua4::preoutquery(const ComboAddress& nameserver, const ComboAddress& requestor, const DNSName& query, const QType& qtype, bool isTcp, vector<DNSRecord>& res, int& ret, RecEventTrace& eventTrace, const struct timeval& theTime) const
+bool RecursorLua4::preoutquery(const ComboAddress& nameserver, const ComboAddress& requestor, const DNSName& query, const QType& qtype, bool& isTcp, vector<DNSRecord>& res, int& ret, RecEventTrace& eventTrace, const struct timeval& theTime) const
 {
   if (!d_preoutquery) {
     return false;
@@ -615,10 +697,13 @@ bool RecursorLua4::preoutquery(const ComboAddress& nameserver, const ComboAddres
   bool addPaddingToResponse = false;
   RecursorLua4::DNSQuestion dnsQuestion(nameserver, requestor, nameserver, requestor, query, qtype.getCode(), isTcp, variableAnswer, wantsRPZ, logQuery, addPaddingToResponse, theTime);
   dnsQuestion.currentRecords = &res;
-  eventTrace.add(RecEventTrace::LuaPreOutQuery);
+  auto match = eventTrace.add(RecEventTrace::LuaPreOutQuery);
   bool isOK = genhook(d_preoutquery, dnsQuestion, ret);
-  eventTrace.add(RecEventTrace::LuaPreOutQuery, isOK, false);
+  eventTrace.add(RecEventTrace::LuaPreOutQuery, isOK, false, match);
   warnDrop(dnsQuestion);
+
+  isTcp = dnsQuestion.isTcp;
+
   return isOK;
 }
 
@@ -627,9 +712,9 @@ bool RecursorLua4::ipfilter(const ComboAddress& remote, const ComboAddress& loca
   if (!d_ipfilter) {
     return false; // Do not block
   }
-  eventTrace.add(RecEventTrace::LuaIPFilter);
+  auto match = eventTrace.add(RecEventTrace::LuaIPFilter);
   bool isOK = d_ipfilter(remote, local, header);
-  eventTrace.add(RecEventTrace::LuaIPFilter, isOK, false);
+  eventTrace.add(RecEventTrace::LuaIPFilter, isOK, false, match);
   return isOK;
 }
 
@@ -775,10 +860,9 @@ bool RecursorLua4::genhook(const luacall_t& func, DNSQuestion& dnsQuestion, int&
         PacketBuffer packetBuffer = GenUDPQueryResponse(dnsQuestion.udpQueryDest, dnsQuestion.udpQuery);
         dnsQuestion.udpAnswer = std::string(reinterpret_cast<const char*>(packetBuffer.data()), packetBuffer.size()); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
         // coverity[auto_causes_copy] not copying produces a dangling ref
-        const auto cbFunc = d_lw->readVariable<boost::optional<luacall_t>>(dnsQuestion.udpCallback).get_value_or(nullptr);
+        const auto cbFunc = d_lw->readVariable<std::optional<luacall_t>>(dnsQuestion.udpCallback).value_or(nullptr);
         if (!cbFunc) {
-          SLOG(g_log << Logger::Error << "Attempted callback for Lua UDP Query/Response which could not be found" << endl,
-               g_slog->withName("lua")->info(Logr::Error, "Attempted callback for Lua UDP Query/Response which could not be found"));
+          g_slog->withName("lua")->info(Logr::Error, "Attempted callback for Lua UDP Query/Response which could not be found");
           return false;
         }
         bool result = cbFunc(&dnsQuestion);
@@ -1296,5 +1380,5 @@ const char* pdns_postresolve_ffi_handle_get_authip(pdns_postresolve_ffi_handle_t
 
 void pdns_postresolve_ffi_handle_get_authip_raw(pdns_postresolve_ffi_handle_t* ref, const void** addr, size_t* addrSize)
 {
-  return pdns_ffi_comboaddress_to_raw(*ref->getHandle().d_dq.fromAuthIP, addr, addrSize);
+  pdns_ffi_comboaddress_to_raw(*ref->getHandle().d_dq.fromAuthIP, addr, addrSize);
 }

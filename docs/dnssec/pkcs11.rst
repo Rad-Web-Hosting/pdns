@@ -4,8 +4,10 @@ PKCS#11 support
 .. note::
   This is an experimental feature, use at your own risk!
 
-To enable it, compile PowerDNS Authoritative Server using ``--enable-experimental-pkcs11`` flag on configure.
+To enable it, compile PowerDNS Authoritative Server using ``--enable-experimental-pkcs11`` flag on configure or ``-Dexperimental-pkcs11=enabled`` when using Meson.
 This requires you to have the p11-kit libraries and headers.
+
+Since version 5.2.0, the :ref:`pkcs11 <setting-pkcs11>` setting should be set to ``yes`` to enable PKCS#11 at runtime.
 
 You can also log on to the tokens after starting the server, in this case you need to edit your PKCS#11 cryptokey record and remove PIN or set it empty.
 Do this after assigning/creating a key, as the PIN is required for assigning keys to zone.
@@ -37,6 +39,10 @@ These instructions have been tested on Debian 10 (Buster).
     pdnsutil hsm create-key example.com 25
 
 -  Verify that everything worked, you should see valid data there::
+
+    pdnsutil zone show example.com
+
+  or, prior to version 5.0::
 
     pdnsutil show-zone example.com
 
@@ -92,7 +98,7 @@ Then assign the HSM token to your zone with::
 
   pdnsutil hsm assign example.com ecdsa256 ksk p11-kit-client 'ecdsa#1' 1234 'my key'
 
-And then verify with ``show-zone`` that the zone now has a valid key.
+And then verify with ``zone show`` that the zone now has a valid key.
 
 You can do this over SSH as well (note that the example connects from token server to DNS server)::
 
@@ -171,7 +177,11 @@ Smart Card token on Ubuntu 14.04.
 
 - Verify that everything worked, you should see valid data there. ::
 
+    pdnsutil zone show zone
+
+  or, prior to version 5.0::
+
     pdnsutil show-zone zone
 
 - Note that the physical token is pretty slow, so you have to use it as
-  hidden master. It has been observed to produce about 1.5 signatures/second.
+  hidden primary. It has been observed to produce about 1.5 signatures/second.

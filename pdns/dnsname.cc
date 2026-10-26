@@ -29,7 +29,26 @@
 
 #include <boost/functional/hash.hpp>
 
-const DNSName g_rootdnsname("."), g_wildcarddnsname("*");
+const DNSName g_rootdnsname(".");
+const DNSName g_wildcarddnsname("*");
+const DNSName g_coodnsname("coo");
+const DNSName g_groupdnsname("group");
+const DNSName g_versiondnsname("version");
+const DNSName g_zonesdnsname("zones");
+
+const DNSName g_gsstsigdnsname("gss-tsig");
+const DNSName g_hmacmd5dnsname("hmac-md5");
+const DNSName g_hmacmd5dnsname_long("hmac-md5.sig-alg.reg.int");
+const DNSName g_hmacsha1dnsname("hmac-sha1");
+const DNSName g_hmacsha224dnsname("hmac-sha224");
+const DNSName g_hmacsha256dnsname("hmac-sha256");
+const DNSName g_hmacsha384dnsname("hmac-sha384");
+const DNSName g_hmacsha512dnsname("hmac-sha512");
+
+const ZoneName g_rootzonename(".");
+
+uint16_t DNSName::s_maxPointersToPointers = 4;
+uint16_t DNSName::s_maxPointersPerName = 10;
 
 /* raw storage
    in DNS label format, with trailing 0. W/o trailing 0, we are 'empty'
@@ -80,8 +99,9 @@ DNSName::DNSName(const std::string_view sw)
         d_storage.append(begiter,iter);
         if(iter != pend)
           ++iter;
-        if(labellen > 63)
+        if(labellen > s_maxDNSLabelLength) {
           throwSafeRangeError("label too long to append: ", p, length);
+        }
 
         if(iter-pbegin > static_cast<ptrdiff_t>(s_maxDNSNameLength - 1)) // reserve two bytes, one for length and one for the root label
           throwSafeRangeError("name too long to append: ", p, length);
@@ -99,7 +119,7 @@ DNSName::DNSName(const std::string_view sw)
   }
 }
 
-DNSName::DNSName(const char* pos, size_t len, size_t offset, bool uncompress, uint16_t* qtype, uint16_t* qclass, unsigned int* consumed, uint16_t minOffset)
+DNSName::DNSName(const char* pos, size_t len, size_t offset, bool uncompress, uint16_t* qtype, uint16_t* qclass, unsigned int* consumed, uint16_t minOffset, size_t* pointerBudget)
 {
   if (offset >= len)
     throw std::range_error("Trying to read past the end of the buffer ("+std::to_string(offset)+ " >= "+std::to_string(len)+")");
@@ -110,7 +130,7 @@ DNSName::DNSName(const char* pos, size_t len, size_t offset, bool uncompress, ui
     }
   }
 
-  packetParser(pos, len, offset, uncompress, qtype, qclass, consumed, 0, minOffset);
+  packetParser(pos, len, offset, uncompress, qtype, qclass, consumed, 0, minOffset, 0, pointerBudget);
 }
 
 static void checkLabelLength(uint8_t length)
@@ -118,7 +138,7 @@ static void checkLabelLength(uint8_t length)
   if (length == 0) {
     throw std::range_error("no such thing as an empty label to append");
   }
-  if (length > 63) {
+  if (length > DNSName::s_maxDNSLabelLength) {
     throw std::range_error("label too long to append");
   }
 }
@@ -127,6 +147,8 @@ static void checkLabelLength(uint8_t length)
 size_t DNSName::parsePacketUncompressed(const pdns::views::UnsignedCharView& view, size_t pos, bool uncompress)
 {
   const size_t initialPos = pos;
+  auto existingSize = d_storage.size();
+  const size_t neededSizeForFinalLabel = /* final empty label length */ (existingSize == 0 ? 1U : 0U);
   size_t totalLength = 0;
   unsigned char labellen = 0;
 
@@ -151,23 +173,26 @@ size_t DNSName::parsePacketUncompressed(const pdns::views::UnsignedCharView& vie
       throw std::range_error("Found an invalid label length in qname (only one of the first two bits is set)");
     }
     checkLabelLength(labellen);
-    // reserve one byte for the label length
-    if (totalLength + labellen > s_maxDNSNameLength - 1) {
+
+    // reserve one byte for the label length, plus one byte for the final empty label if we were empty before
+    if ((existingSize + totalLength + labellen + 1U + neededSizeForFinalLabel) > s_maxDNSNameLength) {
       throw std::range_error("name too long to append");
     }
     if (pos + labellen >= view.size()) {
       throw std::range_error("Found an invalid label length in qname");
     }
     pos += labellen;
-    totalLength += 1 + labellen;
+    totalLength += 1U + labellen;
   }
   while (pos < view.size());
 
   if (totalLength != 0) {
-    auto existingSize = d_storage.size();
     if (existingSize > 0) {
       // remove the last label count, we are about to override it */
       --existingSize;
+    }
+    if ((existingSize + totalLength + 1U) > s_maxDNSNameLength) {
+      throw std::range_error("name too long to append");
     }
     d_storage.reserve(existingSize + totalLength + 1);
     d_storage.resize(existingSize + totalLength);
@@ -178,7 +203,7 @@ size_t DNSName::parsePacketUncompressed(const pdns::views::UnsignedCharView& vie
 }
 
 // this should be the __only__ dns name parser in PowerDNS.
-void DNSName::packetParser(const char* qpos, size_t len, size_t offset, bool uncompress, uint16_t* qtype, uint16_t* qclass, unsigned int* consumed, int depth, uint16_t minOffset)
+void DNSName::packetParser(const char* qpos, size_t len, size_t offset, bool uncompress, uint16_t* qtype, uint16_t* qclass, unsigned int* consumed, int depth, uint16_t minOffset, uint16_t pointerChainLength, size_t *pointerBudget)
 {
   if (offset >= len) {
     throw std::range_error("Trying to read past the end of the buffer ("+std::to_string(offset)+ " >= "+std::to_string(len)+")");
@@ -192,11 +217,28 @@ void DNSName::packetParser(const char* qpos, size_t len, size_t offset, bool unc
   pdns::views::UnsignedCharView view(qpos, len);
   auto pos = parsePacketUncompressed(view, offset, uncompress);
 
+
   labellen = view.at(pos);
+  if (pos == offset && labellen != 0) {
+    // It's a pointer
+    if (pointerBudget != nullptr) {
+      if (*pointerBudget == 0) {
+        throw std::range_error("Too many compression pointers processed in packet");
+      }
+      (*pointerBudget)--;
+    }
+    // Are we chasing a pointer chain already for this name?
+    if (pointerChainLength++ > s_maxPointersToPointers) {
+      throw std::range_error("Too many pointer to pointers during decompression (" + std::to_string(pointerChainLength) + ")");
+    }
+  }
+  else {
+    pointerChainLength = 0; // not an immediate pointer to pointer case any more
+  }
   pos++;
   if (labellen != 0 && pos < view.size()) {
     if (labellen < 0xc0) {
-      abort();
+      throw std::range_error("Invalid label byte during decompression ("+std::to_string(labellen)+")");
     }
 
     if (!uncompress) {
@@ -214,11 +256,11 @@ void DNSName::packetParser(const char* qpos, size_t len, size_t offset, bool unc
       throw std::range_error("Invalid label position during decompression ("+std::to_string(newpos)+ " < "+std::to_string(minOffset)+")");
     }
 
-    if (++depth > 100) {
-      throw std::range_error("Abort label decompression after 100 redirects");
+    if (++depth > s_maxPointersPerName) {
+      throw std::range_error("Abort label decompression after too many redirects (" + std::to_string(depth) + ")");
     }
 
-    packetParser(qpos, len, newpos, true, nullptr, nullptr, nullptr, depth, minOffset);
+    packetParser(qpos, len, newpos, true, nullptr, nullptr, nullptr, depth, minOffset, pointerChainLength, pointerBudget);
 
     pos++;
   }
@@ -257,7 +299,7 @@ std::string DNSName::toString(const std::string& separator, const bool trailing)
 void DNSName::toString(std::string& output, const std::string& separator, const bool trailing) const
 {
   if (empty()) {
-    throw std::out_of_range("Attempt to print an unset dnsname");
+    throw std::out_of_range("Attempt to print an unset DNSName");
   }
 
   if (isRoot()) {
@@ -298,7 +340,7 @@ std::string DNSName::toLogString() const
 std::string DNSName::toDNSString() const
 {
   if (empty()) {
-    throw std::out_of_range("Attempt to DNSString an unset dnsname");
+    throw std::out_of_range("Attempt to DNSString an unset DNSName");
   }
 
   return std::string(d_storage.c_str(), d_storage.length());
@@ -324,7 +366,7 @@ size_t DNSName::wirelength() const {
 bool DNSName::isPartOf(const DNSName& parent) const
 {
   if(parent.empty() || empty()) {
-    throw std::out_of_range("empty dnsnames aren't part of anything");
+    throw std::out_of_range("empty DNSNames aren't part of anything");
   }
 
   if(parent.d_storage.size() > d_storage.size()) {
@@ -345,8 +387,8 @@ bool DNSName::isPartOf(const DNSName& parent) const
       }
       return true;
     }
-    if (static_cast<uint8_t>(*us) > 63) {
-      throw std::out_of_range("illegal label length in dnsname");
+    if (static_cast<uint8_t>(*us) > s_maxDNSLabelLength) {
+      throw std::out_of_range("illegal label length in DNSName");
     }
   }
   return false;
@@ -461,11 +503,115 @@ void DNSName::prependRawLabel(const std::string& label)
   d_storage = prep+d_storage;
 }
 
-bool DNSName::slowCanonCompare(const DNSName& rhs) const
+int DNSName::slowCanonCompare_three_way(const DNSName& rhs) const
 {
-  auto ours=getRawLabels(), rhsLabels = rhs.getRawLabels();
-  return std::lexicographical_compare(ours.rbegin(), ours.rend(), rhsLabels.rbegin(), rhsLabels.rend(), CIStringCompare());
+  // Unfortunately we can't use std::lexicographical_compare_three_way() yet
+  // as this would require C++20.
+  const auto ours = getRawLabels();
+  const auto rhsLabels = rhs.getRawLabels();
+  auto iter1 = ours.rbegin();
+  const auto& last1 = ours.rend();
+  auto iter2 = rhsLabels.rbegin();
+  const auto& last2 = rhsLabels.rend();
+  while (iter1 != last1 && iter2 != last2) {
+    if (int res = pdns_ilexicographical_compare_three_way(*iter1, *iter2); res != 0) {
+      return res;
+    }
+    ++iter1; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    ++iter2; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  }
+  if (iter1 == last1) {
+    if (iter2 != last2) {
+      return -1; // lt
+    }
+  }
+  else {
+    return 1; // gt
+  }
+  return 0; // eq
 }
+
+int DNSName::canonCompare_three_way(const DNSName& rhs, bool pretty) const
+{
+  //      01234567890abcd
+  // us:  1a3www4ds9a2nl
+  // rhs: 3www6online3com
+  // to compare, we start at the back, is nl < com? no -> done
+  //
+  // 0,2,6,a
+  // 0,4,a
+
+  std::array<uint8_t,64> ourpos{};
+  std::array<uint8_t,64> rhspos{};
+  uint8_t ourcount=0;
+  uint8_t rhscount=0;
+  //cout<<"Asked to compare "<<toString()<<" to "<<rhs.toString()<<endl;
+  // NOLINTBEGIN(cppcoreguidelines-pro-type-cstyle-cast,cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  for (const auto* pos = (const unsigned char*)d_storage.c_str(); pos < (const unsigned char*)d_storage.c_str() + d_storage.size() && *pos != 0 && ourcount < ourpos.max_size(); pos+=*pos+1) {
+    ourpos.at(ourcount++)=pos-(const unsigned char*)d_storage.c_str();
+  }
+  for (const auto* pos = (const unsigned char*)rhs.d_storage.c_str(); pos < (const unsigned char*)rhs.d_storage.c_str() + rhs.d_storage.size() && *pos != 0 && rhscount < rhspos.max_size(); pos+=*pos+1) {
+    rhspos.at(rhscount++)=pos-(const unsigned char*)rhs.d_storage.c_str();
+  }
+  // NOLINTEND(cppcoreguidelines-pro-type-cstyle-cast,cppcoreguidelines-pro-bounds-pointer-arithmetic)
+
+  if(ourcount == ourpos.max_size() || rhscount==rhspos.max_size()) {
+    return slowCanonCompare_three_way(rhs);
+  }
+
+  for(;;) {
+    if(ourcount == 0 && rhscount != 0) {
+      return -1; // lt
+    }
+    if(rhscount == 0) {
+      return ourcount == 0 ? 0 /* eq */ : 1 /* gt */;
+    }
+    ourcount--;
+    rhscount--;
+
+    // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    const uint8_t ourlen = *(d_storage.c_str() + ourpos.at(ourcount));
+    const uint8_t rhslen = *(rhs.d_storage.c_str() + rhspos.at(rhscount));
+    std::string_view ourstr(d_storage.c_str() + ourpos.at(ourcount) + 1, ourlen);
+    std::string_view rhsstr(rhs.d_storage.c_str() + rhspos.at(rhscount) + 1, rhslen);
+    // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+
+    // If pretty ordering requested, sort numerical values, well,
+    // numerically (i.e. 999.example.com < 1000.example.com).
+    // Do not use for anything but human-intended output, as this breaks
+    // the DNSSEC order.
+    if (pretty) {
+      // If both names are numerical (made of digits), then the longest one
+      // always compares higher.
+      if (ourlen != rhslen) {
+        bool isNumerical{true};
+        for (const auto chr : ourstr) {
+          if (std::isdigit(static_cast<unsigned char>(chr)) == 0) {
+            isNumerical = false;
+            break;
+          }
+        }
+        if (isNumerical) {
+          for (const auto chr : rhsstr) {
+            if (std::isdigit(static_cast<unsigned char>(chr)) == 0) {
+              isNumerical = false;
+              break;
+            }
+          }
+        }
+        if (isNumerical) {
+          return ourlen < rhslen ? -1 : 1;
+        }
+      }
+    }
+
+    int res = pdns_ilexicographical_compare_three_way(ourstr, rhsstr);
+    if (res != 0) {
+      return res;
+    }
+  }
+}
+
 
 vector<std::string> DNSName::getRawLabels() const
 {
@@ -518,9 +664,17 @@ bool DNSName::isWildcard() const
 /*
  * Returns true if the DNSName is a valid RFC 1123 hostname, this function uses
  * a regex on the string, so it is probably best not used when speed is essential.
+ *
+ * If allowUnderscore is set, underscore characters (`_') are allowed anywhere
+ * a letter or a digit would have been. In particular, leading underscores are
+ * allowed.
  */
-bool DNSName::isHostname() const
+bool DNSName::isHostname(bool allowUnderscore) const
 {
+  if (allowUnderscore) {
+    static Regex hostNameRegexWithUnderscore = Regex("^(([A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?)\\.)+$");
+    return hostNameRegexWithUnderscore.match(this->toString());
+  }
   static Regex hostNameRegex = Regex("^(([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)\\.)+$");
   return hostNameRegex.match(this->toString());
 }
@@ -540,11 +694,19 @@ unsigned int DNSName::countLabels() const
 
 void DNSName::trimToLabels(unsigned int to)
 {
-  while(countLabels() > to && chopOff()) {
-    ;
+  if (to != 0) {
+    for (auto nlabels = countLabels(); nlabels > to; --nlabels) {
+      chopOff();
+    }
+  }
+  else {
+    // If all the labels are to be removed, the result is either empty or
+    // the root zone.
+    if (!empty()) {
+      d_storage = g_rootdnsname.d_storage;
+    }
   }
 }
-
 
 size_t hash_value(DNSName const& d)
 {
@@ -730,3 +892,199 @@ bool DNSName::RawLabelsVisitor::empty() const
 {
   return d_position == 0;
 }
+
+bool DNSName::matchesUncompressedName(const std::string_view& wire_uncompressed) const
+{
+  if (wire_uncompressed.empty() != empty() || wire_uncompressed.size() < d_storage.size()) {
+    return false;
+  }
+
+  return pdns_ilexicographical_compare_three_way(std::string_view(wire_uncompressed.data(), d_storage.size()), d_storage) == 0;
+}
+
+#if defined(PDNS_AUTH) // [
+std::ostream & operator<<(std::ostream &ostr, const ZoneName& zone)
+{
+  return ostr << zone.toLogString();
+}
+
+size_t hash_value(ZoneName const& zone)
+{
+  return zone.hash();
+}
+
+// Sugar while ZoneName::operator DNSName are made explicit. These can't be
+// made inline in class DNSName due to chicken-and-egg declaration order
+// between DNSName and ZoneName.
+bool DNSName::isPartOf(const ZoneName& rhs) const
+{
+  return isPartOf(rhs.operator const DNSName&());
+}
+DNSName DNSName::makeRelative(const ZoneName& zone) const
+{
+  return makeRelative(zone.operator const DNSName&());
+}
+void DNSName::makeUsRelative(const ZoneName& zone)
+{
+  makeUsRelative(zone.operator const DNSName&());
+}
+
+std::string_view::size_type ZoneName::findVariantSeparator(std::string_view name)
+{
+  std::string_view::size_type pos{0};
+
+  // Try to be as fast as possible in the non-variant case and exit
+  // quickly if we don't find two dots in a row.
+  while ((pos = name.find('.', pos)) != std::string_view::npos) {
+    ++pos;
+    if (pos >= name.length()) { // trailing single dot
+      return std::string_view::npos;
+    }
+    if (name.at(pos) == '.') {
+      // We have found two dots in a row, but the first dot might have been
+      // escaped. So we now need to count how many \ characters we can find a
+      // row before it; if their number is odd, the first dot is escaped and
+      // we need to keep searching.
+      size_t slashes{0};
+      while (pos >= 2 + slashes && name.at(pos - 2 - slashes) == '\\') {
+        ++slashes;
+      }
+      if ((slashes % 2) == 0) {
+        break;
+      }
+    }
+  }
+  return pos;
+}
+
+ZoneName::ZoneName(std::string_view name)
+{
+  if (auto sep = findVariantSeparator(name); sep != std::string_view::npos) {
+    setVariant(name.substr(sep + 1)); // ignore leading dot in variant name
+    name = name.substr(0, sep); // keep trailing dot in zone name
+  }
+  d_name = DNSName(name);
+}
+
+ZoneName::ZoneName(std::string_view name, std::string_view::size_type sep)
+{
+  if (sep != std::string_view::npos) {
+    setVariant(name.substr(sep + 1)); // ignore leading dot in variant name
+    name = name.substr(0, sep); // keep trailing dot in zone name
+  }
+  d_name = DNSName(name);
+}
+
+void ZoneName::setVariant(std::string_view variant)
+{
+  if (variant.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_-") != std::string_view::npos) {
+    throw std::out_of_range("invalid character in variant name '" + std::string{variant} + "'");
+  }
+  d_variant = variant;
+}
+
+std::string ZoneName::toLogString() const
+{
+  std::string ret = d_name.toLogString();
+  if (!d_variant.empty()) {
+    // Because toLogString() above uses toStringRootDot(), we do not want to
+    // output one too many dots if this is a root-with-variant.
+    ret.push_back('.');
+    if (!d_name.isRoot()) {
+      ret.push_back('.');
+    }
+    ret += d_variant;
+  }
+  return ret;
+}
+
+std::string ZoneName::toString(const std::string& separator, const bool trailing) const
+{
+  std::string ret = d_name.toString(separator, trailing);
+  if (!d_variant.empty()) {
+    if (!trailing) {
+      ret.push_back('.');
+    }
+    ret.push_back('.');
+    ret += d_variant;
+  }
+  return ret;
+}
+
+std::string ZoneName::toStringNoDot() const
+{
+  std::string ret = d_name.toStringNoDot();
+  if (!d_variant.empty()) {
+    ret += "..";
+    ret += d_variant;
+  }
+  return ret;
+}
+
+std::string ZoneName::toStringRootDot() const
+{
+  std::string ret = d_name.toStringRootDot();
+  if (!d_variant.empty()) {
+    if (!d_name.isRoot()) {
+      ret.push_back('.');
+    }
+    ret.push_back('.');
+    ret += d_variant;
+  }
+  return ret;
+}
+
+size_t ZoneName::hash(size_t init) const
+{
+  if (!d_variant.empty()) {
+    init = burtleCI(d_variant, init);
+  }
+
+  return d_name.hash(init);
+}
+
+bool ZoneName::operator<(const ZoneName& rhs)  const
+{
+  // Order by DNSName first, by variant second.
+  // Unfortunately we can't use std::lexicographical_compare_three_way() yet
+  // as this would require C++20.
+  auto iter1 = d_name.getStorage().rbegin();
+  const auto last1 = d_name.getStorage().rend();
+  auto iter2 = rhs.d_name.getStorage().rbegin();
+  const auto last2 = rhs.d_name.getStorage().rend();
+  while (iter1 != last1 && iter2 != last2) {
+    auto char1 = dns_tolower(*iter1);
+    auto char2 = dns_tolower(*iter2);
+    if (char1 < char2) {
+      return true;
+    }
+    if (char1 > char2) {
+      return false;
+    }
+    ++iter1; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    ++iter2; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  }
+  if (iter1 == last1) {
+    if (iter2 != last2) {
+      return true; // our DNSName is shorter (subset) than the other
+    }
+  }
+  else {
+    return false; // our DNSName is longer (superset) than the other
+  }
+  // At this point, both DNSName compare equal, we have to compare
+  // variants (which are case-sensitive).
+  return d_variant < rhs.d_variant;
+}
+
+int ZoneName::canonCompare_three_way(const ZoneName& rhs) const
+{
+  // Similarly to operator< above, this compares DNSName first, variant
+  // second.
+  if (int res = d_name.canonCompare_three_way(rhs.d_name); res != 0) {
+    return res;
+  }
+  // Both DNSName compare equal.
+  return d_variant.compare(rhs.d_variant);
+}
+#endif // ]

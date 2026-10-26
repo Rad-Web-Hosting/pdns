@@ -32,11 +32,16 @@ void apiServerConfig(HttpRequest* req, HttpResponse* resp);
 void apiServerStatistics(HttpRequest* req, HttpResponse* resp);
 
 // helpers
-DNSName apiZoneIdToName(const string& identifier);
-string apiZoneNameToId(const DNSName& name);
-void apiCheckNameAllowedCharacters(const string& name);
-void apiCheckQNameAllowedCharacters(const string& name);
+ZoneName apiZoneIdToName(const string& identifier);
+string apiZoneNameToId(const ZoneName& name);
+string apiNameToId(const std::string& name);
+void apiCheckNameAllowedCharacters(std::string_view name);
+void apiCheckQNameAllowedCharacters(std::string_view name);
 DNSName apiNameToDNSName(const string& name);
+#if defined(PDNS_AUTH)
+ZoneName apiNameToZoneName(const string& name);
+#endif
+bool apiShouldBeRedacted(const std::string& setting);
 
 // To be provided by product code.
 void productServerStatisticsFetch(std::map<string, string>& out);

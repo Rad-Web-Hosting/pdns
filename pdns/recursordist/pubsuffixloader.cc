@@ -24,72 +24,75 @@
 #include <stdexcept>
 
 #include "dnsname.hh"
-#include "logger.hh"
 #include "logging.hh"
 #include "misc.hh"
 #include "pubsuffix.hh"
 
-extern const char* g_pubsuffix[];
 std::vector<std::vector<std::string>> g_pubs;
+
+static bool initPublicSuffixList(const std::string& file, std::istream& stream, std::vector<std::vector<std::string>>& pbList)
+{
+
+  try {
+    Regex reg("^[.0-9a-z-]*$");
+
+    std::string line;
+    while (std::getline(stream, line)) {
+      if (line.empty() || (line.rfind("//", 0) == 0)) {
+        /* skip empty and commented lines */
+        continue;
+      }
+      try {
+        line = toLower(line);
+        if (!reg.match(line)) {
+          continue;
+        }
+        DNSName name(line);
+        if (name.countLabels() < 2) {
+          continue;
+        }
+        pbList.emplace_back(name.labelReverse().getRawLabels());
+      }
+      catch (...) {
+        /* not a DNS name, ignoring */
+        continue;
+      }
+    }
+
+    if (file != "internal") {
+      g_slog->withName("runtime")->info(Logr::Info, "Loaded the Public Suffix List", "file", Logging::Loggable(file));
+    }
+    return true;
+  }
+  catch (const std::exception& e) {
+    g_slog->withName("runtime")->error(Logr::Error, e.what(), "Error while loading the Public Suffix List", "file", Logging::Loggable(file));
+  }
+  return false;
+}
 
 void initPublicSuffixList(const std::string& file)
 {
+  bool loaded = false;
   std::vector<std::vector<std::string>> pbList;
 
-  bool loaded = false;
   if (!file.empty()) {
     try {
-      Regex reg("^[.0-9a-z-]*$");
       std::ifstream suffixFile(file);
       if (!suffixFile.is_open()) {
         throw std::runtime_error("Error opening the public suffix list file");
       }
-
-      std::string line;
-      while (std::getline(suffixFile, line)) {
-        if (line.empty() || (line.rfind("//", 0) == 0)) {
-          /* skip empty and commented lines */
-          continue;
-        }
-        try {
-          line = toLower(line);
-          if (!reg.match(line)) {
-            continue;
-          }
-          DNSName name(toLower(line));
-          if (name.countLabels() < 2) {
-            continue;
-          }
-          pbList.push_back(name.labelReverse().getRawLabels());
-        }
-        catch (...) {
-          /* not a DNS name, ignoring */
-        }
-      }
-
-      SLOG(g_log << Logger::Info << "Loaded the Public Suffix List from '" << file << "'" << endl,
-           g_slog->withName("runtime")->info(Logr::Info, "Loaded the Public Suffix List", "file", Logging::Loggable(file)));
-      loaded = true;
+      loaded = initPublicSuffixList(file, suffixFile, pbList);
     }
     catch (const std::exception& e) {
-      SLOG(g_log << Logger::Warning << "Error while loading the Public Suffix List from '" << file << "', falling back to the built-in list: " << e.what() << endl,
-           g_slog->withName("runtime")->error(Logr::Error, e.what(), "Error while loading the Public Suffix List", "file", Logging::Loggable(file)));
+      g_slog->withName("runtime")->error(Logr::Error, e.what(), "Error while loading the Public Suffix List", "file", Logging::Loggable(file));
     }
   }
 
   if (!loaded) {
     pbList.clear();
-
-    for (const char** p = g_pubsuffix; *p; ++p) {
-      string low = toLower(*p);
-
-      vector<string> parts;
-      stringtok(parts, low, ".");
-      reverse(parts.begin(), parts.end());
-      pbList.push_back(parts);
-    }
+    std::istringstream stream(g_pubsuffix);
+    initPublicSuffixList("internal", stream, pbList);
   }
-
-  sort(pbList.begin(), pbList.end());
+  std::sort(pbList.begin(), pbList.end());
   g_pubs = std::move(pbList);
 }

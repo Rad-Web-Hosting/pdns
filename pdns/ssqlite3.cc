@@ -58,7 +58,8 @@ static string SSQLite3ErrorString(sqlite3* database)
 class SSQLite3Statement : public SSqlStatement
 {
 public:
-  SSQLite3Statement(SSQLite3* database, bool dolog, string query) :
+  SSQLite3Statement(Logr::log_t log, SSQLite3* database, bool dolog, string query) :
+    d_slog(log),
     d_query(std::move(query)),
     d_db(database),
     d_dolog(dolog)
@@ -163,7 +164,8 @@ public:
   {
     prepareStatement();
     if (d_dolog) {
-      g_log << Logger::Warning << "Query " << this << ": " << d_query << endl;
+      SLOG(g_log << Logger::Warning << "Query " << this << ": " << d_query << endl,
+           d_slog->info(Logr::Warning, "execute sqlite3 query", "query", Logging::Loggable(d_query)));
       d_dtime.set();
     }
 
@@ -181,7 +183,8 @@ public:
       throw SSqlException(string("Error while retrieving SQLite query results: ") + SSQLite3ErrorString(d_db->db()));
     }
     if (d_dolog) {
-      g_log << Logger::Warning << "Query " << this << ": " << d_dtime.udiffNoReset() << " us to execute" << endl;
+      SLOG(g_log << Logger::Warning << "Query " << this << ": " << d_dtime.udiffNoReset() << " us to execute" << endl,
+           d_slog->info(Logr::Warning, "query completed", "microseconds", Logging::Loggable(d_dtime.udiffNoReset())));
     }
     return this;
   }
@@ -189,7 +192,8 @@ public:
   bool hasNextRow() override
   {
     if (d_dolog && d_rc != SQLITE_ROW) {
-      g_log << Logger::Warning << "Query " << this << ": " << d_dtime.udiffNoReset() << " us total to last row" << endl;
+      SLOG(g_log << Logger::Warning << "Query " << this << ": " << d_dtime.udiffNoReset() << " us total to last row" << endl,
+           d_slog->info(Logr::Warning, "all query results processed", "microseconds", Logging::Loggable(d_dtime.udiffNoReset())));
     }
     return d_rc == SQLITE_ROW;
   }
@@ -245,6 +249,7 @@ public:
   const string& getQuery() override { return d_query; };
 
 private:
+  std::shared_ptr<Logr::Logger> d_slog;
   string d_query;
   DTime d_dtime;
   sqlite3_stmt* d_stmt{nullptr};
@@ -270,7 +275,8 @@ private:
       throw SSqlException(string("Unable to compile SQLite statement : '") + d_query + "': " + SSQLite3ErrorString(d_db->db()));
     }
     if ((pTail != nullptr) && strlen(pTail) > 0) {
-      g_log << Logger::Warning << "Sqlite3 command partially processed. Unprocessed part: " << pTail << endl;
+      SLOG(g_log << Logger::Warning << "Sqlite3 command partially processed. Unprocessed part: " << pTail << endl,
+           d_slog->info(Logr::Warning, "command partially processed", "unprocessed part", Logging::Loggable(pTail)));
     }
     d_prepared = true;
   }
@@ -286,11 +292,29 @@ private:
 };
 
 // Constructor.
-SSQLite3::SSQLite3(const std::string& database, const std::string& journalmode, bool creat)
+SSQLite3::SSQLite3(Logr::log_t log, const std::string& database, const std::string& journalmode, bool creat)
 {
-  if (access(database.c_str(), F_OK) == -1) {
-    if (!creat) {
+  d_slog = log;
+  m_dolog = false;
+
+  int flags{SQLITE_OPEN_READWRITE};
+  if (creat) {
+    flags |= SQLITE_OPEN_CREATE;
+  }
+  if (access(database.c_str(), W_OK) == -1) {
+    if (!creat && errno == ENOENT) {
       throw SSqlException("SQLite database '" + database + "' does not exist yet");
+    }
+    // We needed to explicitly check for write access here, for SQLite < 3.46
+    // in some configuration will leak file descriptors if the database can not
+    // be open read-write; refer to
+    // https://github.com/PowerDNS/pdns/issues/13952#issuecomment-2008254248
+    // for details.
+    if (errno == EACCES) {
+      flags &= ~SQLITE_OPEN_READWRITE;
+      flags |= SQLITE_OPEN_READONLY;
+      SLOG(g_log << Logger::Warning << "SQLite database '" << database << "' will be open in read-only mode due to filesystem permissions" << endl,
+           d_slog->info(Logr::Warning, "SQLite database will be open in read-only mode due to filesystem permissions", "database", Logging::Loggable(database)));
     }
   }
   else {
@@ -299,10 +323,9 @@ SSQLite3::SSQLite3(const std::string& database, const std::string& journalmode, 
     }
   }
 
-  if (sqlite3_open(database.c_str(), &m_pDB) != SQLITE_OK) {
+  if (sqlite3_open_v2(database.c_str(), &m_pDB, flags, nullptr) != SQLITE_OK) {
     throw SSqlException("Could not connect to the SQLite database '" + database + "'");
   }
-  m_dolog = false;
   m_in_transaction = false;
   sqlite3_busy_handler(m_pDB, busyHandler, nullptr);
 
@@ -329,13 +352,13 @@ SSQLite3::~SSQLite3()
       continue;
     }
     cerr << "Unable to close down sqlite connection: " << ret << endl;
-    abort();
+    break;
   }
 }
 
 std::unique_ptr<SSqlStatement> SSQLite3::prepare(const string& query, int nparams __attribute__((unused)))
 {
-  return std::make_unique<SSQLite3Statement>(this, m_dolog, query);
+  return std::make_unique<SSQLite3Statement>(d_slog, this, m_dolog, query);
 }
 
 void SSQLite3::executeImpl(const string& query)

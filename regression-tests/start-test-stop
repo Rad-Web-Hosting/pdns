@@ -6,36 +6,25 @@ fi
 
 if [ -z "$PDNS_BUILD_PATH" ]; then
   # PDNS_BUILD_PATH is unset or empty. Assume an autotools build.
-  PDNS_BUILD_PATH=.
-
-  export PDNS=${PDNS:-${PWD}/../pdns/pdns_server}
-  export PDNS2=${PDNS2:-${PWD}/../pdns/pdns_server}
-  export PDNSRECURSOR=${PDNSRECURSOR:-${PWD}/../pdns/recursordist/pdns_recursor}
-  export RECCONTROL=${RECCONTROL:-${PWD}/../pdns/recursordist/rec_control}
-  export SDIG=${SDIG:-${PWD}/../pdns/sdig}
-  export NOTIFY=${NOTIFY:-${PWD}/../pdns/pdns_notify}
-  export NSEC3DIG=${NSEC3DIG:-${PWD}/../pdns/nsec3dig}
-  export SAXFR=${SAXFR:-${PWD}/../pdns/saxfr}
-  export ZONE2SQL=${ZONE2SQL:-${PWD}/../pdns/zone2sql}
-  export ZONE2LDAP=${ZONE2LDAP:-${PWD}/../pdns/zone2ldap}
-  export ZONE2JSON=${ZONE2JSON:-${PWD}/../pdns/zone2json}
-  export PDNSUTIL=${PDNSUTIL:-${PWD}/../pdns/pdnsutil}
-  export PDNSCONTROL=${PDNSCONTROL:-${PWD}/../pdns/pdns_control}
+  PDNS_BUILD_PATH=${PWD}/../pdns
+  PDNS_MODULE_PATH=${PDNS_MODULE_PATH:-$PWD/modules}
 else
-  export PDNS=${PDNS:-$PDNS_BUILD_PATH/pdns-auth}
-  export PDNS2=${PDNS2:-$PDNS_BUILD_PATH/pdns-auth}
-  export PDNSRECURSOR=${PDNSRECURSOR:-$PDNS_BUILD_PATH/pdns/recursordist/pdns_recursor}
-  export RECCONTROL=${RECCONTROL:-$PDNS_BUILD_PATH/pdns/recursordist/rec_control}
-  export SDIG=${SDIG:-$PDNS_BUILD_PATH/sdig}
-  export NOTIFY=${NOTIFY:-$PDNS_BUILD_PATH/pdns-auth-notify}
-  export NSEC3DIG=${NSEC3DIG:-$PDNS_BUILD_PATH/nsec3dig}
-  export SAXFR=${SAXFR:-$PDNS_BUILD_PATH/saxfr}
-  export ZONE2SQL=${ZONE2SQL:-$PDNS_BUILD_PATH/pdns-zone2sql}
-  export ZONE2JSON=${ZONE2JSON:-$PDNS_BUILD_PATH/pdns-zone2json}
-  export ZONE2LDAP=${ZONE2LDAP:-$PDNS_BUILD_PATH/pdns-zone2ldap}
-  export PDNSUTIL=${PDNSUTIL:-$PDNS_BUILD_PATH/pdns-auth-util}
-  export PDNSCONTROL=${PDNSCONTROL:-$PDNS_BUILD_PATH/pdns-auth-control}
+  PDNS_MODULE_PATH=${PDNS_MODULE_PATH:-$PDNS_BUILD_PATH/modules}
 fi
+
+export PDNS=${PDNS:-$PDNS_BUILD_PATH/pdns_server}
+export PDNS2=${PDNS2:-$PDNS_BUILD_PATH/pdns_server}
+export PDNSRECURSOR=${PDNSRECURSOR:-$PDNS_BUILD_PATH/pdns/recursordist/pdns_recursor}
+export RECCONTROL=${RECCONTROL:-$PDNS_BUILD_PATH/pdns/recursordist/rec_control}
+export SDIG=${SDIG:-$PDNS_BUILD_PATH/sdig}
+export NOTIFY=${NOTIFY:-$PDNS_BUILD_PATH/pdns_notify}
+export NSEC3DIG=${NSEC3DIG:-$PDNS_BUILD_PATH/nsec3dig}
+export SAXFR=${SAXFR:-$PDNS_BUILD_PATH/saxfr}
+export ZONE2SQL=${ZONE2SQL:-$PDNS_BUILD_PATH/zone2sql}
+export ZONE2JSON=${ZONE2JSON:-$PDNS_BUILD_PATH/zone2json}
+export ZONE2LDAP=${ZONE2LDAP:-$PDNS_BUILD_PATH/zone2ldap}
+export PDNSUTIL=${PDNSUTIL:-$PDNS_BUILD_PATH/pdnsutil}
+export PDNSCONTROL=${PDNSCONTROL:-$PDNS_BUILD_PATH/pdns_control}
 
 export RESOLVERIP=${RESOLVERIP:-8.8.8.8}
 export FIX_TESTS=${FIX_TESTS:-NO}
@@ -62,14 +51,15 @@ if [ "$_show_help" -eq 1 ]; then
 Usage: ./start-test-stop <port> [<context>] [wait|nowait] [<cachettl>] [<specifictest>]
 
 context is one of:
-bind bind-dnssec bind-dnssec-nsec3 bind-dnssec-nsec3-optout bind-dnssec-nsec3-narrow
+bind bind-dnssec bind-dnssec-nsec3 bind-dnssec-nsec3-optout bind-dnssec-nsec3-narrow bind-dnssec-pkcs11
 geoip geoip-nsec3-narrow
 gmysql-nodnssec gmysql gmysql-nsec3 gmysql-nsec3-optout gmysql-nsec3-narrow gmysql_sp
 godbc_mssql-nodnssec godbc_mssql godbc_mssql-nsec3 godbc_mssql-nsec3-optout godbc_mssql-nsec3-narrow
 godbc_sqlite3-nodnssec godbc_sqlite3 godbc_sqlite3-nsec3 godbc_sqlite3-nsec3-optout godbc_sqlite3-narrow
 gpgsql-nodnssec gpgsql gpgsql-nsec3 gpgsql-nsec3-optout gpgsql-nsec3-narrow gpgsql_sp
 gsqlite3-nodnssec gsqlite3 gsqlite3-nsec3 gsqlite3-nsec3-optout gsqlite3-nsec3-narrow
-lmdb-nodnssec lmdb
+lmdb-nodnssec lmdb lmdb-nsec3 lmdb-nsec3-optout lmdb-nsec3-narrow
+lmdb-nodnssec-variant lmdb-variant lmdb-nsec3-variant lmdb-nsec3-optout-variant lmdb-nsec3-narrow-variant
 remotebackend-pipe remotebackend-unix remotebackend-http remotebackend-zeromq
 remotebackend-pipe-dnssec remotebackend-unix-dnssec remotebackend-http-dnssec remotebackend-zeromq-dnssec
 #remotebackend-pipe-nsec3 remotebackend-unix-nsec3 remotebackend-http-nsec3
@@ -126,7 +116,7 @@ bindwait ()
 
         if [ $done != $domcount ]
         then
-                echo "Domain parsing failed" >> failed_tests
+                echo "Domain parsing failed" | tee -a failed_tests
         fi
 }
 
@@ -141,7 +131,7 @@ securezone ()
         fi
         if [ "${zone: 0:16}" = "secure-delegated" ]
         then
-                $PDNSUTIL --config-dir=. $configname import-zone-key $zone $zone.private ksk 2>&1
+                $PDNSUTIL --config-dir=. $configname import-zone-key $zone ${zone%..*}.private ksk 2>&1
                 $PDNSUTIL --config-dir=. $configname add-zone-key $zone rsasha256 1024 zsk active 2>&1
                 $PDNSUTIL --config-dir=. $configname rectify-zone $zone 2>&1
                 $PDNSUTIL --config-dir=. $configname set-publish-cds $zone 2>&1
@@ -167,7 +157,7 @@ securezone ()
                         $PDNSUTIL --config-dir=. $configname set-publish-cds $zone 2>&1
                         $PDNSUTIL --config-dir=. $configname set-publish-cdnskey $zone 2>&1
                 fi
-                if [ "$zone" = "dnssec-parent.com" ]; then
+                if [ "${zone%..*}" = "dnssec-parent.com" ]; then
                         $PDNSUTIL --config-dir=. $configname set-publish-cds $zone 0 2>&1
                         $PDNSUTIL --config-dir=. $configname set-publish-cdnskey $zone delete 2>&1
                 fi
@@ -209,7 +199,10 @@ kill_process ()
                         sleep 1
                 done
 
-                kill -9 $pids
+                if [ $done -eq 0 ]
+                then
+                        kill -9 $pids
+                fi
         fi
 
         rm pdns*.pid
@@ -242,8 +235,9 @@ spectest=$5
 testsdir=./tests
 
 for prog in $SDIG $SAXFR $NOTIFY $NSEC3DIG; do
-  if `echo $prog | grep -q '\.\./pdns'`; then
-    ${MAKE} -C ../pdns ${prog##*../pdns/} || exit
+  if [ ! -x "$prog" ]; then
+    echo "Error: cannot find $prog, please build it."
+    exit 1
   fi
 done
 
@@ -285,7 +279,13 @@ fi
 optout=0
 pkcs11=0
 
-if [ "${context: -13}" = "-nsec3-optout" ]
+if [ "${context: -8}" = "-variant" ]
+then
+	subcontext=${context%-variant}
+else
+	subcontext=${context}
+fi
+if [ "${subcontext: -13}" = "-nsec3-optout" ]
 then
         optout=1
 fi
@@ -320,8 +320,6 @@ dotests () {
         nameserver=127.0.0.1 ./runtests $spectest
         ./toxml
         ./totar
-
-        cat ./trustedkeys
 
         if [ -s "./failed_tests" ]
         then

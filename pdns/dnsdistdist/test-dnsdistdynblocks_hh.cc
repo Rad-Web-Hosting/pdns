@@ -12,9 +12,6 @@
 #include "dnsdist-metrics.hh"
 #include "dnsdist-rings.hh"
 
-Rings g_rings;
-shared_ptr<BPFFilter> g_defaultBPFFilter{nullptr};
-
 #ifndef DISABLE_DYNBLOCKS
 
 BOOST_AUTO_TEST_SUITE(dnsdistdynblocks_hh)
@@ -24,7 +21,11 @@ struct TestFixture
   TestFixture()
   {
     g_rings.reset();
-    g_rings.init(10000, 10);
+    Rings::RingsConfiguration config{
+      .capacity = 10000U,
+      .numberOfShards = 10U,
+    };
+    g_rings.init(config);
   }
   ~TestFixture()
   {
@@ -32,7 +33,28 @@ struct TestFixture
   }
 };
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate, TestFixture) {
+static size_t s_samplingRate{10};
+
+struct TestFixtureWithSampling
+{
+  TestFixtureWithSampling()
+  {
+    g_rings.reset();
+    Rings::RingsConfiguration config{
+      .capacity = 10000U,
+      .numberOfShards = 10U,
+      .samplingRate = s_samplingRate,
+    };
+    g_rings.init(config);
+  }
+  ~TestFixtureWithSampling()
+  {
+    g_rings.reset();
+  }
+};
+
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate, TestFixture)
+{
   dnsheader dnsHeader{};
   memset(&dnsHeader, 0, sizeof(dnsHeader));
   DNSName qname("rings.powerdns.com.");
@@ -74,7 +96,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate, TestFixture) {
       g_rings.insertQuery(now, requestor1, qname, qtype, size, dnsHeader, protocol);
       /* we do not care about the response during that test, but we want to make sure
          these do not interfere with the computation */
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), numberOfQueries);
     BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), numberOfQueries);
@@ -94,7 +116,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate, TestFixture) {
 
     for (size_t idx = 0; idx < numberOfQueries; idx++) {
       g_rings.insertQuery(now, requestor1, qname, qtype, size, dnsHeader, protocol);
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), numberOfQueries);
 
@@ -126,7 +148,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate, TestFixture) {
         struct timespec when = now;
         when.tv_sec -= (9 - timeIdx);
         g_rings.insertQuery(when, requestor1, qname, qtype, size, dnsHeader, protocol);
-        g_rings.insertResponse(when, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+        g_rings.insertResponse(when, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
       }
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), numberOfQueries * numberOfSeconds);
@@ -171,7 +193,88 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate, TestFixture) {
   }
 }
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_RangeV6, TestFixture) {
+/* check that even if we group requestors to a /24, excluded IPs will not count toward
+   the group limit */
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_ExcludedSubnets, TestFixture)
+{
+  dnsheader dnsHeader{};
+  memset(&dnsHeader, 0, sizeof(dnsHeader));
+  DNSName qname("rings.powerdns.com.");
+  ComboAddress requestor1("192.0.2.1");
+  ComboAddress requestor2("192.0.2.2");
+  ComboAddress backend("192.0.2.42");
+  uint16_t qtype = QType::AAAA;
+  uint16_t size = 42;
+  dnsdist::Protocol protocol = dnsdist::Protocol::DoUDP;
+  dnsdist::Protocol outgoingProtocol = dnsdist::Protocol::DoUDP;
+  unsigned int responseTime = 0;
+  struct timespec now;
+  gettime(&now);
+  NetmaskTree<DynBlock, AddressAndPortRange> emptyNMG;
+
+  size_t numberOfSeconds = 10;
+  size_t blockDuration = 60;
+  const auto action = DNSAction::Action::Drop;
+  const std::string reason = "Exceeded query rate";
+
+  DynBlockRulesGroup dbrg;
+  dbrg.setQuiet(true);
+  dbrg.setMasks(24, 128, 0);
+  dbrg.excludeRange(Netmask(requestor2, 32));
+
+  {
+    /* block above 50 qps for numberOfSeconds seconds, no warning */
+    DynBlockRulesGroup::DynBlockRule rule(reason, blockDuration, 50, 0, numberOfSeconds, action);
+    dbrg.setQueryRate(std::move(rule));
+  }
+
+  {
+    /* insert just above 50 qps from a given client in the last 10s
+       this should trigger the rule this time */
+    size_t numberOfQueries = (50 * numberOfSeconds) + 1;
+    g_rings.clear();
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), 0U);
+    dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
+
+    for (size_t idx = 0; idx < numberOfQueries; idx++) {
+      g_rings.insertQuery(now, requestor1, qname, qtype, size, dnsHeader, protocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), numberOfQueries);
+
+    dbrg.apply(now);
+    BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getClientAddressDynamicRules().size(), 1U);
+    BOOST_CHECK(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor1) != nullptr);
+    BOOST_CHECK(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor2) != nullptr);
+    const auto& block = dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor1)->second;
+    BOOST_CHECK_EQUAL(block.reason, reason);
+    BOOST_CHECK_EQUAL(static_cast<size_t>(block.until.tv_sec), now.tv_sec + blockDuration);
+    BOOST_CHECK(block.domain.empty());
+    BOOST_CHECK(block.action == action);
+    BOOST_CHECK_EQUAL(block.blocks, 0U);
+    BOOST_CHECK_EQUAL(block.warning, false);
+  }
+
+  {
+    /* now do the same but from an excluded requestor */
+    size_t numberOfQueries = (50 * numberOfSeconds) + 1;
+    g_rings.clear();
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), 0U);
+    dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
+
+    for (size_t idx = 0; idx < numberOfQueries; idx++) {
+      g_rings.insertQuery(now, requestor2, qname, qtype, size, dnsHeader, protocol);
+      g_rings.insertResponse(now, requestor2, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), numberOfQueries);
+
+    dbrg.apply(now);
+    BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getClientAddressDynamicRules().size(), 0U);
+  }
+}
+
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_RangeV6, TestFixture)
+{
   /* Check that we correctly group IPv6 addresses from the same /64 subnet into the same
      dynamic block entry, if instructed to do so */
   dnsheader dnsHeader{};
@@ -215,7 +318,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_RangeV6, TestFixture) 
       g_rings.insertQuery(now, requestor1, qname, qtype, size, dnsHeader, protocol);
       /* we do not care about the response during that test, but we want to make sure
          these do not interfere with the computation */
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), numberOfQueries);
     BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), numberOfQueries);
@@ -236,7 +339,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_RangeV6, TestFixture) 
     for (size_t idx = 0; idx < numberOfQueries; idx++) {
       ComboAddress requestor("2001:db8::" + std::to_string(idx));
       g_rings.insertQuery(now, requestor, qname, qtype, size, dnsHeader, protocol);
-      g_rings.insertResponse(now, requestor, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), numberOfQueries);
 
@@ -274,7 +377,8 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_RangeV6, TestFixture) 
   }
 }
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_V4Ports, TestFixture) {
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_V4Ports, TestFixture)
+{
   /* Check that we correctly split IPv4 addresses based on port ranges, when instructed to do so */
   dnsheader dnsHeader{};
   memset(&dnsHeader, 0, sizeof(dnsHeader));
@@ -318,7 +422,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_V4Ports, TestFixture) 
       g_rings.insertQuery(now, requestor1, qname, qtype, size, dnsHeader, protocol);
       /* we do not care about the response during that test, but we want to make sure
          these do not interfere with the computation */
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), numberOfQueries);
     BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), numberOfQueries);
@@ -339,7 +443,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_V4Ports, TestFixture) 
     for (size_t idx = 0; idx < numberOfQueries; idx++) {
       ComboAddress requestor("192.0.2.1:" + std::to_string(idx));
       g_rings.insertQuery(now, requestor, qname, qtype, size, dnsHeader, protocol);
-      g_rings.insertResponse(now, requestor, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), numberOfQueries);
 
@@ -388,7 +492,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_V4Ports, TestFixture) 
     for (size_t idx = 0; idx < numberOfQueries; idx++) {
       ComboAddress requestor("192.0.2.1:" + std::to_string(idx));
       g_rings.insertQuery(now, requestor, qname, qtype, size, dnsHeader, protocol);
-      g_rings.insertResponse(now, requestor, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfQueryEntries(), numberOfQueries);
 
@@ -404,11 +508,11 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_V4Ports, TestFixture) 
 
     /* but not a different one */
     BOOST_CHECK(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(AddressAndPortRange(ComboAddress("192.0.2.1:16384"), 32, 16)) == nullptr);
-
   }
 }
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_responses, TestFixture) {
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_responses, TestFixture)
+{
   /* check that the responses are not accounted as queries when a
      rcode rate rule is defined (sounds very specific but actually happened) */
   dnsheader dnsHeader{};
@@ -428,7 +532,10 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_responses, TestFixture
 
   /* 100k entries, one shard */
   g_rings.reset();
-  g_rings.init(1000000, 1);
+  Rings::RingsConfiguration config{
+    .capacity = 1000000U,
+  };
+  g_rings.init(config);
 
   size_t numberOfSeconds = 10;
   size_t blockDuration = 60;
@@ -463,7 +570,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_responses, TestFixture
         g_rings.insertQuery(when, requestor1, qname, qtype, size, dnsHeader, protocol);
         /* we do not care about the response during that test, but we want to make sure
            these do not interfere with the computation */
-        g_rings.insertResponse(when, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+        g_rings.insertResponse(when, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
       }
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), numberOfQueries * 100);
@@ -475,7 +582,8 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QueryRate_responses, TestFixture
   }
 }
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QTypeRate, TestFixture) {
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QTypeRate, TestFixture)
+{
   dnsheader dnsHeader{};
   memset(&dnsHeader, 0, sizeof(dnsHeader));
   DNSName qname("rings.powerdns.com.");
@@ -563,10 +671,10 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_QTypeRate, TestFixture) {
     BOOST_CHECK_EQUAL(block.blocks, 0U);
     BOOST_CHECK_EQUAL(block.warning, false);
   }
-
 }
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRate, TestFixture) {
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRate, TestFixture)
+{
   dnsheader dnsHeader{};
   memset(&dnsHeader, 0, sizeof(dnsHeader));
   DNSName qname("rings.powerdns.com.");
@@ -606,7 +714,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRate, TestFixture) {
 
     dnsHeader.rcode = rcode;
     for (size_t idx = 0; idx < numberOfResponses; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), numberOfResponses);
 
@@ -624,7 +732,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRate, TestFixture) {
 
     dnsHeader.rcode = RCode::FormErr;
     for (size_t idx = 0; idx < numberOfResponses; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), numberOfResponses);
 
@@ -643,7 +751,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRate, TestFixture) {
 
     dnsHeader.rcode = rcode;
     for (size_t idx = 0; idx < numberOfResponses; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), numberOfResponses);
 
@@ -659,10 +767,106 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRate, TestFixture) {
     BOOST_CHECK_EQUAL(block.blocks, 0U);
     BOOST_CHECK_EQUAL(block.warning, false);
   }
-
 }
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRatio, TestFixture) {
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRate_With_Sampling, TestFixtureWithSampling)
+{
+  dnsheader dnsHeader{};
+  memset(&dnsHeader, 0, sizeof(dnsHeader));
+  DNSName qname("rings.powerdns.com.");
+  ComboAddress requestor1("192.0.2.1");
+  ComboAddress requestor2("192.0.2.2");
+  ComboAddress backend("192.0.2.42");
+  uint16_t qtype = QType::AAAA;
+  uint16_t size = 42;
+  dnsdist::Protocol outgoingProtocol = dnsdist::Protocol::DoUDP;
+  unsigned int responseTime = 100 * 1000; /* 100ms */
+  struct timespec now;
+  gettime(&now);
+  NetmaskTree<DynBlock, AddressAndPortRange> emptyNMG;
+
+  size_t numberOfSeconds = 10;
+  size_t blockDuration = 60;
+  const auto action = DNSAction::Action::Drop;
+  const std::string reason = "Exceeded query rate";
+  const uint16_t rcode = RCode::ServFail;
+
+  DynBlockRulesGroup dbrg;
+  dbrg.setQuiet(true);
+
+  {
+    /* block above 50 ServFail/s for numberOfSeconds seconds, no warning */
+    DynBlockRulesGroup::DynBlockRule rule(reason, blockDuration, 50, 0, numberOfSeconds, action);
+    dbrg.setRCodeRate(rcode, std::move(rule));
+  }
+
+  {
+    /* insert 45 ServFail/s from a given client in the last 10s
+       this should not trigger the rule */
+    size_t numberOfResponses = 45 * numberOfSeconds;
+    g_rings.clear();
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 0U);
+    dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
+
+    dnsHeader.rcode = rcode;
+    for (size_t idx = 0; idx < numberOfResponses; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), numberOfResponses / s_samplingRate);
+
+    dbrg.apply(now);
+    BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getClientAddressDynamicRules().size(), 0U);
+    BOOST_CHECK(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor1) == nullptr);
+  }
+
+  {
+    /* insert just above 50 FormErr/s from a given client in the last 10s */
+    size_t numberOfResponses = 50 * numberOfSeconds + s_samplingRate;
+    g_rings.clear();
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 0U);
+    dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
+
+    dnsHeader.rcode = RCode::FormErr;
+    for (size_t idx = 0; idx < numberOfResponses; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    BOOST_CHECK_GE(g_rings.getNumberOfResponseEntries(), (numberOfResponses / s_samplingRate));
+
+    dbrg.apply(now);
+    BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getClientAddressDynamicRules().size(), 0U);
+    BOOST_CHECK(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor1) == nullptr);
+  }
+
+  {
+    /* insert just above 50 ServFail/s from a given client in the last 10s
+       this should trigger the rule this time */
+    size_t numberOfResponses = 50 * numberOfSeconds + s_samplingRate;
+    g_rings.clear();
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 0U);
+    dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
+
+    dnsHeader.rcode = rcode;
+    for (size_t idx = 0; idx < numberOfResponses; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    BOOST_CHECK_GE(g_rings.getNumberOfResponseEntries(), (numberOfResponses / s_samplingRate));
+
+    dbrg.apply(now);
+    BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getClientAddressDynamicRules().size(), 1U);
+    BOOST_REQUIRE(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor1) != nullptr);
+    BOOST_CHECK(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor2) == nullptr);
+    const auto& block = dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor1)->second;
+    BOOST_CHECK_EQUAL(block.reason, reason);
+    BOOST_CHECK_EQUAL(static_cast<size_t>(block.until.tv_sec), now.tv_sec + blockDuration);
+    BOOST_CHECK(block.domain.empty());
+    BOOST_CHECK(block.action == action);
+    BOOST_CHECK_EQUAL(block.blocks, 0U);
+    BOOST_CHECK_EQUAL(block.warning, false);
+  }
+}
+
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRatio, TestFixture)
+{
   dnsheader dnsHeader{};
   memset(&dnsHeader, 0, sizeof(dnsHeader));
   DNSName qname("rings.powerdns.com.");
@@ -701,11 +905,11 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRatio, TestFixture) {
 
     dnsHeader.rcode = rcode;
     for (size_t idx = 0; idx < 20; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     dnsHeader.rcode = RCode::NoError;
     for (size_t idx = 0; idx < 80; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 100U);
 
@@ -722,7 +926,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRatio, TestFixture) {
 
     dnsHeader.rcode = RCode::FormErr;
     for (size_t idx = 0; idx < 50; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 50U);
 
@@ -740,11 +944,11 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRatio, TestFixture) {
 
     dnsHeader.rcode = rcode;
     for (size_t idx = 0; idx < 21; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     dnsHeader.rcode = RCode::NoError;
     for (size_t idx = 0; idx < 79; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 100U);
 
@@ -770,11 +974,11 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRatio, TestFixture) {
 
     dnsHeader.rcode = rcode;
     for (size_t idx = 0; idx < 11; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     dnsHeader.rcode = RCode::NoError;
     for (size_t idx = 0; idx < 39; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 50U);
 
@@ -784,7 +988,140 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_RCodeRatio, TestFixture) {
   }
 }
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_ResponseByteRate, TestFixture) {
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_AllowedRCodesRatio, TestFixture)
+{
+  dnsheader dnsHeader{};
+  memset(&dnsHeader, 0, sizeof(dnsHeader));
+  DNSName qname("rings.powerdns.com.");
+  ComboAddress requestor1("192.0.2.1");
+  ComboAddress requestor2("192.0.2.2");
+  ComboAddress backend("192.0.2.42");
+  uint16_t qtype = QType::AAAA;
+  uint16_t size = 42;
+  dnsdist::Protocol outgoingProtocol = dnsdist::Protocol::DoUDP;
+  unsigned int responseTime = 100 * 1000; /* 100ms */
+  struct timespec now;
+  gettime(&now);
+  NetmaskTree<DynBlock, AddressAndPortRange> emptyNMG;
+
+  time_t numberOfSeconds = 10;
+  unsigned int blockDuration = 60;
+  const auto action = DNSAction::Action::Drop;
+  const std::string reason = "Exceeded query ratio";
+  const std::unordered_set<uint8_t> allowedRCodes{RCode::NoError, RCode::NXDomain};
+  const uint16_t rcode = RCode::ServFail;
+
+  DynBlockRulesGroup dbrg;
+  dbrg.setQuiet(true);
+
+  {
+    /* block above 0.2 (not allowed rcodes)/Total ratio over numberOfSeconds seconds, no warning, minimum number of queries should be at least 51 */
+    DynBlockRulesGroup::DynBlockAllowedRCodesRatioRule rule(allowedRCodes, reason, blockDuration, 0.2, 0.0, numberOfSeconds, action, 51);
+    dbrg.setAllowedRCodesRatio(std::move(rule));
+  }
+
+  {
+    /* insert 20 ServFail and 40 NoErrors and 40 NXD from a given client in the last 10s
+       this should not trigger the rule */
+    g_rings.clear();
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 0U);
+    dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
+
+    dnsHeader.rcode = rcode;
+    for (size_t idx = 0; idx < 20; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    dnsHeader.rcode = RCode::NoError;
+    for (size_t idx = 0; idx < 40; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    dnsHeader.rcode = RCode::NXDomain;
+    for (size_t idx = 0; idx < 40; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 100U);
+
+    dbrg.apply(now);
+    BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getClientAddressDynamicRules().size(), 0U);
+    BOOST_CHECK(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor1) == nullptr);
+  }
+
+  {
+    /* insert just 60 FormErrs and nothing else, from a given client in the last 10s, this should trigger the rule */
+    g_rings.clear();
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 0U);
+    dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
+
+    dnsHeader.rcode = RCode::FormErr;
+    for (size_t idx = 0; idx < 60; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 60U);
+
+    dbrg.apply(now);
+    BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getClientAddressDynamicRules().size(), 1U);
+    BOOST_CHECK(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor1) != nullptr);
+  }
+
+  {
+    /* insert 21 ServFails and 40 NoErrors and 39 NXD from a given client in the last 10s
+       this should trigger the rule this time */
+    g_rings.clear();
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 0U);
+    dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
+
+    dnsHeader.rcode = rcode;
+    for (size_t idx = 0; idx < 21; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    dnsHeader.rcode = RCode::NoError;
+    for (size_t idx = 0; idx < 40; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    dnsHeader.rcode = RCode::NXDomain;
+    for (size_t idx = 0; idx < 39; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 100U);
+
+    dbrg.apply(now);
+    BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getClientAddressDynamicRules().size(), 1U);
+    BOOST_REQUIRE(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor1) != nullptr);
+    BOOST_CHECK(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor2) == nullptr);
+    const auto& block = dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor1)->second;
+    BOOST_CHECK_EQUAL(block.reason, reason);
+    BOOST_CHECK_EQUAL(block.until.tv_sec, now.tv_sec + blockDuration);
+    BOOST_CHECK(block.domain.empty());
+    BOOST_CHECK(block.action == action);
+    BOOST_CHECK_EQUAL(block.blocks, 0U);
+    BOOST_CHECK_EQUAL(block.warning, false);
+  }
+
+  {
+    /* insert 11 ServFails and 39 NoErrors from a given client in the last 10s
+       this should NOT trigger the rule since we don't have more than 50 queries */
+    g_rings.clear();
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 0U);
+    dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
+
+    dnsHeader.rcode = rcode;
+    for (size_t idx = 0; idx < 11; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    dnsHeader.rcode = RCode::NoError;
+    for (size_t idx = 0; idx < 39; idx++) {
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+    }
+    BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 50U);
+
+    dbrg.apply(now);
+    BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getClientAddressDynamicRules().size(), 0U);
+    BOOST_CHECK(dnsdist::DynamicBlocks::getClientAddressDynamicRules().lookup(requestor1) == nullptr);
+  }
+}
+
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_ResponseByteRate, TestFixture)
+{
   dnsheader dnsHeader{};
   memset(&dnsHeader, 0, sizeof(dnsHeader));
   DNSName qname("rings.powerdns.com.");
@@ -824,7 +1161,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_ResponseByteRate, TestFixture) {
 
     dnsHeader.rcode = rcode;
     for (size_t idx = 0; idx < numberOfResponses; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), numberOfResponses);
 
@@ -842,7 +1179,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_ResponseByteRate, TestFixture) {
 
     dnsHeader.rcode = rcode;
     for (size_t idx = 0; idx < numberOfResponses; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), numberOfResponses);
 
@@ -860,7 +1197,8 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_ResponseByteRate, TestFixture) {
   }
 }
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_CacheMissRatio, TestFixture) {
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_CacheMissRatio, TestFixture)
+{
   dnsheader dnsHeader{};
   memset(&dnsHeader, 0, sizeof(dnsHeader));
   DNSName qname("rings.powerdns.com.");
@@ -872,9 +1210,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_CacheMissRatio, TestFixture) {
   uint16_t size = 42;
   dnsdist::Protocol outgoingProtocol = dnsdist::Protocol::DoUDP;
   unsigned int responseTime = 100 * 1000; /* 100ms */
-  struct timespec now
-  {
-  };
+  struct timespec now{};
   gettime(&now);
   NetmaskTree<DynBlock, AddressAndPortRange> emptyNMG;
 
@@ -902,10 +1238,10 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_CacheMissRatio, TestFixture) {
     dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
 
     for (size_t idx = 0; idx < 20; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     for (size_t idx = 0; idx < 80; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, cacheHit, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, cacheHit, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 100U);
 
@@ -922,10 +1258,10 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_CacheMissRatio, TestFixture) {
     dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
 
     for (size_t idx = 0; idx < 51; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     for (size_t idx = 0; idx < 49; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, cacheHit, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, cacheHit, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 100U);
 
@@ -950,10 +1286,10 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_CacheMissRatio, TestFixture) {
     dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
 
     for (size_t idx = 0; idx < 40; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     for (size_t idx = 0; idx < 10; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, cacheHit, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, cacheHit, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 50U);
 
@@ -972,10 +1308,10 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_CacheMissRatio, TestFixture) {
     dnsdist::DynamicBlocks::clearClientAddressDynamicRules();
 
     for (size_t idx = 0; idx < 51; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, backend, outgoingProtocol);
     }
     for (size_t idx = 0; idx < 49; idx++) {
-      g_rings.insertResponse(now, requestor1, qname, qtype, responseTime, size, dnsHeader, cacheHit, outgoingProtocol);
+      g_rings.insertResponse(now, requestor1, DNSName(qname), qtype, responseTime, size, dnsHeader, cacheHit, outgoingProtocol);
     }
     BOOST_CHECK_EQUAL(g_rings.getNumberOfResponseEntries(), 100U);
 
@@ -985,7 +1321,8 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_CacheMissRatio, TestFixture) {
   }
 }
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_Warning, TestFixture) {
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_Warning, TestFixture)
+{
   dnsheader dnsHeader{};
   memset(&dnsHeader, 0, sizeof(dnsHeader));
   DNSName qname("rings.powerdns.com.");
@@ -1148,7 +1485,8 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_Warning, TestFixture) {
   }
 }
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_Ranges, TestFixture) {
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_Ranges, TestFixture)
+{
   dnsheader dnsHeader{};
   memset(&dnsHeader, 0, sizeof(dnsHeader));
   DNSName qname("rings.powerdns.com.");
@@ -1205,10 +1543,10 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesGroup_Ranges, TestFixture) {
     BOOST_CHECK_EQUAL(block.blocks, 0U);
     BOOST_CHECK_EQUAL(block.warning, false);
   }
-
 }
 
-BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesMetricsCache_GetTopN, TestFixture) {
+BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesMetricsCache_GetTopN, TestFixture)
+{
   dnsheader dnsHeader{};
   memset(&dnsHeader, 0, sizeof(dnsHeader));
   DNSName qname("rings.powerdns.com.");
@@ -1228,7 +1566,10 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesMetricsCache_GetTopN, TestFixture) {
 
   g_rings.reset();
   /* 10M entries, only one shard */
-  g_rings.init(10000000, 1);
+  Rings::RingsConfiguration config{
+    .capacity = 10000000U,
+  };
+  g_rings.init(config);
 
   {
     DynBlockRulesGroup dbrg;
@@ -1295,10 +1636,12 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesMetricsCache_GetTopN, TestFixture) {
     {
       DynBlockRulesGroup::DynBlockRule rule(reason, blockDuration, 0, 0, numberOfSeconds, action);
       dbrg.setSuffixMatchRule(std::move(rule), [](const StatNode& node, const StatNode::Stat& self, const StatNode::Stat& children) {
+        (void)node;
+        (void)children;
         if (self.queries > 0) {
-          return std::tuple<bool, boost::optional<std::string>, boost::optional<int>>(true, boost::none, boost::none);
+          return std::tuple<bool, std::optional<std::string>, std::optional<int>>(true, std::nullopt, std::nullopt);
         }
-        return std::tuple<bool, boost::optional<std::string>, boost::optional<int>>(false, boost::none, boost::none);
+        return std::tuple<bool, std::optional<std::string>, std::optional<int>>(false, std::nullopt, std::nullopt);
       });
     }
 
@@ -1355,10 +1698,12 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesMetricsCache_GetTopN, TestFixture) {
     {
       DynBlockRulesGroup::DynBlockRule rule(reason, blockDuration, 0, 0, numberOfSeconds, action);
       dbrg.setSuffixMatchRule(std::move(rule), [](const StatNode& node, const StatNode::Stat& self, const StatNode::Stat& children) {
+        (void)node;
+        (void)children;
         if (self.queries > 0) {
-          return std::tuple<bool, boost::optional<std::string>, boost::optional<int>>(true, "blocked for a different reason", static_cast<int>(DNSAction::Action::Truncate));
+          return std::tuple<bool, std::optional<std::string>, std::optional<int>>(true, "blocked for a different reason", static_cast<int>(DNSAction::Action::Truncate));
         }
-        return std::tuple<bool, boost::optional<std::string>, boost::optional<int>>(false, boost::none, boost::none);
+        return std::tuple<bool, std::optional<std::string>, std::optional<int>>(false, std::nullopt, std::nullopt);
       });
     }
 
@@ -1417,9 +1762,9 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesMetricsCache_GetTopN, TestFixture) {
       DynBlockRulesGroup::DynBlockRule rule(reason, blockDuration, 0, 0, numberOfSeconds, action);
       dbrg.setSuffixMatchRule(std::move(rule), [](const StatNode& node, const StatNode::Stat& self, const StatNode::Stat& children) {
         if (self.queries > 0) {
-          return std::tuple<bool, boost::optional<std::string>, boost::optional<int>>(true, boost::none, boost::none);
+          return std::tuple<bool, std::optional<std::string>, std::optional<int>>(true, std::nullopt, std::nullopt);
         }
-        return std::tuple<bool, boost::optional<std::string>, boost::optional<int>>(false, boost::none, boost::none);
+        return std::tuple<bool, std::optional<std::string>, std::optional<int>>(false, std::nullopt, std::nullopt);
       });
     }
 
@@ -1442,11 +1787,11 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesMetricsCache_GetTopN, TestFixture) {
     StopWatch sw;
     sw.start();
     dbrg.apply(now);
-    cerr<<"added 1000000 entries in "<<std::to_string(sw.udiff()/1024)<<"ms"<<endl;
+    cerr << "added 1000000 entries in " << std::to_string(sw.udiff() / 1024) << "ms" << endl;
 
     sw.start();
     auto top = DynBlockMaintenance::getTopSuffixes(20);
-    cerr<<"scanned 1000000 entries in "<<std::to_string(sw.udiff()/1024)<<"ms"<<endl;
+    cerr << "scanned 1000000 entries in " << std::to_string(sw.udiff() / 1024) << "ms" << endl;
     BOOST_CHECK_EQUAL(top.at(reason).size(), 20U);
     BOOST_CHECK_EQUAL(top.size(), 1U);
 
@@ -1454,7 +1799,7 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesMetricsCache_GetTopN, TestFixture) {
     expired.tv_sec += blockDuration + 1;
     sw.start();
     DynBlockMaintenance::purgeExpired(expired);
-    cerr<<"removed 1000000 entries in "<<std::to_string(sw.udiff()/1024)<<"ms"<<endl;
+    cerr << "removed 1000000 entries in " << std::to_string(sw.udiff() / 1024) << "ms" << endl;
     BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getSuffixDynamicRules().getNodes().size(), 0U);
   }
 #endif
@@ -1490,24 +1835,25 @@ BOOST_FIXTURE_TEST_CASE(test_DynBlockRulesMetricsCache_GetTopN, TestFixture) {
     StopWatch sw;
     sw.start();
     dbrg.apply(now);
-    cerr<<"added "<<dnsdist::DynamicBlocks::getClientAddressDynamicRules().size()<<" entries in "<<std::to_string(sw.udiff()/1024)<<"ms"<<endl;
+    cerr << "added " << dnsdist::DynamicBlocks::getClientAddressDynamicRules().size() << " entries in " << std::to_string(sw.udiff() / 1024) << "ms" << endl;
     BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getClientAddressDynamicRules().size(), 1000000U);
 
     sw.start();
     auto top = DynBlockMaintenance::getTopNetmasks(20);
-    cerr<<"scanned "<<dnsdist::DynamicBlocks::getClientAddressDynamicRules().size()<<" entries in "<<std::to_string(sw.udiff()/1024)<<"ms"<<endl;
+    cerr << "scanned " << dnsdist::DynamicBlocks::getClientAddressDynamicRules().size() << " entries in " << std::to_string(sw.udiff() / 1024) << "ms" << endl;
 
     struct timespec expired = now;
     expired.tv_sec += blockDuration + 1;
     sw.start();
     DynBlockMaintenance::purgeExpired(expired);
-    cerr<<"removed 1000000 entries in "<<std::to_string(sw.udiff()/1024)<<"ms"<<endl;
+    cerr << "removed 1000000 entries in " << std::to_string(sw.udiff() / 1024) << "ms" << endl;
     BOOST_CHECK_EQUAL(dnsdist::DynamicBlocks::getClientAddressDynamicRules().size(), 0U);
   }
 #endif
 }
 
-BOOST_AUTO_TEST_CASE(test_NetmaskTree) {
+BOOST_AUTO_TEST_CASE(test_NetmaskTree)
+{
   NetmaskTree<int, AddressAndPortRange> nmt;
   BOOST_CHECK_EQUAL(nmt.empty(), true);
   BOOST_CHECK_EQUAL(nmt.size(), 0U);
@@ -1568,7 +1914,8 @@ BOOST_AUTO_TEST_CASE(test_NetmaskTree) {
   BOOST_CHECK_EQUAL(nmt.lookup(ComboAddress("fe80::1"))->second, 2);
 }
 
-BOOST_AUTO_TEST_CASE(test_NetmaskTreePort) {
+BOOST_AUTO_TEST_CASE(test_NetmaskTreePort)
+{
   {
     /* exact port matching */
     NetmaskTree<int, AddressAndPortRange> nmt;

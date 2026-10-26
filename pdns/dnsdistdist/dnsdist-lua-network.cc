@@ -81,10 +81,12 @@ void NetworkListener::readCB(int desc, FDMultiplexer::funcparam_t& param)
       cbData->d_cb(cbData->d_endpoint, std::move(packet), fromAddr);
     }
     catch (const std::exception& e) {
-      vinfolog("Exception in the read callback of a NetworkListener: %s", e.what());
+      VERBOSESLOG(infolog("Exception in the read callback of a NetworkListener: %s", e.what()),
+                  dnsdist::logging::getTopLogger("network-listener")->error(Logr::Info, e.what(), "Exception in the read callback of a NetworkListener"));
     }
     catch (...) {
-      vinfolog("Exception in the read callback of a NetworkListener");
+      VERBOSESLOG(infolog("Exception in the read callback of a NetworkListener"),
+                  dnsdist::logging::getTopLogger("network-listener")->info(Logr::Info, "Unknown exception in the read callback of a NetworkListener"));
     }
   }
 }
@@ -106,7 +108,8 @@ bool NetworkListener::addUnixListeningEndpoint(const std::string& path, NetworkL
     if (err != 0) {
       err = errno;
       if (err != ENOENT) {
-        vinfolog("Error removing Unix socket to path '%s': %s", path, stringerror(err));
+        VERBOSESLOG(infolog("Error removing Unix socket to path '%s': %s", path, stringerror(err)),
+                    dnsdist::logging::getTopLogger("network-listener")->error(Logr::Info, err, "Error removing unix socket when adding a listening endpoint to a NetworkListener", "path", Logging::Loggable(path)));
       }
     }
   }
@@ -144,6 +147,7 @@ void NetworkListener::runOnce(ListenerData& data, timeval& now, uint32_t timeout
     return;
   }
 
+  dnsdist::configuration::refreshLocalRuntimeConfiguration();
   data.d_running = true;
   if (data.d_sockets.empty()) {
     throw runtime_error("NetworkListener started with no sockets");
@@ -157,12 +161,9 @@ void NetworkListener::runOnce(timeval& now, uint32_t timeout)
   runOnce(*d_data, now, timeout);
 }
 
-void NetworkListener::mainThread(std::shared_ptr<ListenerData>& dataArg)
+// NOLINTNEXTLINE(performance-unnecessary-value-param): take our own copy of the shared_ptr so it's still alive if the NetworkListener object gets destroyed while we are still running
+void NetworkListener::mainThread(std::shared_ptr<ListenerData> data)
 {
-  /* take our own copy of the shared_ptr so it's still alive if the NetworkListener object
-     gets destroyed while we are still running */
-  // NOLINTNEXTLINE(performance-unnecessary-copy-initialization): we really need a copy here, or we end up with use-after-free as explained above
-  auto data = dataArg;
   setThreadName("dnsdist/lua-net");
   timeval now{};
 
@@ -173,8 +174,8 @@ void NetworkListener::mainThread(std::shared_ptr<ListenerData>& dataArg)
 
 void NetworkListener::start()
 {
-  std::thread main = std::thread([this] {
-    mainThread(d_data);
+  std::thread main = std::thread([data = d_data]() mutable {
+    mainThread(std::move(data));
   });
   main.detach();
 }

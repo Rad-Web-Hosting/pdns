@@ -23,6 +23,7 @@
 
 #include "config.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -36,12 +37,12 @@
 #include "circular_buffer.hh"
 #include "dnsdist-idstate.hh"
 #include "dnsdist-lbpolicies.hh"
+#include "dnsdist-logging.hh"
 #include "dnsdist-protocols.hh"
 #include "dnsname.hh"
 #include "dnsdist-doh-common.hh"
 #include "doq.hh"
 #include "doh3.hh"
-#include "ednsoptions.hh"
 #include "iputils.hh"
 #include "misc.hh"
 #include "mplexer.hh"
@@ -55,6 +56,8 @@ uint64_t uptimeOfProcess(const std::string& str);
 using QTag = std::unordered_map<string, string>;
 
 class IncomingTCPConnectionState;
+
+class TCPQuerySender;
 
 struct ClientState;
 
@@ -81,27 +84,15 @@ struct DNSQuestion
 
   const dnsheader_aligned getHeader() const
   {
-    if (data.size() < sizeof(dnsheader)) {
-      throw std::runtime_error("Trying to access the dnsheader of a too small (" + std::to_string(data.size()) + ") DNSQuestion buffer");
+    if (getData().size() < sizeof(dnsheader)) {
+      throw std::runtime_error("Trying to access the dnsheader of a too small (" + std::to_string(getData().size()) + ") DNSQuestion buffer");
     }
-    dnsheader_aligned dh(data.data());
-    return dh;
-  }
-
-  /* this function is not safe against unaligned access, you should
-     use editHeader() instead, but we need it for the Lua bindings */
-  dnsheader* getMutableHeader() const
-  {
-    if (data.size() < sizeof(dnsheader)) {
-      throw std::runtime_error("Trying to access the dnsheader of a too small (" + std::to_string(data.size()) + ") DNSQuestion buffer");
-    }
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    return reinterpret_cast<dnsheader*>(data.data());
+    return dnsheader_aligned(getData().data());
   }
 
   bool hasRoomFor(size_t more) const
   {
-    return data.size() <= getMaximumSize() && (getMaximumSize() - data.size()) >= more;
+    return getData().size() <= getMaximumSize() && (getMaximumSize() - getData().size()) >= more;
   }
 
   size_t getMaximumSize() const
@@ -146,6 +137,24 @@ struct DNSQuestion
     ids.qTag->insert_or_assign(key, std::move(value));
   }
 
+  void unsetTag(const std::string& key)
+  {
+    if (ids.qTag) {
+      ids.qTag->erase(key);
+    }
+  }
+
+  std::optional<std::string> getTag(const std::string& key) const
+  {
+    if (ids.qTag) {
+      const auto tagIt = ids.qTag->find(key);
+      if (tagIt != ids.qTag->cend()) {
+        return tagIt->second;
+      }
+    }
+    return std::nullopt;
+  }
+
   const struct timespec& getQueryRealTime() const
   {
     return ids.queryRealTime.d_start;
@@ -166,14 +175,20 @@ struct DNSQuestion
     return ids.cs;
   }
 
+  std::shared_ptr<const Logr::Logger> getLogger(std::shared_ptr<const Logr::Logger> parent = nullptr) const;
+  std::shared_ptr<const Logr::Logger> getLogger(std::shared_ptr<const Logr::Logger> parent = nullptr);
+
 protected:
+  virtual std::shared_ptr<const Logr::Logger> getThisLogger(std::shared_ptr<const Logr::Logger> parent) const;
+
+  /* do not access the data field directly: use getData() or getMutableData() */
   PacketBuffer& data;
+  std::shared_ptr<const Logr::Logger> d_logger;
 
 public:
   InternalQueryState& ids;
   std::unique_ptr<Netmask> ecs{nullptr};
   std::string sni; /* Server Name Indication, if any (DoT or DoH) */
-  mutable std::unique_ptr<EDNSOptionViewMap> ednsOptions; /* this needs to be mutable because it is parsed just in time, when DNSQuestion is read-only */
   std::shared_ptr<IncomingTCPConnectionState> d_incomingTCPState{nullptr};
   std::unique_ptr<std::vector<ProxyProtocolValue>> proxyProtocolValues{nullptr};
   uint16_t ecsPrefixLength;
@@ -181,6 +196,7 @@ public:
   bool ecsOverride;
   bool useECS{true};
   bool asynchronous{false};
+  bool d_selfGeneratedHandledEDNS{false};
 };
 
 struct DownstreamState;
@@ -194,6 +210,9 @@ struct DNSResponse : DNSQuestion
   DNSResponse(DNSResponse&&) = default;
 
   const std::shared_ptr<DownstreamState>& d_downstream;
+
+protected:
+  std::shared_ptr<const Logr::Logger> getThisLogger(std::shared_ptr<const Logr::Logger> parent) const override;
 };
 
 using pdns::stat_t;
@@ -201,10 +220,6 @@ using pdns::stat_t;
 class BasicQPSLimiter
 {
 public:
-  BasicQPSLimiter()
-  {
-  }
-
   BasicQPSLimiter(unsigned int burst) :
     d_tokens(burst)
   {
@@ -263,11 +278,6 @@ protected:
 class QPSLimiter : public BasicQPSLimiter
 {
 public:
-  QPSLimiter() :
-    BasicQPSLimiter()
-  {
-  }
-
   QPSLimiter(unsigned int rate, unsigned int burst) :
     BasicQPSLimiter(burst), d_rate(rate), d_burst(burst), d_passthrough(false)
   {
@@ -318,8 +328,8 @@ class DNSCryptContext;
 
 struct ClientState
 {
-  ClientState(const ComboAddress& local_, bool isTCP_, bool doReusePort, int fastOpenQueue, const std::string& itfName, const std::set<int>& cpus_, bool enableProxyProtocol) :
-    cpus(cpus_), interface(itfName), local(local_), fastOpenQueueSize(fastOpenQueue), tcp(isTCP_), reuseport(doReusePort), d_enableProxyProtocol(enableProxyProtocol)
+  ClientState(const ComboAddress& local_, bool isTCP_, bool doReusePort, int fastOpenQueue, const std::string& itfName, const std::set<int>& cpus_, bool enableProxyProtocol, bool padResponses) :
+    cpus(cpus_), interface(itfName), local(local_), fastOpenQueueSize(fastOpenQueue), tcp(isTCP_), reuseport(doReusePort), d_enableProxyProtocol(enableProxyProtocol), d_padResponses(padResponses)
   {
   }
 
@@ -328,6 +338,10 @@ struct ClientState
   mutable stat_t responses{0};
   mutable stat_t tcpDiedReadingQuery{0};
   mutable stat_t tcpDiedSendingResponse{0};
+  mutable stat_t tcpDiedDuringProcessing{0};
+  mutable stat_t tcpBadALPN{0};
+  mutable stat_t tcpMaxDurationReached{0};
+  mutable stat_t tcpBadProxyProtocol{0};
   mutable stat_t tcpGaveUp{0};
   mutable stat_t tcpClientTimeouts{0};
   mutable stat_t tcpDownstreamTimeouts{0};
@@ -344,6 +358,7 @@ struct ClientState
   stat_t tls12queries{0}; // valid DNS queries received via TLSv1.2
   stat_t tls13queries{0}; // valid DNS queries received via TLSv1.3
   stat_t tlsUnknownqueries{0}; // valid DNS queries received via unknown TLS version
+  pdns::stat_double_t tcpAvgIOsPerConnection{0.0};
   pdns::stat_double_t tcpAvgQueriesPerConnection{0.0};
   /* in ms */
   pdns::stat_double_t tcpAvgConnectionDuration{0.0};
@@ -365,10 +380,10 @@ struct ClientState
   int tcpFD{-1};
   int tcpListenQueueSize{SOMAXCONN};
   int fastOpenQueueSize{0};
-  bool muted{false};
   bool tcp;
   bool reuseport;
   bool d_enableProxyProtocol{true}; // the global proxy protocol ACL still applies
+  bool d_padResponses{false};
   bool ready{false};
 
   int getSocket() const
@@ -396,10 +411,10 @@ struct ClientState
     return tlsFrontend != nullptr || (dohFrontend != nullptr && dohFrontend->isHTTPS());
   }
 
-  const TLSFrontend& getTLSFrontend() const
+  const std::shared_ptr<const TLSFrontend> getTLSFrontend() const
   {
     if (tlsFrontend != nullptr) {
-      return *tlsFrontend;
+      return tlsFrontend;
     }
     if (dohFrontend) {
       return dohFrontend->d_tlsContext;
@@ -508,10 +523,11 @@ struct ClientState
     d_filter = bpf;
   }
 
-  void updateTCPMetrics(size_t nbQueries, uint64_t durationMs)
+  void updateTCPMetrics(size_t nbQueries, uint64_t durationMs, size_t nbIOs)
   {
     tcpAvgQueriesPerConnection = (99.0 * tcpAvgQueriesPerConnection / 100.0) + (nbQueries / 100.0);
     tcpAvgConnectionDuration = (99.0 * tcpAvgConnectionDuration / 100.0) + (durationMs / 100.0);
+    tcpAvgIOsPerConnection = (99.0 * tcpAvgIOsPerConnection / 100.0) + (nbIOs / 100.0);
   }
 };
 
@@ -525,12 +541,18 @@ struct DownstreamState : public std::enable_shared_from_this<DownstreamState>
   DownstreamState& operator=(const DownstreamState&) = delete;
   DownstreamState& operator=(DownstreamState&&) = delete;
 
-  typedef std::function<std::tuple<DNSName, uint16_t, uint16_t>(const DNSName&, uint16_t, uint16_t, dnsheader*)> checkfunc_t;
+  using HealthCheckQueryGenerator = std::function<std::tuple<DNSName, uint16_t, uint16_t>(const DNSName&, uint16_t, uint16_t, dnsheader*)>;
+  using HealthCheckResponseValidator = std::function<bool(const DNSResponse*)>;
+
   enum class Availability : uint8_t
   {
     Up,
     Down,
-    Auto,
+    Auto
+  };
+  enum class HealthCheckMode : uint8_t
+  {
+    Active,
     Lazy
   };
   enum class LazyHealthCheckMode : uint8_t
@@ -539,12 +561,12 @@ struct DownstreamState : public std::enable_shared_from_this<DownstreamState>
     TimeoutOrServFail
   };
 
-  struct Config
+  struct BaseConfig
   {
-    Config()
+    BaseConfig()
     {
     }
-    Config(const ComboAddress& remote_) :
+    BaseConfig(const ComboAddress& remote_) :
       remote(remote_)
     {
     }
@@ -552,7 +574,8 @@ struct DownstreamState : public std::enable_shared_from_this<DownstreamState>
     TLSContextParameters d_tlsParams;
     set<string> pools;
     std::set<int> d_cpus;
-    checkfunc_t checkFunction;
+    HealthCheckQueryGenerator d_healthCheckGenerationFunction;
+    HealthCheckResponseValidator d_healthCheckResponseValidationCallback;
     std::optional<boost::uuids::uuid> id;
     DNSName checkName{"a.root-servers.net."};
     ComboAddress remote;
@@ -568,28 +591,29 @@ struct DownstreamState : public std::enable_shared_from_this<DownstreamState>
 #endif /* HAVE_XSK */
     size_t d_numberOfSockets{1};
     size_t d_maxInFlightQueriesPerConn{1};
+    size_t d_maxUDPOutstanding{0};
     size_t d_tcpConcurrentConnectionsLimit{0};
+    size_t d_maxOutstandingQueries{0};
     int order{1};
     int d_weight{1};
     int tcpConnectTimeout{5};
     int tcpRecvTimeout{30};
     int tcpSendTimeout{30};
     int d_qpsLimit{0};
-    unsigned int checkInterval{1};
     unsigned int sourceItf{0};
     QType checkType{QType::A};
     uint16_t checkClass{QClass::IN};
     uint16_t d_retries{5};
-    uint16_t checkTimeout{1000}; /* in milliseconds */
     uint16_t d_lazyHealthCheckSampleSize{100};
     uint16_t d_lazyHealthCheckMinSampleCount{1};
     uint16_t d_lazyHealthCheckFailedInterval{30};
     uint16_t d_lazyHealthCheckMaxBackOff{3600};
     uint8_t d_lazyHealthCheckThreshold{20};
     LazyHealthCheckMode d_lazyHealthCheckMode{LazyHealthCheckMode::TimeoutOrServFail};
-    uint8_t maxCheckFailures{1};
-    uint8_t minRiseSuccesses{1};
-    Availability availability{Availability::Auto};
+    uint8_t udpTimeout{0};
+    uint8_t dscp{0};
+    Availability d_availability{Availability::Auto};
+    HealthCheckMode d_healthCheckMode{HealthCheckMode::Active};
     bool d_tlsSubjectIsAddr{false};
     bool mustResolve{false};
     bool useECS{false};
@@ -607,6 +631,31 @@ struct DownstreamState : public std::enable_shared_from_this<DownstreamState>
     bool d_upgradeToLazyHealthChecks{false};
   };
 
+  struct Config : public BaseConfig
+  {
+    Config() :
+      BaseConfig()
+    {
+    }
+    Config(const ComboAddress& remote_) :
+      BaseConfig(remote_)
+    {
+    }
+    Config(const Config& c) :
+      BaseConfig(c)
+    {
+      checkInterval.store(c.checkInterval.load());
+      checkTimeout.store(c.checkTimeout.load());
+      maxCheckFailures.store(c.maxCheckFailures.load());
+      minRiseSuccesses.store(c.minRiseSuccesses.load());
+    }
+
+    std::atomic<unsigned int> checkInterval{1};
+    std::atomic<uint16_t> checkTimeout{1000}; /* in milliseconds */
+    std::atomic<uint8_t> maxCheckFailures{1};
+    std::atomic<uint8_t> minRiseSuccesses{1};
+  };
+
   struct HealthCheckMetrics
   {
     stat_t d_failures{0};
@@ -615,6 +664,18 @@ struct DownstreamState : public std::enable_shared_from_this<DownstreamState>
     stat_t d_networkErrors{0};
     stat_t d_mismatchErrors{0};
     stat_t d_invalidResponseErrors{0};
+  };
+
+  struct HealthCheckLatencyHisto
+  {
+    stat_t latency0_1{0};
+    stat_t latency1_10{0};
+    stat_t latency10_50{0};
+    stat_t latency50_100{0};
+    stat_t latency100_1000{0};
+    stat_t latencySlow{0};
+    stat_t latencySum{0};
+    stat_t latencyCount{0};
   };
 
   DownstreamState(DownstreamState::Config&& config, std::shared_ptr<TLSCtx> tlsCtx, bool connect);
@@ -685,12 +746,14 @@ public:
   std::shared_ptr<TLSCtx> d_tlsCtx{nullptr};
   std::vector<int> sockets;
   StopWatch sw;
-  QPSLimiter qps;
+  std::optional<QPSLimiter> d_qpsLimiter;
 #ifdef HAVE_XSK
   std::vector<std::shared_ptr<XskWorker>> d_xskInfos;
   std::vector<std::shared_ptr<XskSocket>> d_xskSockets;
 #endif
+  HealthCheckLatencyHisto d_healthCheckLatencyHisto{};
   std::atomic<uint64_t> idOffset{0};
+  std::atomic<double> d_healthCheckLatency{0.0};
   size_t socketsOffset{0};
   double latencyUsec{0.0};
   double latencyUsecTCP{0.0};
@@ -719,6 +782,9 @@ private:
   bool d_stopped{false};
 
 public:
+  static bool parseSourceParameter(const std::string& source, Config& config);
+  static bool parseAvailabilityConfigFromStr(DownstreamState::Config& config, const std::string& str);
+
   void updateStatisticsInfo()
   {
     auto delta = sw.udiffAndSet() / 1000000.0;
@@ -731,18 +797,25 @@ public:
 
   bool isUp() const
   {
-    if (d_config.availability == Availability::Down) {
+    if (d_config.d_availability == Availability::Down) {
       return false;
     }
-    else if (d_config.availability == Availability::Up) {
+    else if (d_config.d_availability == Availability::Up) {
       return true;
     }
     return upStatus.load(std::memory_order_relaxed);
   }
 
+  /* whether this backend can accept new queries, for that it needs:
+     - to be in the Up state
+     - below the outstanding queries limit, if any
+     - if enforceQPS is true, below the QPS threshold
+  */
+  bool canAcceptNewQueries(bool enforceQPS) const;
+
   void setUp()
   {
-    d_config.availability = Availability::Up;
+    d_config.d_availability = Availability::Up;
   }
 
   void setUpStatus(bool newStatus)
@@ -755,17 +828,23 @@ public:
   }
   void setDown()
   {
-    d_config.availability = Availability::Down;
+    d_config.d_availability = Availability::Down;
     latencyUsec = 0.0;
     latencyUsecTCP = 0.0;
   }
   void setAuto()
   {
-    d_config.availability = Availability::Auto;
+    d_config.d_availability = Availability::Auto;
+  }
+  void setActiveAuto()
+  {
+    d_config.d_availability = Availability::Auto;
+    d_config.d_healthCheckMode = HealthCheckMode::Active;
   }
   void setLazyAuto()
   {
-    d_config.availability = Availability::Lazy;
+    d_config.d_availability = Availability::Auto;
+    d_config.d_healthCheckMode = HealthCheckMode::Lazy;
     d_lazyHealthCheckStats.lock()->d_lastResults.set_capacity(d_config.d_lazyHealthCheckSampleSize);
   }
   bool healthCheckRequired(std::optional<time_t> currentTime = std::nullopt);
@@ -787,10 +866,10 @@ public:
   string getStatus() const
   {
     string status;
-    if (d_config.availability == DownstreamState::Availability::Up) {
+    if (d_config.d_availability == DownstreamState::Availability::Up) {
       status = "UP";
     }
-    else if (d_config.availability == DownstreamState::Availability::Down) {
+    else if (d_config.d_availability == DownstreamState::Availability::Down) {
       status = "DOWN";
     }
     else {
@@ -820,15 +899,17 @@ public:
     tcpAvgConnectionDuration = (99.0 * tcpAvgConnectionDuration / 100.0) + (durationMs / 100.0);
   }
 
-  void updateTCPLatency(double udiff)
+  void updateTCPLatency(double latencyUs)
   {
-    latencyUsecTCP = (127.0 * latencyUsecTCP / 128.0) + udiff / 128.0;
+    latencyUsecTCP = (127.0 * latencyUsecTCP / 128.0) + latencyUs / 128.0;
   }
 
   void incQueriesCount()
   {
     ++queries;
-    qps.addHit();
+    if (d_qpsLimiter) {
+      d_qpsLimiter->addHit();
+    }
   }
 
   void incCurrentConnectionsCount();
@@ -838,7 +919,7 @@ public:
     return d_config.d_tcpOnly || d_config.d_tcpCheck || d_tlsCtx != nullptr;
   }
 
-  bool isTCPOnly() const
+  [[nodiscard]] bool isTCPOnly() const
   {
     return d_config.d_tcpOnly || d_tlsCtx != nullptr;
   }
@@ -886,58 +967,10 @@ public:
     }
     return latencyUsec;
   }
-};
 
-void responderThread(std::shared_ptr<DownstreamState> dss);
+  unsigned int getQPSLimit() const;
 
-class DNSDistPacketCache;
-
-class DNSRule
-{
-public:
-  virtual ~DNSRule()
-  {
-  }
-  virtual bool matches(const DNSQuestion* dq) const = 0;
-  virtual string toString() const = 0;
-  mutable stat_t d_matches{0};
-};
-
-struct ServerPool
-{
-  ServerPool() :
-    d_servers(std::make_shared<const ServerPolicy::NumberedServerVector>())
-  {
-  }
-
-  ~ServerPool()
-  {
-  }
-
-  const std::shared_ptr<DNSDistPacketCache> getCache() const { return packetCache; };
-
-  bool getECS() const
-  {
-    return d_useECS;
-  }
-
-  void setECS(bool useECS)
-  {
-    d_useECS = useECS;
-  }
-
-  std::shared_ptr<DNSDistPacketCache> packetCache{nullptr};
-  std::shared_ptr<ServerPolicy> policy{nullptr};
-
-  size_t poolLoad();
-  size_t countServers(bool upOnly);
-  const std::shared_ptr<const ServerPolicy::NumberedServerVector> getServers();
-  void addServer(shared_ptr<DownstreamState>& server);
-  void removeServer(shared_ptr<DownstreamState>& server);
-
-private:
-  SharedLockGuarded<std::shared_ptr<const ServerPolicy::NumberedServerVector>> d_servers;
-  bool d_useECS{false};
+  [[nodiscard]] std::shared_ptr<const Logr::Logger> getLogger() const;
 };
 
 enum ednsHeaderFlags
@@ -945,8 +978,6 @@ enum ednsHeaderFlags
   EDNS_HEADER_FLAG_NONE = 0,
   EDNS_HEADER_FLAG_DO = 32768
 };
-
-extern shared_ptr<BPFFilter> g_defaultBPFFilter;
 
 void tcpAcceptorThread(const std::vector<ClientState*>& states);
 
@@ -961,9 +992,6 @@ bool checkQueryHeaders(const struct dnsheader& dnsHeader, ClientState& clientSta
 
 class DNSCryptQuery;
 
-bool handleDNSCryptQuery(PacketBuffer& packet, DNSCryptQuery& query, bool tcp, time_t now, PacketBuffer& response);
-bool checkDNSCryptQuery(const ClientState& clientState, PacketBuffer& query, std::unique_ptr<DNSCryptQuery>& dnsCryptQuery, time_t now, bool tcp);
-
 enum class ProcessQueryResult : uint8_t
 {
   Drop,
@@ -976,10 +1004,20 @@ enum class ProcessQueryResult : uint8_t
 #include "dnsdist-rule-chains.hh"
 
 ProcessQueryResult processQuery(DNSQuestion& dnsQuestion, std::shared_ptr<DownstreamState>& selectedBackend);
-ProcessQueryResult processQueryAfterRules(DNSQuestion& dnsQuestion, std::shared_ptr<DownstreamState>& selectedBackend);
-bool processResponse(PacketBuffer& response, DNSResponse& dnsResponse, bool muted);
+ProcessQueryResult processQueryAfterRules(DNSQuestion& dnsQuestion, std::shared_ptr<DownstreamState>& outgoingBackend);
+/* Process a response received from a backend. The return value indicates whether
+   the response processing should continue (true) or if it should be dropped right away (false).
+*/
+bool processResponse(PacketBuffer& response, DNSResponse& dnsResponse);
+/* Apply the decision (result) of a single rule to this query. If the decision implies to drop the query
+   `drop` will be set to `true`. The return value indicates whether subsequent rules should be evaluated (true)
+   or not (false).
+*/
 bool processRulesResult(const DNSAction::Action& action, DNSQuestion& dnsQuestion, std::string& ruleresult, bool& drop);
-bool processResponseAfterRules(PacketBuffer& response, DNSResponse& dnsResponse, bool muted);
+/* Handle the processing of a response once the rules have been applied. The return value indicates whether
+   the response processing should continue (true) or if it should be dropped right away (false).
+*/
+bool processResponseAfterRules(PacketBuffer& response, DNSResponse& dnsResponse);
 bool processResponderPacket(std::shared_ptr<DownstreamState>& dss, PacketBuffer& response, InternalQueryState&& ids);
 bool applyRulesToResponse(const std::vector<dnsdist::rules::ResponseRuleAction>& respRuleActions, DNSResponse& dnsResponse);
 
@@ -987,5 +1025,7 @@ bool assignOutgoingUDPQueryToBackend(std::shared_ptr<DownstreamState>& downstrea
 
 ssize_t udpClientSendRequestToBackend(const std::shared_ptr<DownstreamState>& backend, const int socketDesc, const PacketBuffer& request, bool healthCheck = false);
 bool sendUDPResponse(int origFD, const PacketBuffer& response, const int delayMsec, const ComboAddress& origDest, const ComboAddress& origRemote);
-void handleResponseSent(const DNSName& qname, const QType& qtype, double udiff, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol outgoingProtocol, dnsdist::Protocol incomingProtocol, bool fromBackend);
-void handleResponseSent(const InternalQueryState& ids, double udiff, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol outgoingProtocol, bool fromBackend);
+void handleResponseSent(DNSName&& qname, const QType& qtype, double latencyUs, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol outgoingProtocol, dnsdist::Protocol incomingProtocol, bool fromBackend);
+void handleResponseSent(InternalQueryState& ids, double latencyUs, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol outgoingProtocol, bool fromBackend);
+bool handleTimeoutResponseRules(const std::vector<dnsdist::rules::ResponseRuleAction>& rules, InternalQueryState& ids, const std::shared_ptr<DownstreamState>& ds, const std::shared_ptr<TCPQuerySender>& sender);
+void handleServerStateChange(const std::string& nameWithAddr, bool newResult);

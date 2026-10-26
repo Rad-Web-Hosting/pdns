@@ -22,7 +22,11 @@ void AuthLua4::postPrepareContext() {
   d_lw->writeFunction("resolve", [](const std::string& qname, uint16_t qtype) {
       std::vector<DNSZoneRecord> ret;
       std::unordered_map<int, DNSResourceRecord> luaResult;
-      stubDoResolve(DNSName(qname), qtype, ret);
+      std::shared_ptr<Logr::Logger> slog;
+      if (g_slogStructured) {
+        slog = g_slog->withName("lua");
+      }
+      stubDoResolve(slog, DNSName(qname), qtype, ret);
       int i = 0;
       for(const auto &row: ret) {
         luaResult[++i] = DNSResourceRecord::fromWire(row.dr);
@@ -32,8 +36,6 @@ void AuthLua4::postPrepareContext() {
   });
 
 /* DNSPacket */
-  d_lw->writeFunction("newDNSPacket", [](bool isQuery) { return std::make_shared<DNSPacket>(isQuery); });
-  d_lw->writeFunction("dupDNSPacket", [](const std::shared_ptr<DNSPacket> &orig) { return std::make_shared<DNSPacket>(*orig); });
   d_lw->registerFunction<DNSPacket, int(const char *, size_t)>("noparse", [](DNSPacket &p, const char *mesg, size_t len){ return p.noparse(mesg, len); });
   d_lw->registerFunction<DNSPacket, int(const char *, size_t)>("parse", [](DNSPacket &p, const char *mesg, size_t len){ return p.parse(mesg, len); });
   d_lw->registerFunction<DNSPacket, const std::string()>("getString", [](DNSPacket &p) { return p.getString(); });
@@ -65,7 +67,7 @@ void AuthLua4::postPrepareContext() {
   d_lw->registerFunction<DNSPacket, std::unordered_map<unsigned int, DNSRecord>()>("getRRS", [](DNSPacket &p){ std::unordered_map<unsigned int, DNSRecord> ret; unsigned int i = 0; for(const auto &rec: p.getRRS()) { ret.insert({i++, rec.dr}); } return ret;});
   d_lw->registerMember<DNSPacket, DNSName>("qdomain", [](const DNSPacket &p) -> DNSName { return p.qdomain; }, [](DNSPacket &p, const DNSName& name) { p.qdomain = name; });
   d_lw->registerMember<DNSPacket, DNSName>("qdomainwild", [](const DNSPacket &p) -> DNSName { return p.qdomainwild; }, [](DNSPacket &p, const DNSName& name) { p.qdomainwild = name; });
-  d_lw->registerMember<DNSPacket, DNSName>("qdomainzone", [](const DNSPacket &p) -> DNSName { return p.qdomainzone; }, [](DNSPacket &p, const DNSName& name) { p.qdomainzone = name; });
+  d_lw->registerMember<DNSPacket, DNSName>("qdomainzone", [](const DNSPacket &pkt) -> DNSName { return pkt.qdomainzone.operator const DNSName&(); }, [](DNSPacket &pkt, const DNSName& name) { pkt.qdomainzone = ZoneName(name); });
 
   d_lw->registerMember<DNSPacket, std::string>("d_peer_principal", [](const DNSPacket &p) -> std::string { return p.d_peer_principal; }, [](DNSPacket &p, const std::string &princ) { p.d_peer_principal = princ; });
   d_lw->registerMember<DNSPacket, const std::string>("qtype", [](const DNSPacket &p) ->  const std::string { return p.qtype.toString(); }, [](DNSPacket &p, const std::string &type) { p.qtype = type; });
@@ -73,8 +75,8 @@ void AuthLua4::postPrepareContext() {
 
 
 /* update policy */
-  d_lw->registerFunction<DNSName(UpdatePolicyQuery::*)()>("getQName", [](UpdatePolicyQuery& upq) { return upq.qname; });
-  d_lw->registerFunction<DNSName(UpdatePolicyQuery::*)()>("getZoneName", [](UpdatePolicyQuery& upq) { return upq.zonename; });
+  d_lw->registerFunction<DNSName(UpdatePolicyQuery::*)()>("getQName", [](UpdatePolicyQuery& upq) -> const DNSName& { return upq.qname; });
+  d_lw->registerFunction<DNSName(UpdatePolicyQuery::*)()>("getZoneName", [](UpdatePolicyQuery& upq) -> const DNSName& { return upq.zonename; });
   d_lw->registerFunction<uint16_t(UpdatePolicyQuery::*)()>("getQType", [](UpdatePolicyQuery& upq) { return upq.qtype; });
   d_lw->registerFunction<ComboAddress(UpdatePolicyQuery::*)()>("getLocal", [](UpdatePolicyQuery& upq) { return upq.local; });
   d_lw->registerFunction<ComboAddress(UpdatePolicyQuery::*)()>("getRemote", [](UpdatePolicyQuery& upq) { return upq.remote; });
@@ -126,7 +128,7 @@ bool AuthLua4::axfrfilter(const ComboAddress& remote, const DNSName& zone, const
       }
       rec.setContent(boost::get<std::string>(map.at("content")));
 
-      out.push_back(rec);
+      out.push_back(std::move(rec));
     }
   }
   catch (const std::exception& e) {

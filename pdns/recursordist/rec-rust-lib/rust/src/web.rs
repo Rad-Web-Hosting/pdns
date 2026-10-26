@@ -1,0 +1,1348 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
+/*
+TODO
+- Table based routing?
+- Ripping out yahttp stuff, providing some basic classes only. ATM we do use a few yahttp include files (but no .cc)
+- Some classes (NetmaskGroup, ComboAddress) need a UniquePtr Wrapper to keep them opaque (iputils
+  cannot be included without big headaches in bridge.hh at the moment). We could separate
+  NetmaskGroup, but I expect ComboAddress to not work as it is union.
+- Avoid unsafe? Can it be done?
+*/
+
+use std::net::SocketAddr;
+
+use base64::prelude::*;
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{body::Incoming as IncomingBody, header, Method, Request, Response, StatusCode};
+use hyper::body::Body;
+use hyper_util::rt::TokioIo;
+use pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+use std::str::FromStr;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio::runtime::Builder;
+use tokio::task::JoinSet;
+
+use crate::misc::rustmisc;
+
+type GenericError = Box<dyn std::error::Error + Send + Sync>;
+type MyResult<T> = std::result::Result<T, GenericError>;
+type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
+
+static NOTFOUND: &[u8] = b"Not Found";
+
+fn full<T: Into<Bytes>>(chunk: T) -> BoxBody {
+    Full::new(chunk.into())
+        .map_err(|never| match never {})
+        .boxed()
+}
+
+type Func = fn(&rustweb::Request, &mut rustweb::Response) -> Result<(), cxx::Exception>;
+
+fn compare_authorization(ctx: &Context, reqheaders: &header::HeaderMap) -> bool {
+    let mut auth_ok = false;
+    if !ctx.password_ch.is_null() {
+        if let Some(authorization) = reqheaders.get("authorization") {
+            let mut lcase = authorization.as_bytes().to_owned();
+            lcase.make_ascii_lowercase();
+            if lcase.starts_with(b"basic ") {
+                let cookie = &authorization.as_bytes()[6..];
+                if let Ok(plain) = BASE64_STANDARD.decode(cookie) {
+                    let mut split = plain.split(|i| *i == b':');
+                    if split.next().is_some() {
+                        if let Some(split) = split.next() {
+                            cxx::let_cxx_string!(s = &split);
+                            if let Some(pw) = ctx.password_ch.as_ref() {
+                                auth_ok = pw.matches(&s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        auth_ok = true; // this is intended behaviour, entry points that have "allow_password" set to true get access if no password is configured
+    }
+    auth_ok
+}
+
+fn unauthorized(response: &mut rustweb::Response, headers: &mut header::HeaderMap, auth: &str) {
+    let status = StatusCode::UNAUTHORIZED;
+    response.status = status.as_u16();
+    let val = format!("{} realm=\"PowerDNS\"", auth);
+    if let Ok(data) = header::HeaderValue::from_str(&val) {
+        headers.insert(header::WWW_AUTHENTICATE, data);
+    }
+    if let Some(body) = status.canonical_reason() {
+        response.body = body.as_bytes().to_vec();
+    }
+}
+
+fn nonapi_wrapper(
+    ctx: &Context,
+    handler: Func,
+    request: &rustweb::Request,
+    response: &mut rustweb::Response,
+    reqheaders: &header::HeaderMap,
+    headers: &mut header::HeaderMap,
+) {
+    let auth_ok = compare_authorization(ctx, reqheaders);
+    if !auth_ok {
+        rustmisc::log(
+            request.logger,
+            rustweb::Priority::Debug,
+            "Authentication failed",
+            &vec![rustmisc::KeyValue {
+                key: "urlpath".to_string(),
+                value: request.uri.to_owned(),
+            }],
+        );
+        unauthorized(response, headers, "Basic");
+        return;
+    }
+    match handler(request, response) {
+        Ok(_) => {}
+        Err(_) => {
+            let status = StatusCode::UNPROCESSABLE_ENTITY; // 422
+            response.status = status.as_u16();
+            if let Some(body) = status.canonical_reason() {
+                response.body = body.as_bytes().to_vec();
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn file_wrapper(
+    ctx: &Context,
+    handler: FileFunc,
+    method: &Method,
+    path: &str,
+    request: &rustweb::Request,
+    response: &mut rustweb::Response,
+    reqheaders: &header::HeaderMap,
+    headers: &mut header::HeaderMap,
+) {
+    let auth_ok = compare_authorization(ctx, reqheaders);
+    if !auth_ok {
+        rustmisc::log(
+            request.logger,
+            rustweb::Priority::Debug,
+            "Authentication failed",
+            &vec![rustmisc::KeyValue {
+                key: "urlpath".to_string(),
+                value: request.uri.to_owned(),
+            }],
+        );
+        unauthorized(response, headers, "Basic");
+        return;
+    }
+    handler(method, path, request, response);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn api_wrapper(
+    logger: &cxx::SharedPtr<rustweb::Logger>,
+    ctx: &Context,
+    handler: Func,
+    request: &rustweb::Request,
+    response: &mut rustweb::Response,
+    reqheaders: &header::HeaderMap,
+    headers: &mut header::HeaderMap,
+    allow_password: bool,
+) {
+
+    // XXX AUDIT!
+
+    let mut auth_ok = false;
+    if !ctx.api_ch.is_null() {
+        if let Some(api) = reqheaders.get("x-api-key") {
+            cxx::let_cxx_string!(s = &api.as_bytes());
+            if let Some(pw) = ctx.api_ch.as_ref() {
+                auth_ok = pw.matches(&s);
+            }
+        }
+    }
+
+    if !auth_ok && allow_password {
+        auth_ok = compare_authorization(ctx, reqheaders);
+        if !auth_ok {
+            rustmisc::log(
+                logger,
+                rustweb::Priority::Debug,
+                "Authentication failed",
+                &vec![rustmisc::KeyValue {
+                    key: "urlpath".to_string(),
+                    value: request.uri.to_owned(),
+                }],
+            );
+            unauthorized(response, headers, "Basic");
+            return;
+        }
+    }
+    if !auth_ok {
+        if ctx.api_ch.is_null() {
+            rustmisc::log(
+                logger,
+                rustweb::Priority::Error,
+                "Authentication failed, API Key missing in config",
+                &vec![rustmisc::KeyValue {
+                    key: "urlpath".to_string(),
+                    value: request.uri.to_owned(),
+                }],
+            );
+            unauthorized(response, headers, "X-API-Key");
+            return;
+        }
+
+        rustmisc::log(
+            logger,
+            rustweb::Priority::Error,
+            "Authentication failed",
+            &vec![rustmisc::KeyValue {
+                key: "urlpath".to_string(),
+                value: request.uri.to_owned(),
+            }],
+        );
+        unauthorized(response, headers, "X-API-Key");
+        return;
+    }
+    response.status = StatusCode::OK.as_u16(); // 200;
+
+    // security headers
+    if !ctx.cross_origin_request_header.is_empty()  {
+        if let Ok(value) = header::HeaderValue::from_str(&ctx.cross_origin_request_header) {
+            headers.insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                value,
+            );
+        }
+    }
+
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("deny"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-permitted-cross-domain-policies"),
+        header::HeaderValue::from_static("none"),
+    );
+    headers.insert(
+        header::X_XSS_PROTECTION,
+        header::HeaderValue::from_static("1; mode=block"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static("default-src 'self'; style-src 'self' 'unsafe-inline'"),
+    );
+
+    // This calls into C++
+    match handler(request, response) {
+        Ok(_) => {}
+        Err(_) => {
+            let status = StatusCode::UNPROCESSABLE_ENTITY; // 422
+            response.status = status.as_u16();
+            if let Some(body) = status.canonical_reason() {
+                response.body = body.as_bytes().to_vec();
+            }
+        }
+    }
+}
+
+// Data used by requests handlers, if you add a r/w variable, make sure it's safe for concurrent access!
+struct Context {
+    password_ch: cxx::UniquePtr<rustweb::CredentialsHolder>,
+    api_ch: cxx::UniquePtr<rustweb::CredentialsHolder>,
+    acl: cxx::UniquePtr<rustmisc::NetmaskGroup>,
+    logger: cxx::SharedPtr<rustmisc::Logger>,
+    loglevel: rustmisc::LogLevel,
+    max_request_size: u64,
+    cross_origin_request_header: String,
+}
+
+// Serve a file
+fn file(method: &Method, path: &str, request: &rustweb::Request, response: &mut rustweb::Response) {
+    // This calls into C++
+    if rustweb::serveStuff(request, response).is_err() {
+        // Return 404 not found response.
+        response.status = StatusCode::NOT_FOUND.as_u16();
+        response.body = NOTFOUND.to_vec();
+        rustmisc::log(
+            request.logger,
+            rustweb::Priority::Debug,
+            "Not found",
+            &vec![
+                rustmisc::KeyValue {
+                    key: "method".to_string(),
+                    value: method.to_string(),
+                },
+                rustmisc::KeyValue {
+                    key: "path".to_string(),
+                    value: path.to_string(),
+                },
+            ],
+        );
+    }
+}
+
+type FileFunc =
+    fn(method: &Method, path: &str, request: &rustweb::Request, response: &mut rustweb::Response);
+
+// Match a request and return the function that implements it, this should probably be table based.
+fn matcher(
+    method: &Method,
+    path: &str,
+    apifunc: &mut Option<Func>,
+    rawfunc: &mut Option<Func>,
+    filefunc: &mut Option<FileFunc>,
+    allow_password: &mut bool,
+    request: &mut rustweb::Request,
+) {
+    let path: Vec<_> = path.split('/').skip(1).collect();
+    match (method, &*path) {
+        (&Method::GET, ["jsonstat"]) => {
+            *allow_password = true;
+            *apifunc = Some(rustweb::jsonstat);
+        }
+        (&Method::PUT, ["api", "v1", "servers", "localhost", "cache", "flush"]) => {
+            *apifunc = Some(rustweb::apiServerCacheFlush)
+        }
+        (&Method::PUT, ["api", "v1", "servers", "localhost", "config", "allow-from"]) => {
+            *apifunc = Some(rustweb::apiServerConfigAllowFromPUT)
+        }
+        (&Method::GET, ["api", "v1", "servers", "localhost", "config", "allow-from"]) => {
+            *apifunc = Some(rustweb::apiServerConfigAllowFromGET)
+        }
+        (&Method::PUT, ["api", "v1", "servers", "localhost", "config", "allow-notify-from"]) => {
+            *apifunc = Some(rustweb::apiServerConfigAllowNotifyFromPUT)
+        }
+        (&Method::GET, ["api", "v1", "servers", "localhost", "config", "allow-notify-from"]) => {
+            *apifunc = Some(rustweb::apiServerConfigAllowNotifyFromGET)
+        }
+        (&Method::GET, ["api", "v1", "servers", "localhost", "config"]) => {
+            *apifunc = Some(rustweb::apiServerConfig)
+        }
+        (&Method::GET, ["api", "v1", "servers", "localhost", "rpzstatistics"]) => {
+            *apifunc = Some(rustweb::apiServerRPZStats)
+        }
+        (&Method::GET, ["api", "v1", "servers", "localhost", "search-data"]) => {
+            *apifunc = Some(rustweb::apiServerSearchData)
+        }
+        (&Method::GET, ["api", "v1", "servers", "localhost", "zones", id]) => {
+            request.parameters.push(rustweb::KeyValue {
+                key: String::from("id"),
+                value: String::from(*id),
+            });
+            *apifunc = Some(rustweb::apiServerZoneDetailGET);
+        }
+        (&Method::PUT, ["api", "v1", "servers", "localhost", "zones", id]) => {
+            request.parameters.push(rustweb::KeyValue {
+                key: String::from("id"),
+                value: String::from(*id),
+            });
+            *apifunc = Some(rustweb::apiServerZoneDetailPUT);
+        }
+        (&Method::DELETE, ["api", "v1", "servers", "localhost", "zones", id]) => {
+            request.parameters.push(rustweb::KeyValue {
+                key: String::from("id"),
+                value: String::from(*id),
+            });
+            *apifunc = Some(rustweb::apiServerZoneDetailDELETE);
+        }
+        (&Method::GET, ["api", "v1", "servers", "localhost", "statistics"]) => {
+            *allow_password = true;
+            *apifunc = Some(rustweb::apiServerStatistics);
+        }
+        (&Method::GET, ["api", "v1", "servers", "localhost", "zones"]) => {
+            *apifunc = Some(rustweb::apiServerZonesGET)
+        }
+        (&Method::POST, ["api", "v1", "servers", "localhost", "zones"]) => {
+            *apifunc = Some(rustweb::apiServerZonesPOST)
+        }
+        (&Method::GET, ["api", "v1", "servers", "localhost"]) => {
+            *allow_password = true;
+            *apifunc = Some(rustweb::apiServerDetail);
+        }
+        (&Method::GET, ["api", "v1", "servers"]) => *apifunc = Some(rustweb::apiServer),
+        (&Method::GET, ["api", "v1"]) => *apifunc = Some(rustweb::apiDiscoveryV1),
+        (&Method::GET, ["api"]) => *apifunc = Some(rustweb::apiDiscovery),
+        (&Method::GET, ["metrics"]) => *rawfunc = Some(rustweb::prometheusMetrics),
+        (&Method::GET, ["api", "v1", "servers", "localhost", "ottraceconditions"]) => {
+            *apifunc = Some(rustweb::apiServerOTConditionsGET);
+        }
+        (&Method::GET, ["api", "v1", "servers", "localhost", "ottraceconditions", ip, pflen]) => {
+            request.parameters.push(rustweb::KeyValue {
+                key: String::from("acl"),
+                value: String::from(*ip) + "/" + *pflen,
+            });
+            *apifunc = Some(rustweb::apiServerOTConditionDetailGET)
+        }
+        (&Method::DELETE, ["api", "v1", "servers", "localhost", "ottraceconditions", ip, pflen]) => {
+            request.parameters.push(rustweb::KeyValue {
+                key: String::from("acl"),
+                value: String::from(*ip) + "/" + *pflen,
+            });
+            *apifunc = Some(rustweb::apiServerOTConditionDetailDELETE)
+        }
+        (&Method::POST, ["api", "v1", "servers", "localhost", "ottraceconditions"]) => {
+            *apifunc = Some(rustweb::apiServerOTConditionDetailPOST)
+        }
+        _ => *filefunc = Some(file),
+    }
+}
+
+// This constructs the answer to an OPTIONS query
+fn collect_options(
+    ctx: &Context,
+    path: &str,
+    response: &mut rustweb::Response,
+    my_logger: &cxx::SharedPtr<rustmisc::Logger>,
+) {
+    let mut methods = vec![];
+    for method in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+        let mut apifunc: Option<Func> = None;
+        let mut rawfunc: Option<_> = None;
+        let mut filefunc: Option<_> = None;
+        let mut allow_password = false;
+        let mut request = rustweb::Request {
+            body: vec![],
+            uri: String::from(""),
+            vars: vec![],
+            parameters: vec![],
+            logger: my_logger,
+        };
+        matcher(
+            &method,
+            path,
+            &mut apifunc,
+            &mut rawfunc,
+            &mut filefunc,
+            &mut allow_password,
+            &mut request,
+        );
+        if apifunc.is_some() || rawfunc.is_some()
+        /* || filefunc.is_some() */
+        {
+            methods.push(method.to_string());
+        }
+    }
+    if methods.is_empty() {
+        response.status = 404;
+        return;
+    }
+    response.status = 200;
+    methods.push(Method::OPTIONS.to_string());
+
+    if !ctx.cross_origin_request_header.is_empty() {
+        response.headers.push(rustweb::KeyValue {
+            key: String::from("access-control-allow-origin"),
+            value: ctx.cross_origin_request_header.clone(),
+        });
+    }
+
+    response.headers.push(rustweb::KeyValue {
+        key: String::from("access-control-allow-headers"),
+        value: String::from("Content-Type, X-API-Key"),
+    });
+    response.headers.push(rustweb::KeyValue {
+        key: String::from("access-control-max-age"),
+        value: String::from("3600"),
+    });
+    response.headers.push(rustweb::KeyValue {
+        key: String::from("access-control-allow-methods"),
+        value: methods.join(", "),
+    });
+    response.headers.push(rustweb::KeyValue {
+        key: String::from("content-type"),
+        value: String::from("text/plain"),
+    });
+}
+
+fn log_request(loglevel: rustmisc::LogLevel, request: &rustweb::Request, remote: SocketAddr) {
+    if loglevel != rustmisc::LogLevel::Detailed {
+        return;
+    }
+    let body = std::str::from_utf8(&request.body).unwrap_or("error: body is not utf8");
+    let mut vec = vec![
+        rustmisc::KeyValue {
+            key: "remote".to_string(),
+            value: remote.to_string(),
+        },
+        rustmisc::KeyValue {
+            key: "body".to_string(),
+            value: body.to_string(),
+        },
+    ];
+    let mut first = true;
+    let mut str = "".to_string();
+    for var in &request.vars {
+        if !first {
+            str.push(' ');
+        }
+        first = false;
+        let snippet = var.key.to_owned() + "=" + &var.value;
+        str.push_str(&snippet);
+    }
+    vec.push(rustmisc::KeyValue {
+        key: "getVars".to_string(),
+        value: str.to_string(),
+    });
+    rustmisc::log(
+        request.logger,
+        rustmisc::Priority::Info,
+        "Request details",
+        &vec,
+    );
+}
+
+fn log_response(
+    loglevel: rustmisc::LogLevel,
+    logger: &cxx::SharedPtr<rustmisc::Logger>,
+    response: &rustweb::Response,
+    remote: SocketAddr,
+) {
+    if loglevel != rustmisc::LogLevel::Detailed {
+        return;
+    }
+    let body = std::str::from_utf8(&response.body).unwrap_or("error: body is not utf8");
+    let mut vec = vec![
+        rustmisc::KeyValue {
+            key: "remote".to_string(),
+            value: remote.to_string(),
+        },
+        rustmisc::KeyValue {
+            key: "body".to_string(),
+            value: body.to_string(),
+        },
+    ];
+    let mut first = true;
+    let mut str = "".to_string();
+    for var in &response.headers {
+        if !first {
+            str.push(' ');
+        }
+        first = false;
+        let snippet = var.key.to_owned() + "=" + &var.value;
+        str.push_str(&snippet);
+    }
+    vec.push(rustmisc::KeyValue {
+        key: "headers".to_string(),
+        value: str.to_string(),
+    });
+    rustmisc::log(logger, rustmisc::Priority::Info, "Response details", &vec);
+}
+
+// Main entry point after a request arrived
+async fn process_request(
+    rust_request: Request<IncomingBody>,
+    ctx: Arc<Context>,
+    remote: SocketAddr,
+) -> MyResult<Response<BoxBody>> {
+    let unique = rustmisc::getUUID();
+    let my_logger = rustmisc::withValue(&ctx.logger, "uniqueid", &unique);
+
+    // Convert  query part of URI into vars table
+    let mut vars: Vec<rustweb::KeyValue> = vec![];
+    if let Some(query) = rust_request.uri().query() {
+        for (k, v) in form_urlencoded::parse(query.as_bytes()) {
+            if k == "_" {
+                // jQuery cache buster
+                continue;
+            }
+            let kv = rustweb::KeyValue {
+                key: k.to_string(),
+                value: v.to_string(),
+            };
+            vars.push(kv);
+        }
+    }
+
+    // Fill request and response structs with default values.
+    let mut request = rustweb::Request {
+        body: vec![],
+        uri: rust_request.uri().to_string(),
+        vars,
+        parameters: vec![],
+        logger: &my_logger,
+    };
+
+    log_request(ctx.loglevel, &request, remote);
+
+    let mut response = rustweb::Response {
+        status: 0,
+        body: vec![],
+        headers: vec![],
+    };
+    let mut apifunc: Option<Func> = None;
+    let mut rawfunc: Option<_> = None;
+    let mut filefunc: Option<_> = None;
+    let method = rust_request.method().to_owned();
+    let mut allow_password = false;
+    let mut rust_response = Response::builder();
+
+    let path = rust_request.uri().path().to_owned();
+    let version = rust_request.version().to_owned();
+
+    if method == Method::OPTIONS {
+        collect_options(&ctx, &path, &mut response, &my_logger);
+    } else {
+        // Find the right function implementing what the request wants
+        let mut matchmethod = method.clone();
+        if method == Method::HEAD {
+            matchmethod = Method::GET;
+        }
+        matcher(
+            &matchmethod,
+            &path,
+            &mut apifunc,
+            &mut rawfunc,
+            &mut filefunc,
+            &mut allow_password,
+            &mut request,
+        );
+
+        if let Some(func) = apifunc {
+            let reqheaders = rust_request.headers().clone();
+            if rust_request.method() == Method::POST || rust_request.method() == Method::PUT {
+                let body_size = rust_request.size_hint().upper();
+                // From observation, hyper handles invalid or missing content length in a safe way
+                // by making the value 0. The actual body collect() is limited by the promised
+                // content length in the request
+                if body_size.is_none_or(|x| x > ctx.max_request_size) {
+                    let mut body = vec![];
+                    let status = StatusCode::PAYLOAD_TOO_LARGE; // 413
+                    if let Some(reason) = status.canonical_reason() {
+                        body = reason.as_bytes().to_vec();
+                    }
+                    if ctx.loglevel != rustmisc::LogLevel::None {
+                        let version = format!("{:?}", version);
+                        rustmisc::log(
+                            &my_logger,
+                            rustweb::Priority::Warning,
+                            "Request",
+                            &vec![
+                                rustmisc::KeyValue {
+                                    key: "remote".to_string(),
+                                    value: remote.to_string(),
+                                },
+                                rustmisc::KeyValue {
+                                    key: "method".to_string(),
+                                    value: method.to_string(),
+                                },
+                                rustmisc::KeyValue {
+                                    key: "urlpath".to_string(),
+                                    value: path.to_string(),
+                                },
+                                rustmisc::KeyValue {
+                                    key: "HTTPVersion".to_string(),
+                                    value: version,
+                                },
+                                rustmisc::KeyValue {
+                                    key: "status".to_string(),
+                                    value: status.as_u16().to_string(),
+                                },
+                                rustmisc::KeyValue {
+                                    key: "respsize".to_string(),
+                                    value: body.len().to_string(),
+                                },
+                            ],
+                        );
+                    }
+                    let rust_response = rust_response
+                        .status(status)
+                        .body(full(body))?;
+                    return Ok(rust_response);
+                }
+                request.body = rust_request.collect().await?.to_bytes().to_vec();
+            }
+            // This calls indirectly into C++
+            api_wrapper(
+                &my_logger,
+                &ctx,
+                func,
+                &request,
+                &mut response,
+                &reqheaders,
+                rust_response.headers_mut().expect("no headers?"),
+                allow_password,
+            );
+        } else if let Some(func) = rawfunc {
+            // Non-API func
+            let reqheaders = rust_request.headers().clone();
+            nonapi_wrapper(
+                &ctx,
+                func,
+                &request,
+                &mut response,
+                &reqheaders,
+                rust_response.headers_mut().expect("no headers?"),
+            );
+        } else if let Some(func) = filefunc {
+            // Server static file
+            let reqheaders = rust_request.headers().clone();
+            file_wrapper(
+                &ctx,
+                func,
+                &method,
+                rust_request.uri().path(),
+                &request,
+                &mut response,
+                &reqheaders,
+                rust_response.headers_mut().expect("no headers?"),
+            );
+        }
+    }
+
+    let mut len = response.body.len();
+    if method == Method::HEAD {
+        len = 0;
+    }
+    log_response(ctx.loglevel, &my_logger, &response, remote);
+    // Throw away body for HEAD call
+    let mut body = full(response.body);
+    if method == Method::HEAD {
+        body = full(vec![]);
+    }
+
+    // Construct response based on what C++ gave us
+    let mut rust_response = rust_response
+        .status(StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
+        .body(body)?;
+    for kv in response.headers {
+        if let Ok(key) = header::HeaderName::from_bytes(kv.key.as_bytes()) {
+            if let Ok(value) = header::HeaderValue::from_str(kv.value.as_str()) {
+                rust_response.headers_mut().insert(key, value);
+            }
+        }
+    }
+
+    if let Ok(close) = header::HeaderValue::from_str("close") {
+        rust_response
+            .headers_mut()
+            .insert(header::CONNECTION, close);
+    }
+    if ctx.loglevel != rustmisc::LogLevel::None {
+        let version = format!("{:?}", version);
+        rustmisc::log(
+            &my_logger,
+            rustweb::Priority::Notice,
+            "Request",
+            &vec![
+                rustmisc::KeyValue {
+                    key: "remote".to_string(),
+                    value: remote.to_string(),
+                },
+                rustmisc::KeyValue {
+                    key: "method".to_string(),
+                    value: method.to_string(),
+                },
+                rustmisc::KeyValue {
+                    key: "urlpath".to_string(),
+                    value: path.to_string(),
+                },
+                rustmisc::KeyValue {
+                    key: "HTTPVersion".to_string(),
+                    value: version,
+                },
+                rustmisc::KeyValue {
+                    key: "status".to_string(),
+                    value: response.status.to_string(),
+                },
+                rustmisc::KeyValue {
+                    key: "respsize".to_string(),
+                    value: len.to_string(),
+                },
+            ],
+        );
+    }
+
+    Ok(rust_response)
+}
+
+async fn serveweb_async(
+    listener: TcpListener,
+    config: crate::web::rustweb::IncomingTLS,
+    ctx: Arc<Context>,
+) -> MyResult<()> {
+    if !config.certificate.is_empty() {
+        let certs;
+        let key;
+        if config.key.is_empty() { // Assuming it's pkcs12 (aka pfx).
+            (key, certs) = load_pkcs12_key_and_certs(&config.certificate, &config.password, &ctx)?;
+        }
+        else {
+            certs = load_pem_certs(&config.certificate, &ctx)?;
+            key = load_pem_private_key(&config.key, &ctx)?;
+        }
+        let mut server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec(), b"http/1.0".to_vec()]; // b"h2".to_vec()
+        let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        // We start a loop to continuously accept incoming connections
+        loop {
+            let ctx = Arc::clone(&ctx);
+            let (stream, _) = listener.accept().await?;
+
+            let address;
+            match stream.peer_addr() {
+                Ok(addr) => {
+                    address = addr;
+                    let combo = rustmisc::comboaddress(&address.to_string());
+                    if !rustmisc::matches(&ctx.acl, &combo) {
+                        rustmisc::log(
+                            &ctx.logger,
+                            rustweb::Priority::Debug,
+                            "No ACL match",
+                            &vec![rustmisc::KeyValue {
+                                key: "address".to_string(),
+                                value: address.to_string(),
+                            }],
+                        );
+                        continue;
+                    }
+                }
+                Err(err) => {
+                    rustmisc::error(
+                        &ctx.logger,
+                        rustweb::Priority::Error,
+                        &err.to_string(),
+                        "Can't get peer address",
+                        &vec![],
+                    );
+                    continue; // If we can't determine the peer address, don't
+                }
+            }
+            // Use an adapter to access something implementing `tokio::io` traits as if they implement
+            // `hyper::rt` IO traits.
+            let tls_acceptor = tls_acceptor.clone();
+            let shaker = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                tls_acceptor.accept(stream));
+            tokio::task::spawn(async move {
+                let tls_stream = match shaker.await {
+                    Ok(Ok(tls_stream)) => tls_stream,
+                    Ok(Err(err)) => {
+                        rustmisc::error(
+                            &ctx.logger,
+                            rustweb::Priority::Notice,
+                            &err.to_string(),
+                            "Failed to perform TLS handshake",
+                            &vec![],
+                        );
+                        return;
+                    }
+                    Err(_) => {
+                        rustmisc::log(
+                            &ctx.logger,
+                            rustweb::Priority::Notice,
+                            "TLS handshake timeout",
+                            &vec![],
+                        );
+                        return;
+                    }
+                };
+                let io = TokioIo::new(tls_stream);
+                let my_logger = rustmisc::withValue(&ctx.logger, "tls", "true");
+                let fut = http1::Builder::new().serve_connection(
+                    io,
+                    service_fn(move |req| {
+                        let ctx = Arc::clone(&ctx);
+                        process_request(req, ctx, address)
+                    }),
+                );
+
+                // Spawn a tokio task to serve the request
+                tokio::task::spawn(async move {
+                    // Finally, we bind the incoming connection to our `process_request` service
+                    if let Err(err) = fut.await {
+                        rustmisc::error(
+                            &my_logger,
+                            rustweb::Priority::Notice,
+                            &err.to_string(),
+                            "Error serving web connection",
+                            &vec![],
+                        );
+                    }
+                });
+            }); // TLS handshake
+        }
+    } else {
+        // We start a loop to continuously accept incoming connections
+        loop {
+            let ctx = Arc::clone(&ctx);
+            let (stream, _) = listener.accept().await?;
+
+            let address;
+            match stream.peer_addr() {
+                Ok(addr) => {
+                    address = addr;
+                    let combo = rustmisc::comboaddress(&address.to_string());
+                    if !rustmisc::matches(&ctx.acl, &combo) {
+                        rustmisc::log(
+                            &ctx.logger,
+                            rustweb::Priority::Debug,
+                            "No ACL match",
+                            &vec![rustmisc::KeyValue {
+                                key: "address".to_string(),
+                                value: address.to_string(),
+                            }],
+                        );
+                        continue;
+                    }
+                }
+                Err(err) => {
+                    rustmisc::error(
+                        &ctx.logger,
+                        rustmisc::Priority::Error,
+                        &err.to_string(),
+                        "Can't get peer address",
+                        &vec![],
+                    );
+                    continue; // If we can't determine the peer address, don't
+                }
+            }
+            let io = TokioIo::new(stream);
+            let my_logger = rustmisc::withValue(&ctx.logger, "tls", "false");
+            let fut = http1::Builder::new().serve_connection(
+                io,
+                service_fn(move |req| {
+                    let ctx = Arc::clone(&ctx);
+                    process_request(req, ctx, address)
+                }),
+            );
+
+            // Spawn a tokio task to serve the request
+            tokio::task::spawn(async move {
+                // Finally, we bind the incoming connection to our `process_request` service
+                if let Err(err) = fut.await {
+                    rustmisc::error(
+                        &my_logger,
+                        rustmisc::Priority::Notice,
+                        &err.to_string(),
+                        "Error serving web connection",
+                        &vec![],
+                    );
+                }
+            });
+        }
+    }
+}
+
+pub fn serveweb(
+    incoming: &Vec<rustweb::IncomingWSConfig>,
+    password_ch: cxx::UniquePtr<rustweb::CredentialsHolder>,
+    api_ch: cxx::UniquePtr<rustweb::CredentialsHolder>,
+    acl: cxx::UniquePtr<rustmisc::NetmaskGroup>,
+    logger: cxx::SharedPtr<rustmisc::Logger>,
+    loglevel: rustmisc::LogLevel,
+    max_request_size: u64,
+    cross_origin_request_header: String,
+) -> Result<(), std::io::Error> {
+    // Context, atomically reference counted
+    let ctx = Arc::new(Context {
+        password_ch,
+        api_ch,
+        acl,
+        logger,
+        loglevel,
+        max_request_size,
+        cross_origin_request_header,
+    });
+
+    // We use a single thread to handle all the requests, letting the runtime abstracts from this
+    let runtime = Builder::new_current_thread()
+        .worker_threads(1)
+        .thread_name("rec/web")
+        .enable_io()
+        .enable_time()
+        .build()?;
+
+    // For each listening address we spawn a tokio handler and then a single Posix thread is created that
+    // waits (forever) for all of them to complete by joining them all.
+    let mut set = JoinSet::new();
+    for config in incoming {
+        for addr_str in &config.addresses {
+            let addr = match SocketAddr::from_str(addr_str) {
+                Ok(val) => val,
+                Err(err) => {
+                    let msg = format!("`{}' is not a IP:port combination: {}", addr_str, err);
+                    return Err(std::io::Error::other(msg));
+                }
+            };
+
+            let listener = runtime.block_on(async { TcpListener::bind(addr).await });
+            let ctx = Arc::clone(&ctx);
+            match listener {
+                Ok(val) => {
+                    let mut tls_enabled = false;
+                    let tls = crate::web::rustweb::IncomingTLS {
+                        certificate: config.tls.certificate.clone(),
+                        key: config.tls.key.clone(),
+                        password: config.tls.password.clone(),
+                    };
+                    if !tls.certificate.is_empty() {
+                        tls_enabled = true;
+                    }
+                    rustmisc::log(
+                        &ctx.logger,
+                        rustweb::Priority::Info,
+                        "Web service listening",
+                        &vec![
+                            rustmisc::KeyValue {
+                                key: "address".to_string(),
+                                value: addr.to_string(),
+                            },
+                            rustmisc::KeyValue {
+                                key: "tls".to_string(),
+                                value: tls_enabled.to_string(),
+                            },
+                        ],
+                    );
+                    set.spawn_on(serveweb_async(val, tls, ctx), runtime.handle());
+                }
+                Err(err) => {
+                    rustmisc::error(
+                        &ctx.logger,
+                        rustweb::Priority::Error,
+                        &err.to_string(),
+                        "Unable to bind to web socket",
+                        &vec![rustmisc::KeyValue {
+                            key: "address".to_string(),
+                            value: addr.to_string(),
+                        }],
+                    );
+                    let msg = format!("Unable to bind web socket: {}", err);
+                    return Err(std::io::Error::other(msg));
+                }
+            }
+        }
+    }
+    std::thread::Builder::new()
+        .name(String::from("rec/rustweb"))
+        .spawn(move || {
+            runtime.block_on(async {
+                while let Some(res) = set.join_next().await {
+                    let msg = match res {
+                        Ok(Err(wrapped)) => wrapped.to_string(),
+                        _ => format!("{:?}", res),
+                    };
+                    rustmisc::error(
+                        &ctx.logger,
+                        rustmisc::Priority::Error,
+                        &msg,
+                        "Rustweb thread exited",
+                        &vec![],
+                    );
+                }
+            });
+        })?;
+    Ok(())
+}
+
+// Load public certificates from file.
+fn load_pem_certs(
+    filename: &str,
+    ctx: &Arc<Context>,
+) -> std::io::Result<Vec<pki_types::CertificateDer<'static>>> {
+    let certsfromfile = CertificateDer::pem_file_iter(filename);
+    match certsfromfile {
+        Ok(certs) => {
+            let mut ret = vec![];
+            for cert in certs {
+                match cert {
+                    Ok(cert) => ret.push(cert),
+                    Err(cert) => {
+                        rustmisc::error(
+                            &ctx.logger,
+                            rustmisc::Priority::Error,
+                            &cert.to_string(),
+                            "Failed to parse certificate",
+                            &vec![rustmisc::KeyValue {
+                                key: "filename".to_string(),
+                                value: filename.to_string(),
+                            }],
+                        );
+                        return Err(std::io::Error::other(format!(
+                            "Failed to parse a certificate from `{}'",
+                            filename
+                        )));
+                    }
+                }
+            }
+            Ok(ret)
+        }
+        Err(err) => {
+            let msg = "Failed to parse certificate file";
+            rustmisc::error(
+                &ctx.logger,
+                rustmisc::Priority::Error,
+                &err.to_string(),
+                msg,
+                &vec![rustmisc::KeyValue {
+                    key: "filename".to_string(),
+                    value: filename.to_string(),
+                }],
+            );
+            Err(std::io::Error::other(msg))
+        }
+    }
+}
+
+// Load private key from file.
+fn load_pem_private_key(
+    filename: &str,
+    ctx: &Arc<Context>,
+) -> std::io::Result<pki_types::PrivateKeyDer<'static>> {
+    let key = PrivateKeyDer::from_pem_file(filename);
+    match key {
+        Ok(key) => Ok(key),
+        Err(err) => {
+            let msg = "Failed to parse private key file";
+            rustmisc::error(
+                &ctx.logger,
+                rustmisc::Priority::Error,
+                &err.to_string(),
+                msg,
+                &vec![rustmisc::KeyValue {
+                    key: "filename".to_string(),
+                    value: filename.to_string(),
+                }],
+            );
+            Err(std::io::Error::other(msg))
+        }
+    }
+}
+
+
+// Load private key and certs from pkcs12 (pfx) file.
+#[cfg(feature = "pkcs12")]
+fn load_pkcs12_key_and_certs(
+    filename: &str,
+    password: &str,
+    ctx: &Arc<Context>,
+) -> std::io::Result<(pki_types::PrivateKeyDer<'static>, Vec<pki_types::CertificateDer<'static>>)> {
+
+    let data = std::fs::read(filename)?;
+    let keystore_file = p12_keystore::KeyStore::from_pkcs12(&data, password, p12_keystore::Pkcs12ImportPolicy::Strict);
+
+    match keystore_file {
+        Ok(keystore) => {
+            if let Some((_alias, chain)) = keystore.private_key_chain() {
+                let key_or_err = p12_keystore::PrivateKey::try_from(chain.key().to_owned());
+                match key_or_err {
+                    Ok(key) => {
+                        let mut certs = vec![];
+                        for cert in chain.certs().to_owned() {
+                            let converted = CertificateDer::from_slice(cert.as_der());
+                            certs.push(converted.into_owned());
+                        }
+                        let der_bytes = key.as_der().to_owned();
+                        let der = pki_types::PrivateKeyDer::try_from(der_bytes);
+                        match der {
+                            Ok(der) => return Ok((der, certs)),
+                            Err(err) => {
+                                let msg = "Failed to parse private key in pkcs12 file";
+                                rustmisc::error(
+                                    &ctx.logger,
+                                    rustmisc::Priority::Error,
+                                    err,
+                                    msg,
+                                    &vec![rustmisc::KeyValue {
+                                        key: "filename".to_string(),
+                                        value: filename.to_string(),
+                                    }]);
+                                return Err(std::io::Error::other(msg));
+                            }
+                        }
+                    }
+                }
+            }
+            else {
+                let msg = "Failed to find private key in pkcs12 file";
+                rustmisc::log(
+                    &ctx.logger,
+                    rustmisc::Priority::Error,
+                    msg,
+                    &vec![rustmisc::KeyValue {
+                        key: "filename".to_string(),
+                        value: filename.to_string(),
+                    }]);
+                return Err(std::io::Error::other(msg));
+            }
+        },
+        Err(err) => {
+            let msg = "Failed to parse pkcs12 file";
+            rustmisc::error(
+                &ctx.logger,
+                rustmisc::Priority::Error,
+                &err.to_string(),
+                msg,
+                &vec![rustmisc::KeyValue {
+                    key: "filename".to_string(),
+                    value: filename.to_string(),
+                }]);
+            Err(std::io::Error::other(msg))
+        }
+    }
+}
+
+#[cfg(not(feature = "pkcs12"))]
+fn load_pkcs12_key_and_certs(
+    filename: &str,
+    _password: &str,
+    ctx: &Arc<Context>,
+) -> std::io::Result<(pki_types::PrivateKeyDer<'static>, Vec<pki_types::CertificateDer<'static>>)> {
+    let msg = "PKCS12 feature is not enabled";
+    rustmisc::log(
+        &ctx.logger,
+        rustmisc::Priority::Error,
+        msg,
+        &vec![rustmisc::KeyValue {
+            key: "filename".to_string(),
+            value: filename.to_string(),
+        }]);
+    Err(std::io::Error::other(msg))
+}
+
+
+
+// impl below needed because the classes are used in the Context, which gets passed around.
+unsafe impl Send for rustweb::CredentialsHolder {}
+unsafe impl Sync for rustweb::CredentialsHolder {}
+unsafe impl Send for rustmisc::NetmaskGroup {}
+unsafe impl Sync for rustmisc::NetmaskGroup {}
+unsafe impl Send for rustmisc::Logger {}
+unsafe impl Sync for rustmisc::Logger {}
+
+#[cxx::bridge(namespace = "pdns::rust::web::rec")]
+#[allow(clippy::needless_lifetimes)] // Needed to avoid clippy warning for Request
+mod rustweb {
+    extern "C++" {
+        type CredentialsHolder;
+        #[namespace = "pdns::rust::misc"]
+        type NetmaskGroup = crate::misc::rustmisc::NetmaskGroup;
+        #[namespace = "pdns::rust::misc"]
+        type Priority = crate::misc::rustmisc::Priority;
+        #[namespace = "pdns::rust::misc"]
+        type LogLevel = crate::misc::rustmisc::LogLevel;
+        #[namespace = "pdns::rust::misc"]
+        type Logger = crate::misc::rustmisc::Logger;
+    }
+
+    pub struct IncomingTLS {
+        certificate: String,
+        key: String,
+        password: String,
+    }
+
+    struct IncomingWSConfig {
+        addresses: Vec<String>,
+        tls: IncomingTLS,
+    }
+    /*
+     * Functions callable from C++
+     */
+    extern "Rust" {
+        // The main entry point, This function will return, but will setup thread(s) and tokio runtime to handle requests.
+        fn serveweb(
+            incoming: &Vec<IncomingWSConfig>,
+            pwch: UniquePtr<CredentialsHolder>,
+            apikeych: UniquePtr<CredentialsHolder>,
+            acl: UniquePtr<NetmaskGroup>,
+            logger: SharedPtr<Logger>,
+            loglevel: LogLevel,
+            max_request_size: u64,
+            cross_origin_request_header: String,
+        ) -> Result<()>;
+    }
+
+    struct KeyValue {
+        key: String,
+        value: String,
+    }
+
+    // Clippy does not seem to understand what cxx does and complains about needless_lifetimes
+    // The warning is silenced above
+    struct Request<'a> {
+        body: Vec<u8>,
+        uri: String,
+        vars: Vec<KeyValue>,
+        parameters: Vec<KeyValue>,
+        logger: &'a SharedPtr<Logger>,
+    }
+
+    struct Response {
+        status: u16,
+        body: Vec<u8>,
+        headers: Vec<KeyValue>,
+    }
+
+    /*
+     * Functions callable from Rust
+     */
+    unsafe extern "C++" {
+        include!("bridge.hh");
+        fn matches(self: &CredentialsHolder, str: &CxxString) -> bool;
+        fn apiDiscovery(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiDiscoveryV1(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServer(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerCacheFlush(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerConfig(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerConfigAllowFromGET(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerConfigAllowFromPUT(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerConfigAllowNotifyFromGET(
+            request: &Request,
+            response: &mut Response,
+        ) -> Result<()>;
+        fn apiServerConfigAllowNotifyFromPUT(
+            request: &Request,
+            response: &mut Response,
+        ) -> Result<()>;
+        fn apiServerDetail(requst: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerRPZStats(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerSearchData(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerStatistics(requst: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerZoneDetailDELETE(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerZoneDetailGET(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerZoneDetailPUT(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerZonesGET(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerZonesPOST(requst: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerOTConditionsGET(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerOTConditionDetailGET(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerOTConditionDetailDELETE(request: &Request, response: &mut Response) -> Result<()>;
+        fn apiServerOTConditionDetailPOST(request: &Request, response: &mut Response) -> Result<()>;
+        fn jsonstat(request: &Request, response: &mut Response) -> Result<()>;
+        fn prometheusMetrics(request: &Request, response: &mut Response) -> Result<()>;
+        fn serveStuff(request: &Request, response: &mut Response) -> Result<()>;
+    }
+}

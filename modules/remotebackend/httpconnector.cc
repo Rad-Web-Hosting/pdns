@@ -34,9 +34,10 @@
 #define UNIX_PATH_MAX 108
 #endif
 
-HTTPConnector::HTTPConnector(std::map<std::string, std::string> options) :
+HTTPConnector::HTTPConnector(Logr::log_t log, std::map<std::string, std::string> options) :
   d_socket(nullptr)
 {
+  d_slog = log;
 
   if (options.find("url") == options.end()) {
     throw PDNSException("Cannot find 'url' option in the remote backend HTTP connector's parameters");
@@ -145,6 +146,9 @@ void HTTPConnector::restful_requestbuilder(const std::string& method, const Json
     verb = "PATCH";
   }
   else if (method == "deleteTSIGKey") {
+    if (!parameters["algorithm"].is_null() && parameters["algorithm"].is_string()) {
+      req.GET()["algorithm"] = parameters["algorithm"].string_value();
+    }
     verb = "DELETE";
   }
   else if (method == "addDomainKey") {
@@ -356,16 +360,18 @@ int HTTPConnector::send_message(const Json& input)
   if (this->d_socket != nullptr) {
     fd = this->d_socket->getHandle();
     // there should be no data waiting
-    if (waitForRWData(fd, true, 0, 1000) < 1) {
+    if (waitForRWData(fd, true, 0, 1) < 1) {
       try {
         d_socket->writenWithTimeout(out.str().c_str(), out.str().size(), timeout);
         rv = 1;
       }
       catch (NetworkError& ne) {
-        g_log << Logger::Error << "While writing to HTTP endpoint " << d_addr.toStringWithPort() << ": " << ne.what() << std::endl;
+        SLOG(g_log << Logger::Error << "While writing to HTTP endpoint " << d_addr.toStringWithPort() << ": " << ne.what() << std::endl,
+             d_slog->error(Logr::Error, ne.what(), "network error writing to HTTP endpoint", "endpoint", Logging::Loggable(d_addr.toStringWithPort())));
       }
       catch (...) {
-        g_log << Logger::Error << "While writing to HTTP endpoint " << d_addr.toStringWithPort() << ": exception caught" << std::endl;
+        SLOG(g_log << Logger::Error << "While writing to HTTP endpoint " << d_addr.toStringWithPort() << ": exception caught" << std::endl,
+             d_slog->info(Logr::Error, "exception caught while writing to HTTP endpoint", "endpoint", Logging::Loggable(d_addr.toStringWithPort())));
       }
     }
   }
@@ -379,9 +385,7 @@ int HTTPConnector::send_message(const Json& input)
   // connect using tcp
   struct addrinfo* gAddr = nullptr;
   struct addrinfo* gAddrPtr = nullptr;
-  struct addrinfo hints
-  {
-  };
+  struct addrinfo hints{};
   std::string sPort = std::to_string(d_port);
   memset(&hints, 0, sizeof hints);
   hints.ai_family = AF_UNSPEC;
@@ -402,10 +406,12 @@ int HTTPConnector::send_message(const Json& input)
         rv = 1;
       }
       catch (NetworkError& ne) {
-        g_log << Logger::Error << "While writing to HTTP endpoint " << d_addr.toStringWithPort() << ": " << ne.what() << std::endl;
+        SLOG(g_log << Logger::Error << "While writing to HTTP endpoint " << d_addr.toStringWithPort() << ": " << ne.what() << std::endl,
+             d_slog->error(Logr::Error, ne.what(), "network error writing to HTTP endpoint", "endpoint", Logging::Loggable(d_addr.toStringWithPort())));
       }
       catch (...) {
-        g_log << Logger::Error << "While writing to HTTP endpoint " << d_addr.toStringWithPort() << ": exception caught" << std::endl;
+        SLOG(g_log << Logger::Error << "While writing to HTTP endpoint " << d_addr.toStringWithPort() << ": exception caught" << std::endl,
+             d_slog->info(Logr::Error, "exception caught while writing to HTTP endpoint", "endpoint", Logging::Loggable(d_addr.toStringWithPort())));
       }
 
       if (rv > -1) {
@@ -417,7 +423,8 @@ int HTTPConnector::send_message(const Json& input)
     freeaddrinfo(gAddr);
   }
   else {
-    g_log << Logger::Error << "Unable to resolve " << d_host << ": " << gai_strerror(ec) << std::endl;
+    SLOG(g_log << Logger::Error << "Unable to resolve " << d_host << ": " << gai_strerror(ec) << std::endl,
+         d_slog->error(Logr::Error, gai_strerror(ec), "unable to resolve hostname", "host", Logging::Loggable(d_host)));
   }
 
   return rv;
@@ -471,7 +478,8 @@ int HTTPConnector::recv_message(Json& output)
   if (output != nullptr) {
     return static_cast<int>(resp.body.size());
   }
-  g_log << Logger::Error << "Cannot parse JSON reply: " << err << endl;
+  SLOG(g_log << Logger::Error << "Cannot parse JSON reply: " << err << endl,
+       d_slog->error(Logr::Error, err, "cannot parse JSON reply"));
 
   return -1;
 }

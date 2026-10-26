@@ -20,11 +20,13 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #pragma once
+#include <cstdint>
+
 #include "namespaces.hh"
 
 struct EDNSExtendedError
 {
-  enum class code : uint16_t
+  enum class code : uint16_t // NOLINT(performance-enum-size)
   {
     Other = 0,
     UnsupportedDNSKEYAlgorithm = 1,
@@ -56,6 +58,7 @@ struct EDNSExtendedError
     UnsupportedNSEC3IterationsValue = 27,
     UnableToConformToPolicy = 28,
     Synthesized = 29,
+    NegativeTrustAnchor = 33,
   };
   uint16_t infoCode;
   std::string extraText;

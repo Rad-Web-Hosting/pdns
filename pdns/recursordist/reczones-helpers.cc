@@ -41,15 +41,15 @@ static void putIntoCache(time_t now, QType qtype, vState state, const ComboAddre
     // Put non-default root hints into cache as authoritative.  As argued below in
     // putDefaultHintsIntoCache, this is actually wrong, but people might depend on it by having
     // root-hints that refer to servers that aren't actually capable or willing to serve root data.
-    g_recCache->replace(now, name, qtype, aset, {}, {}, true, g_rootdnsname, boost::none, boost::none, state, from);
+    g_recCache->replace(now, name, qtype, aset, {}, {}, true, g_rootdnsname, std::nullopt, MemRecursorCache::NOTAG, state, MemRecursorCache::Extra{from, false});
   }
 }
 
 static void parseHintFile(time_t now, const std::string& hintfile, set<DNSName>& seenA, set<DNSName>& seenAAAA, set<DNSName>& seenNS, std::multimap<DNSName, DNSRecord>& aRecords, std::multimap<DNSName, DNSRecord>& aaaaRecords, vector<DNSRecord>& nsvec)
 {
   ZoneParserTNG zpt(hintfile);
-  zpt.setMaxGenerateSteps(::arg().asNum("max-generate-steps"));
-  zpt.setMaxIncludes(::arg().asNum("max-include-depth"));
+  zpt.setMaxGenerateSteps(::arg().asNum<size_t>("max-generate-steps"));
+  zpt.setMaxIncludes(::arg().asNum<size_t>("max-include-depth"));
   DNSResourceRecord rrecord;
 
   while (zpt.get(rrecord)) {
@@ -104,18 +104,15 @@ bool readHintsIntoCache(time_t now, const std::string& hintfile, std::vector<DNS
 
   auto log = g_slog->withName("config");
   if (SyncRes::s_doIPv4 && !SyncRes::s_doIPv6 && !reachableA) {
-    SLOG(g_log << Logger::Error << "Running IPv4 only but no IPv4 root hints" << endl,
-         log->info(Logr::Error, "Running IPv4 only but no IPv4 root hints"));
+    log->info(Logr::Error, "Running IPv4 only but no IPv4 root hints");
     return false;
   }
   if (!SyncRes::s_doIPv4 && SyncRes::s_doIPv6 && !reachableAAAA) {
-    SLOG(g_log << Logger::Error << "Running IPv6 only but no IPv6 root hints" << endl,
-         log->info(Logr::Error, "Running IPv6 only but no IPv6 root hints"));
+    log->info(Logr::Error, "Running IPv6 only but no IPv6 root hints");
     return false;
   }
   if (SyncRes::s_doIPv4 && SyncRes::s_doIPv6 && !reachableA && !reachableAAAA) {
-    SLOG(g_log << Logger::Error << "No valid root hints" << endl,
-         log->info(Logr::Error, "No valid root hints"));
+    log->info(Logr::Error, "No valid root hints");
     return false;
   }
   return true;
@@ -161,11 +158,11 @@ void putDefaultHintsIntoCache(time_t now, std::vector<DNSRecord>& nsvec)
        * auth and will expire at the same time. A re-prime is then triggered, as before, when the
        * records were inserted with the auth bit set and the TTD comes.
        */
-      g_recCache->replace(now, DNSName(templ), QType::A, {arr}, {}, {}, false, g_rootdnsname, boost::none, boost::none, vState::Insecure, from);
+      g_recCache->replace(now, DNSName(templ), QType::A, {arr}, {}, {}, false, g_rootdnsname, std::nullopt, MemRecursorCache::NOTAG, vState::Insecure, MemRecursorCache::Extra{from, false});
     }
     if (!rootIps6.at(letter).empty()) {
       aaaarr.setContent(std::make_shared<AAAARecordContent>(ComboAddress(rootIps6.at(letter))));
-      g_recCache->replace(now, DNSName(templ), QType::AAAA, {aaaarr}, {}, {}, false, g_rootdnsname, boost::none, boost::none, vState::Insecure, from);
+      g_recCache->replace(now, DNSName(templ), QType::AAAA, {aaaarr}, {}, {}, false, g_rootdnsname, std::nullopt, MemRecursorCache::NOTAG, vState::Insecure, MemRecursorCache::Extra{from, false});
     }
   }
 }
@@ -198,15 +195,13 @@ static void addToDomainMap(SyncRes::domainmap_t& newMap,
                            const bool reverse = false)
 {
   if (newMap.count(name) != 0) {
-    SLOG(g_log << Logger::Warning << "Will not overwrite zone '" << name << "' already loaded" << endl,
-         log->info(Logr::Warning, "Will not overwrite already loaded zone", "zone",
-                   Logging::Loggable(name)));
+    log->info(Logr::Warning, "Will not overwrite already loaded zone", "zone",
+              Logging::Loggable(name));
   }
   else {
     if (!partial) {
       const auto direction = reverse ? std::string{"reverse"} : std::string{"forward"};
-      SLOG(g_log << Logger::Warning << "Inserting " << direction << " zone '" << name << "' based on hosts file" << endl,
-           log->info(Logr::Notice, "Inserting " + direction + " zone based on hosts file", "zone", Logging::Loggable(name)));
+      log->info(Logr::Notice, "Inserting " + direction + " zone based on hosts file", "zone", Logging::Loggable(name));
     }
     ad.d_name = name;
     newMap[ad.d_name] = ad;
@@ -270,6 +265,17 @@ void makePartialIPZone(SyncRes::domainmap_t& newMap,
   addToDomainMap(newMap, std::move(ad), dr.d_name, log, true, true);
 }
 
+void makePartialIP6Zone(SyncRes::domainmap_t& newMap,
+                        const std::string& name,
+                        Logr::log_t log)
+{
+  DNSRecord dnsRecord;
+  dnsRecord.d_name = DNSName(name);
+  SyncRes::AuthDomain authDomain = makeSOAAndNSNodes(dnsRecord, DNSName("localhost."));
+
+  addToDomainMap(newMap, std::move(authDomain), dnsRecord.d_name, log, true, true);
+}
+
 void addForwardAndReverseLookupEntries(SyncRes::domainmap_t& newMap,
                                        const std::string& searchSuffix,
                                        const std::vector<std::string>& parts,
@@ -314,4 +320,13 @@ bool parseEtcHostsLine(std::vector<std::string>& parts, std::string& line)
   parts.clear();
   stringtok(parts, line, "\t\r\n ");
   return parts.size() >= 2;
+}
+
+void makeEmptyZone(SyncRes::domainmap_t& newMap, const std::string zoneName, Logr::log_t log)
+{
+  DNSRecord dnsRecord;
+  dnsRecord.d_name = DNSName(zoneName);
+  SyncRes::AuthDomain authDomain = makeSOAAndNSNodes(dnsRecord, DNSName("localhost."));
+
+  addToDomainMap(newMap, std::move(authDomain), dnsRecord.d_name, log, true, false);
 }

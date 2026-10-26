@@ -2,15 +2,26 @@ Lua2 Backend
 ============
 
 * Native: Yes
-* Master: Yes
-* Slave: No
-* Superslave: No
+* Primary: Yes
+* Secondary: No
+* Producer: No
+* Consumer: No
+* Autosecondary: No
+* DNS Update: No
 * DNSSEC: Yes
 * Disabled data: No
 * Comments: No
-* Zone caching: Yes
+* Search: Yes\*
+* Views: No
+* API: Read-only\**
+* :ref:`Multiple instances <setting-launch>`: Yes
+* Zone caching: Yes\*
 * Module name: lua2
 * Launch name: ``lua2``
+
+\* If the responder (your script) implements ``dns_get_all_domains``, see below.
+
+\** Except for the notification timestamp, if the responder (your script) implements ``dns_set_notified``, see below.
 
 This is a rewrite of existing Lua backend.
 This backend is stub between your Lua script and PowerDNS authoritative server.
@@ -45,7 +56,7 @@ INPUT:
  - table ctx - Query context table, contains ``source_address`` and ``real_source_address``.
 
 OUTPUT:
- Expects a array which has tables with following keys:
+ Expects an array which has tables with following keys:
 
  - DNSName name - resource record name (can also be string)
  - string type - type of resource record (can also be QType or valid integer)
@@ -87,13 +98,13 @@ INPUT:
  - DNSName domain - Domain to get info for
 
 OUTPUT:
- Return false if not supported or found, otherwise expects a table with keys:
+ Return false if not supported or found; otherwise, expects a table with keys:
 
  - string account - Associated account of this domain (default: <empty>)
  - string kind - Domain kind (NATIVE,MASTER,SLAVE) (default: NATIVE)
  - int id - Associated domain ID (default: -1)
- - int last_check - UNIX timestamp of last check from master (default: 0)
- - table of strings masters - Master servers for this domain (default: <empty>)
+ - int last_check - UNIX timestamp of last check from primary (default: 0)
+ - table of strings masters - Primary servers for this domain (default: <empty>)
  - long notified_serial - Notified serial to slaves (default: 0)
  - long serial - Current domain serial
 
@@ -101,7 +112,7 @@ NOTES:
  This function is **optional**.
  Defaults are used for omitted keys.
  ``last_check`` is for automatic serial.
- ``masters``, ``account``, ``notified_serial`` are for master/slave interaction only.
+ ``masters``, ``account``, ``notified_serial`` are for primary/secondary interaction only.
  If this function is missing, it will revert into looking up SOA record for the given domain,
  and uses that, if found.
 
@@ -110,11 +121,16 @@ NOTES:
 Get domain information for all domains.
 
 OUTPUT:
- Return false if not supported or found, otherwise return a table of string,
- domaininfo. See :ref:`dns_get_domaininfo() <backends_lua2_dns_get_domaininfo>`.
+ Return false if not supported or found; otherwise, return a table of 
+ `{ [DNSName] = domaininfo, … }`. See :ref:`dns_get_domaininfo() <backends_lua2_dns_get_domaininfo>`.
 
 NOTES:
- This function is **optional**, except if you need master functionality.
+ This function is **optional**, except if you need primary functionality. It
+ is required if you want to be able to enable the zone cache or to search
+ records.
+ It is also required if you want to serve a zone **without a SOA in _another_ backend**: if you
+ don't list your zone here, pdns server will not recognize the zone as valid (and will treat it as unknown), causing the requests to
+ never reach lua2 backend.
 
 ``dns_get_domain_metadata(domain, kind)``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -151,7 +167,7 @@ INPUT:
  - DNSName domain - Domain to get key(s) for
 
 OUTPUT:
- Return false if not found or supported, otherwise expects array of tables with keys:
+ Return false if not found or supported; otherwise, expects array of tables with keys:
 
  - int id - Key ID
  - int flags - Key flags
@@ -193,4 +209,4 @@ INPUT:
  - long serial - Notified serial
 
 NOTES:
- This function is **optional**. However, not implementing this can cause problems with master functionality.
+ This function is **optional**. However, not implementing this can cause problems with primary functionality.

@@ -16,15 +16,14 @@ on:
         type: string
         # please remember to update build-packages.yml as well
         default: >-
-          el-7
           el-8
           el-9
-          debian-buster
-          debian-bullseye
+          el-10
           debian-bookworm
-          ubuntu-focal
+          debian-trixie
           ubuntu-jammy
           ubuntu-noble
+          ubuntu-resolute
       ref:
         description: git ref to checkout
         type: string
@@ -53,3 +52,9 @@ jobs:
       DOWNLOADS_AUTOBUILT_SECRET: ${{ secrets.DOWNLOADS_AUTOBUILT_SECRET }}
       DOWNLOADS_AUTOBUILT_RSYNCTARGET: ${{ secrets.DOWNLOADS_AUTOBUILT_RSYNCTARGET }}
       DOWNLOADS_AUTOBUILT_HOSTKEY: ${{ secrets.DOWNLOADS_AUTOBUILT_HOSTKEY }}
+      PULP_FILE_REPO_NAME: ${{ secrets.PULP_FILE_REPO_NAME }}
+      PULP_URL: ${{ secrets.PULP_URL }}
+      PULP_CONTENT_URL: ${{ secrets.PULP_CONTENT_URL }}
+      PULP_CI_USERNAME: ${{ secrets.PULP_CI_USERNAME }}
+      PULP_CI_PASSWORD: ${{ secrets.PULP_CI_PASSWORD }}
+      PULP_PDNS_GPG_PUBKEY: ${{ secrets.PULP_PDNS_GPG_PUBKEY }}

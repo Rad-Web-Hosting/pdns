@@ -44,7 +44,8 @@ struct TimeTag{};
 template<typename Container, typename SenderReceiver> class Inflighter
 {
 public:
-  Inflighter(Container& c, SenderReceiver& sr) : d_container(c), d_sr(sr), d_init(false)
+  Inflighter(Container& c, SenderReceiver& sr) :
+    d_container(c), d_sr(sr)
   {
     d_burst = 2;
     d_maxInFlight = 5;
@@ -99,8 +100,8 @@ private:
   
   ttdwatch_t d_ttdWatch;
   typename Container::iterator d_iter;
-  bool d_init;
-  
+  bool d_init{false};
+
   uint64_t d_unexpectedResponse, d_timeouts;
 };
 
@@ -229,7 +230,7 @@ struct SendReceive
   
   bool receive(Identifier& id, int& i)
   {
-    if(waitForData(d_socket, 0, 500000) > 0) {
+    if(waitForData(d_socket, 0, 500) > 0) {
       char buf[512];
     
       int len = recv(d_socket, buf, sizeof(buf), 0);

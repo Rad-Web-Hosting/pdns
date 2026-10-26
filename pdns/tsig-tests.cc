@@ -16,6 +16,8 @@
 #include "dns_random.hh"
 #include "query-local-address.hh"
 
+bool g_slogStructured{false};
+
 StatBag S;
 
 ArgvMap& arg()
@@ -49,22 +51,22 @@ try
   DNSName keyname("pdns-b-aa");
 
   TSIGRecordContent trc;
-  trc.d_algoName=DNSName("hmac-md5.sig-alg.reg.int");
+  trc.d_algoName=g_hmacmd5dnsname_long;
   trc.d_time=time(0);
   trc.d_fudge=300;
   trc.d_origID=ntohs(pw.getHeader()->id);
   trc.d_eRcode=0;
 
-  addTSIG(pw, trc, keyname, key, "", false);
+  addTSIG(nullptr, pw, trc, keyname, key, "", false);
 
   Socket sock(AF_INET, SOCK_DGRAM);
   ComboAddress dest(argv[1] + (*argv[1]=='@'), atoi(argv[2]));
   cerr<<"Keyname: '"<<keyname<<"', algo: '"<<trc.d_algoName<<"', key: '"<<Base64Encode(key)<<"'\n";
   TSIGTriplet tt;
   tt.name=keyname;
-  tt.algo=DNSName("hmac-md5");
+  tt.algo=g_hmacmd5dnsname;
   tt.secret=key;
-  AXFRRetriever axfr(dest, DNSName("b.aa"), tt);
+  AXFRRetriever axfr(nullptr, dest, ZoneName("b.aa"), tt);
   vector<DNSResourceRecord> res;
   while(axfr.getChunk(res)) {
   }

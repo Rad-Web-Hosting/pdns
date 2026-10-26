@@ -24,11 +24,14 @@
 #endif
 #include "remotebackend.hh"
 
-PipeConnector::PipeConnector(std::map<std::string, std::string> optionsMap) :
+PipeConnector::PipeConnector(Logr::log_t log, std::map<std::string, std::string> optionsMap) :
   d_pid(-1)
 {
+  d_slog = log;
+
   if (optionsMap.count("command") == 0) {
-    g_log << Logger::Error << "Cannot find 'command' option in connection string" << endl;
+    SLOG(g_log << Logger::Error << "Cannot find 'command' option in connection string" << endl,
+         d_slog->info(Logr::Error, "Cannot find 'command' option in connection string"));
     throw PDNSException();
   }
   this->command = optionsMap.find("command")->second;
@@ -137,7 +140,8 @@ void PipeConnector::launch()
   this->send(msg);
   msg = nullptr;
   if (!this->recv(msg)) {
-    g_log << Logger::Error << "Failed to initialize coprocess" << std::endl;
+    SLOG(g_log << Logger::Error << "Failed to initialize coprocess" << std::endl,
+         d_slog->info(Logr::Error, "Failed to initialize coprocess"));
   }
 }
 
@@ -173,7 +177,7 @@ int PipeConnector::recv_message(Json& output)
   while (1) {
     receive.clear();
     if (d_timeout != 0) {
-      int ret = waitForData(fileno(d_fp.get()), 0, d_timeout * 1000);
+      int ret = waitForData(fileno(d_fp.get()), 0, d_timeout);
       if (ret < 0) {
         throw PDNSException("Error waiting on data from coprocess: " + stringerror());
       }

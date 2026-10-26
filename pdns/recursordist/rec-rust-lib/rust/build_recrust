@@ -1,0 +1,51 @@
+#!/bin/sh -e
+
+export CARGO="${CARGO:-$_defaultCARGO}"
+
+#echo "PWD=$PWD"
+#echo "srcdir=$srcdir"
+#echo "builddir=$builddir"
+# cxx/cxxbridge generate the files lib.rs.h and cxx.h inside $CARGO_TARGET_DIR if it is set
+# otherwise it uses target
+#echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+mytarget=${CARGO_TARGET_DIR-target}
+#echo "mytarget=${mytarget}"
+
+CARGO_PROFILE="release"
+#
+# CARGO_USE_DEV in combination with g++ might give you link errors!
+#
+if [ -n "${CARGO_USE_DEV}" ]; then
+    CARGO_PROFILE="dev"
+    if [ -n "${CARGO_USE_CLIPPY}" ]; then
+        $CARGO clippy --manifest-path $srcdir/Cargo.toml
+    fi
+fi
+
+case "${CARGO_LTO_MODE:-unspecified}" in
+    "fat" | "thin")
+        CARGO_CONFIG="--config profile.${CARGO_PROFILE}.lto=\"${CARGO_LTO_MODE}\""
+        ;;
+esac
+
+# echo "RUSTFLAGS = ${RUSTFLAGS}"
+# echo "CARGO_PROFILE = ${CARGO_PROFILE}"
+# echo "CARGO_LTO_MODE = ${CARGO_LTO_MODE}"
+# echo "CARGO_CONFIG = ${CARGO_CONFIG}"
+
+$CARGO build --profile ${CARGO_PROFILE} ${CARGO_CONFIG} $RUST_TARGET --target-dir=$builddir/target --manifest-path $srcdir/Cargo.toml --locked $features
+
+if [ -n "${CARGO_USE_DEV}" ]; then
+    cp -p target/$RUSTC_TARGET_ARCH/debug/librecrust.a $builddir/rec-rust-lib/rust/librecrust.a
+else
+    cp -p target/$RUSTC_TARGET_ARCH/release/librecrust.a $builddir/rec-rust-lib/rust/librecrust.a
+fi
+
+cp -p $mytarget/$RUSTC_TARGET_ARCH/cxxbridge/recrust/src/lib.rs.h $srcdir/lib.rs.h
+cp -p $mytarget/$RUSTC_TARGET_ARCH/cxxbridge/recrust/src/lib.rs.h $builddir/rec-rust-lib/rust/lib.rs.h
+cp -p $mytarget/$RUSTC_TARGET_ARCH/cxxbridge/rust/cxx.h $srcdir/cxx.h
+cp -p $mytarget/$RUSTC_TARGET_ARCH/cxxbridge/rust/cxx.h $builddir/rec-rust-lib/rust/cxx.h
+cp -p $mytarget/$RUSTC_TARGET_ARCH/cxxbridge/recrust/src/web.rs.h $srcdir/web.rs.h
+cp -p $mytarget/$RUSTC_TARGET_ARCH/cxxbridge/recrust/src/web.rs.h $builddir/rec-rust-lib/rust/web.rs.h
+cp -p $mytarget/$RUSTC_TARGET_ARCH/cxxbridge/recrust/src/misc.rs.h $srcdir/misc.rs.h
+cp -p $mytarget/$RUSTC_TARGET_ARCH/cxxbridge/recrust/src/misc.rs.h $builddir/rec-rust-lib/rust/misc.rs.h

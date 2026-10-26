@@ -4,8 +4,8 @@ Running and Configuring dnsdist
 dnsdist is meant to run as a daemon.
 As such, distribution native packages know how to stop/start themselves using operating system services.
 
-It is configured with a configuration file called ``dnsdist.conf``
-The default path to this file is determined by the ``SYSCONFDIR`` variable during compilation.
+It is configured with a configuration file called ``dnsdist.yml``. If that file does not exist, :program:`dnsdist` will attempt to fall back to a ``dnsdist.conf`` file, expecting a configuration in ``Lua`` instead of ``YAML``.
+The default path to these files is determined by the ``SYSCONFDIR`` variable during compilation.
 Most likely this path is ``/etc/dnsdist``,  ``/etc`` or ``/usr/local/etc/``, dnsdist will tell you on startup which file it reads.
 
 dnsdist is designed to (re)start almost instantly.
@@ -34,15 +34,15 @@ Note that most packaged versions of :program:`dnsdist` already create this user.
 Understanding how queries are forwarded to backends
 ---------------------------------------------------
 
-Initially dnsdist tried to forward a query to the backend using the same protocol than the client used to contact dnsdist: queries received over UDP were forwarded over UDP, and the same for TCP. When incoming DNSCrypt and DNS over TLS support were added, the same logic was applied, so DoT queries are forwarded over TCP. For DNS over HTTPS, UDP was selected instead for performance reason, breaking with the existing logic.
+Initially dnsdist tried to forward a query to the backend using the same protocol that the client used to contact dnsdist: queries received over UDP were forwarded over UDP, and the same for TCP. When incoming DNSCrypt and DNS over TLS support were added, the same logic was applied, so DoT queries are forwarded over TCP. For DNS over HTTPS, UDP was selected instead for performance reason, breaking with the existing logic.
 
 Before 1.7.0, which introduced TCP fallback, that meant that there was a potential issue with very large answers and DNS over HTTPS, requiring careful configuration of the path between dnsdist and the backend. More information about that is available in the :doc:`DNS over HTTPS section <guides/dns-over-https>`.
 
 In addition to TCP fallback for DoH, 1.7.0 introduced three new notions:
 
- * TCP-only backends, for which queries will always forwarded over a TCP connection (see the `tcpOnly` parameter of :func:`newServer`)
- * DNS over HTTPS backends, for which queries are forwarded over a DNS over HTTPS connection (see the `dohPath` parameter of :func:`newServer`)
- * and DNS over TLS backends, for which queries are forwarded over a DNS over TLS connection (see the `tls` parameter of :func:`newServer`)
+* TCP-only backends, for which queries will always forwarded over a TCP connection (see the `tcpOnly` parameter of :func:`newServer`)
+* DNS over HTTPS backends, for which queries are forwarded over a DNS over HTTPS connection (see the `dohPath` parameter of :func:`newServer`)
+* and DNS over TLS backends, for which queries are forwarded over a DNS over TLS connection (see the `tls` parameter of :func:`newServer`)
 
 To sum it up:
 

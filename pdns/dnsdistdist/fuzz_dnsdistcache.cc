@@ -32,14 +32,21 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
   }
 
   /* dnsdist's version */
-  DNSDistPacketCache pcSkipCookies(10000);
   // By default, cookies are not hashed
-  pcSkipCookies.setECSParsingEnabled(true);
+  DNSDistPacketCache::CacheSettings skipCookieSettings{
+    .d_maxEntries = 10000,
+    .d_parseECS = true,
+  };
+  DNSDistPacketCache pcSkipCookies(skipCookieSettings);
 
-  DNSDistPacketCache pcHashCookies(10000);
-  pcHashCookies.setECSParsingEnabled(true);
   // Do not skip cookies
-  pcHashCookies.setSkippedOptions({});
+  DNSDistPacketCache::CacheSettings parseCookieSettings{
+    .d_optionsToSkip = {},
+    .d_maxEntries = 10000,
+    .d_parseECS = true,
+
+  };
+  DNSDistPacketCache pcHashCookies(parseCookieSettings);
 
   try {
     uint16_t qtype;
@@ -49,12 +56,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
     const DNSName qname(reinterpret_cast<const char*>(data), size, sizeof(dnsheader), false, &qtype, &qclass, &consumed);
     pcSkipCookies.getKey(qname.getStorage(), consumed, vect, false);
     pcHashCookies.getKey(qname.getStorage(), consumed, vect, false);
-    boost::optional<Netmask> subnet;
+    std::optional<Netmask> subnet;
     DNSDistPacketCache::getClientSubnet(vect, consumed, subnet);
   }
   catch (const std::exception& e) {
-  }
-  catch (const PDNSException& e) {
   }
 
   return 0;

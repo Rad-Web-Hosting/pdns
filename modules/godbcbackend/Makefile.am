@@ -3,7 +3,8 @@ pkglib_LTLIBRARIES = libgodbcbackend.la
 
 EXTRA_DIST = \
 	OBJECTFILES \
-	OBJECTLIBS
+	OBJECTLIBS \
+	meson.build
 
 dist_doc_DATA = \
 	schema.mssql.sql \
@@ -15,5 +16,9 @@ libgodbcbackend_la_SOURCES = \
 	godbcbackend.cc godbcbackend.hh \
 	sodbc.cc sodbc.hh
 
+if GODBCBACKEND_DYNMODULE
 libgodbcbackend_la_LDFLAGS = -module -avoid-version
+else
+libgodbcbackend_la_LDFLAGS = -static -avoid-version
+endif
 libgodbcbackend_la_LIBADD = $(UNIXODBC_LIBS)

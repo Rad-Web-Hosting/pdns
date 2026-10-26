@@ -25,7 +25,7 @@ Replay all recursion-desired DNS questions to a specified IP address.
 Track all outgoing questions, remap id to one of ours.
 Also track all recorded answers, and map them to that same id, the 'expectation'.
 
-When we see a question, parse it, give it a QuestionIdentifier, and and an id from the free-id list.
+When we see a question, parse it, give it a QuestionIdentifier, and an id from the free-id list.
 
 When we see an answer in the tcpdump, parse it, make QI, and add it to the original QI
    and check
@@ -83,7 +83,8 @@ What to do with timeouts. We keep around at most 65536 outstanding answers.
 
 #include "namespaces.hh"
 using namespace ::boost::multi_index;
-#include "namespaces.hh"
+
+bool g_slogStructured{false};
 
 StatBag S;
 bool g_quiet=true;
@@ -393,7 +394,7 @@ try
 {
   PacketBuffer packet;
   ComboAddress remote;
-  int res=waitForData(s_socket->getHandle(), g_timeoutMsec/1000, 1000*(g_timeoutMsec%1000));
+  int res=waitForData(s_socket->getHandle(), g_timeoutMsec/1000, g_timeoutMsec%1000);
 
   if(res < 0 || res==0)
     return;
@@ -431,11 +432,7 @@ try
     {
       s_wednserrors++;
     }
-    catch(std::out_of_range &e)
-    {
-      s_wednserrors++;
-    }
-    catch(std::exception& e)
+    catch(std::exception&)
     {
       s_wednserrors++;
     }
@@ -558,14 +555,15 @@ static void addECSOption(char* packet, const size_t packetSize, uint16_t* len, c
   struct dnsheader* dh = (struct dnsheader*) packet;
 
   EDNSSubnetOpts eso;
-  if(stamp < 0)
-    eso.source = Netmask(remote);
+  if(stamp < 0) {
+    eso.setSource(Netmask(remote));
+  }
   else {
     ComboAddress stamped(remote);
     *((char*)&stamped.sin4.sin_addr.s_addr)=stamp;
-    eso.source = Netmask(stamped);
+    eso.setSource(Netmask(stamped));
   }
-  string optRData=makeEDNSSubnetOptsString(eso);
+  string optRData = eso.makeOptString();
   string record;
   generateEDNSOption(EDNSOptionCode::ECS, optRData, record);
   generateOptRR(record, EDNSRR);

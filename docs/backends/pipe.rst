@@ -2,13 +2,19 @@ Pipe Backend
 ============
 
 * Native: Yes
-* Master: No
-* Slave: No
-* Superslave: No
-* Case: Depends
-* DNSSEC: Partial, no delegation, no key storage
+* Primary: No
+* Secondary: No
+* Producer: No
+* Consumer: No
+* Autosecondary: No
+* DNS Update: No
+* DNSSEC: No
 * Disabled data: No
 * Comments: No
+* Search: No
+* Views: No
+* API: Read-only
+* :ref:`Multiple instances <setting-launch>`: Yes
 * Zone caching: No
 * Module name: pipe
 * Launch name: ``pipe``
@@ -35,7 +41,7 @@ DNS-based failover with low TTLs.
 .. note::
   Please do read the :doc:`Backend Writer's guide <../appendices/backend-writers-guide>` carefully. The
   PipeBackend, like all other backends, must not do any DNS thinking, but
-  answer all questions (INCLUDING THE ANY QUESTION) faithfully.
+  answer all questions (**including the ANY question**) faithfully.
   Specifically, the queries that the PipeBackend receives will not
   correspond to the queries that arrived over DNS. So, a query for an AAAA
   record may turn into a backend query for an ANY record. There is nothing
@@ -60,7 +66,8 @@ local-ip-address field is added after the remote-ip-address, the
 local-ip-address refers to the IP address the question was received on.
 When set to 3, the real remote IP/subnet is added based on edns-subnet
 support (this also requires enabling :ref:`setting-edns-subnet-processing`).
-When set to 4 it sends zone name in AXFR request. See also :ref:`PipeBackend Protocol <pipebackend-protocol>` below.
+When set to 4, it will also send the zone name in AXFR requests.
+See also :ref:`PipeBackend Protocol <pipebackend-protocol>` below.
 
 .. _setting-pipe-command:
 
@@ -113,13 +120,15 @@ characters.
 Handshake
 ^^^^^^^^^
 
-PowerDNS sends out ``HELO\t1``, indicating that it wants to speak the
-protocol as defined in this document, version 1. For abi-version 2 or 3,
-PowerDNS sends ``HELO\t2`` or ``HELO\t3``. A PowerDNS Coprocess must
-then send out a banner, prefixed by ``OK\t``, indicating it launched
-successfully. If it does not support the indicated version, it should
-respond with ``FAIL``, but not exit. Suggested behaviour is to try and
-read a further line, and wait to be terminated.
+PowerDNS sends out ``HELO\tN``, where N is the version of the protocol it
+wants to speak (e.g. ``HELO\t1`` for protocol version 1, ``HELO\t2`` for
+protocol version 2, etc).
+A PowerDNS Coprocess must then send out a banner, prefixed by ``OK\t``,
+indicating it launched successfully.
+If it does not support the indicated version, it should respond with ``FAIL``,
+but not exit.
+Suggested behaviour is to try and read a further line, and wait to be
+terminated.
 
 .. note::
   Fields are separated by a tab (``\t``) character,
@@ -144,8 +153,8 @@ pipe-abi-version = 2
 
     Q   qname       qclass  qtype   id  remote-ip-address   local-ip-address
 
-pipe-abi-version = 3
-~~~~~~~~~~~~~~~~~~~~
+pipe-abi-version = 3 and higher
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ::
 
@@ -156,7 +165,7 @@ Fields are tab separated, and terminated with a single ``\n``. The
 question, the ``local-ip-address`` is the IP address on which the
 question was received.
 
-Type is the tag above, ``qname`` is the domain the question is about.
+Type is the tag above, ``qname`` is the domain that the question is about.
 ``qclass`` is always 'IN' currently, denoting an INternet question.
 ``qtype`` is the kind of information desired, the record type, like A,
 CNAME or AAAA. ``id`` can be specified to help your backend find an
@@ -187,7 +196,7 @@ AXFR-queries look like this:
     AXFR    id  zone-name
 
 The ``id`` is gathered from the answer to a SOA query. ``zone-name`` is
-given in ABI version 4.
+given in ABI version 4 and higher.
 
 Answers
 ^^^^^^^
@@ -217,6 +226,7 @@ Again, all fields are tab-separated.
 ``content`` is as specified in :doc:`../appendices/types`. For MX and SRV,
 content consists of the priority, followed by a tab, followed by the
 actual content.
+For ENT (Empty Non-Terminal), content will be ignored and can be omitted.
 
 A sample dialogue may look like this (note that in reality, almost all
 queries will actually be for the ANY qtype):
@@ -259,7 +269,7 @@ This is a typical zone transfer.
 ABI version 3 and higher
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-For abi-version 3, DATA-responses get two extra fields:
+From abi-version 3 onwards, DATA-responses get two extra fields:
 
 ::
 
@@ -278,14 +288,14 @@ which are used for delegation, and also for any glue (A, AAAA) records
 present for this purpose. Do note that the DS record for a secure
 delegation should be authoritative!
 
-For abi-versions 1 and 2, the two new fields fall back to default
+For abi-version 1 and 2, the two new fields fall back to default
 values. The default value for scopebits is 0. The default for auth is 1
 (meaning authoritative).
 
 Direct backend commands
 ^^^^^^^^^^^^^^^^^^^^^^^
 
-With abi-version 5 you can use :doc:`backend-cmd <../dnssec/pdnsutil>` for
+With abi-version 5 you can use :doc:`backend-cmd <../manpages/pdnsutil.1>` for
 executing commands on your backend. PowerDNS will use the following
 query/answer format:
 

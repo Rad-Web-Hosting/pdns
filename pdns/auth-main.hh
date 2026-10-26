@@ -34,6 +34,7 @@
 #include "statbag.hh"
 #include "tcpreceiver.hh"
 #include "dnsseckeeper.hh"
+#include "remote_logger.hh"
 
 extern time_t g_starttime;
 extern ArgvMap theArg;
@@ -42,9 +43,10 @@ extern AuthPacketCache PC; //!< This is the main PacketCache, shared across all 
 extern AuthQueryCache QC;
 extern std::unique_ptr<DNSProxy> DP;
 extern CommunicatorClass Communicator;
-void carbonDumpThread(); // Implemented in auth-carbon.cc. Avoids having an auth-carbon.hh declaring exactly one function.
+void carbonDumpThread(Logr::log_t slog); // Implemented in auth-carbon.cc. Avoids having an auth-carbon.hh declaring exactly one function.
 extern bool g_anyToTcp;
 extern bool g_8bitDNS;
+extern bool g_logDNSQueries;
 extern NetmaskGroup g_proxyProtocolACL;
 extern size_t g_proxyProtocolMaximumSize;
 #ifdef HAVE_LUA_RECORDS
@@ -56,3 +58,5 @@ extern time_t g_luaHealthChecksExpireDelay;
 extern time_t g_luaConsistentHashesExpireDelay;
 extern time_t g_luaConsistentHashesCleanupInterval;
 #endif // HAVE_LUA_RECORDS
+extern bool g_views;
+extern std::vector<std::unique_ptr<RemoteLogger>> g_remote_loggers;

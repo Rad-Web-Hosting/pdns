@@ -6,18 +6,95 @@ Several How to's describe operational practices with DNSSEC:
 -  :doc:`../guides/kskroll`
 -  :doc:`../guides/kskrollcdnskey`
 -  :doc:`../guides/zskroll`
+-  :doc:`../guides/algoroll`
 
 Below, frequently used commands are described:
 
 Publishing a DS
 ---------------
 
-To publish a DS to a parent zone, utilize ``pdnsutil show-zone`` and
-take the DS from its output, and transfer it securely to your parent
-zone.
+Manual
+~~~~~~
+
+As automation is not very widespread, DS publication often needs to occur
+manually as follows:
+
+1. utilize ``pdnsutil zone show`` (``pdnsutil show-zone`` prior to version 5.0)
+   to display DS and DNSKEY parameters,
+2. transfer these parameters securely to your parent.
+
+Some parents accept DS format, while some accept DNSKEY (and use it to derive
+DS records).
+
+Automatic
+~~~~~~~~~
+
+An `increasing number of registries <https://github.com/oskar456/cds-updates>`__
+support automatic DNSSEC bootstrapping. This requires publication of CDS
+and/or CDNSKEY records in your zone, which parents can ingest to compute
+DS records from them. This works for both DS initialization (bootstrapping)
+and DS updates (rollovers).
+
+CDS/CDNSKEY record publication can be enabled using
+``pdnsutil zone set-publish-cds`` or ``pdnsutil zone set-publish-cdnskey``.
+
+For bootstrapping, this method lacks authentication (there is no preexisting
+chain of trust). Some registries work around this by observing CDS/CDNSKEY
+records for a few days before acting on them; however, that is not really a
+replacement for authentication. An authentication method is described below.
+
+.. _dnssec-bootstrapping:
+
+Authenticated Bootstrapping (RFC 9615)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The above issue is addressed by "authenticated bootstrapping", which uses
+special signaling records with an existing chain of trust so that slow sanity
+checks can be skipped.
+
+PowerDNS can generate these records automatically. If enabled, it is
+in effect server-wide, for all zones that have CDS/CDNSKEY records.
+
+To enable, a signaling zone needs to be configured. Assuming you have a
+nameserver that appears as ``ns1.example.net`` in delegations, you can
+enable authenticated bootstrapping as follows:
+
+1. Make sure that the nameserver ``ns1.example.net`` itself is in a secure
+   zone (with DS records);
+2. Run
+
+   .. code-block:: shell
+
+      nshost=ns1.example.net
+      pdnsutil zone create _signal.$nshost $nshost  # create NS record too
+      pdnsutil zone set-signaling _signal.$nshost
+
+   You can do this on ``ns1.example.net`` directly, or on another instance
+   serving the same zones. This is useful when not all instances are
+   PowerDNS. (Make sure to adjust NS records accordingly.)
+
+3. Delegate the signaling zone (``_signal.ns1.example.net``) to this
+   PowerDNS instance, and publish DS records for the delegation.
+
+**The above steps need to be repeated for each NS hostname used by the
+domain(s) that you want to bootstrap (such as ``ns2.example.org`` etc.).**
+
+Note: A nameserver can't bootstrap its own parent. (The above example
+won't work to bootstrap ``example.net``; see step 1.) If no other zones
+are served under that hostname, you can skip creating its signaling zone.
+
+``pdnsutil zone set-signaling _signal.$nshost`` is equivalent to securing
+the zone, enabling NSEC3 narrow mode, and setting the ``SIGNALING-ZONE``
+metadata, which will make the zone behave as an :rfc:`9615` signaling zone.
 
 Going insecure
 --------------
+
+.. code-block:: shell
+
+    pdnsutil zone dnssec-disable ZONE
+
+or, prior to version 5.0:
 
 .. code-block:: shell
 
@@ -38,16 +115,22 @@ NSEC3 instead, issue:
 
 .. code-block:: shell
 
-    pdnsutil set-nsec3 ZONE [PARAMETERS] ['narrow']
+    pdnsutil zone set-nsec3 ZONE [PARAMETERS] ['narrow']
 
 e.g.
+
+.. code-block:: shell
+
+    pdnsutil zone set-nsec3 example.net '1 0 0 -'
+
+or, prior to version 5.0:
 
 .. code-block:: shell
 
     pdnsutil set-nsec3 example.net '1 0 0 -'
 
 The quoted part is the content of the NSEC3PARAM records, as defined in
-:rfc:`5155 <5155#section-4>`, in order:
+:rfc:`RFC 5155 <5155#section-4>`, in order:
 
 -  Hash algorithm, should always be ``1`` (SHA1)
 -  Flags, set to ``1`` for :rfc:`NSEC3 Opt-out <5155#section-6>`, this best
@@ -64,6 +147,12 @@ To convert a zone from NSEC3 to NSEC operations, run:
 
 .. code-block:: shell
 
+    pdnsutil zone unset-nsec3 ZONE
+
+or, prior to version 5.0:
+
+.. code-block:: shell
+
     pdnsutil unset-nsec3 ZONE
 
 .. warning::
@@ -71,15 +160,15 @@ To convert a zone from NSEC3 to NSEC operations, run:
   for zones with algorithm 5 (RSASHA1), 6 (DSA-NSEC3-SHA1) or 7
   (RSASHA1-NSEC3-SHA1).
 
-.. _soa-edit-ensure-signature-freshness-on-slaves:
+.. _soa-edit-ensure-signature-freshness-on-secondaries:
 
-SOA-EDIT: ensure signature freshness on slaves
-----------------------------------------------
+SOA-EDIT: ensure signature freshness on secondaries
+---------------------------------------------------
 
-As RRSIGs can expire, slave servers need to know when to re-transfer the
+As RRSIGs can expire, secondary servers need to know when to re-transfer the
 zone. In most implementations (BIND, NSD), this is done by re-signing
 the full zone outside of the nameserver, increasing the SOA serial and
-serving the new zone on the master.
+serving the new zone on the primary.
 
 With PowerDNS in Live-signing mode, the SOA serial is not increased by
 default when the RRSIG dates are rolled.
@@ -87,14 +176,14 @@ default when the RRSIG dates are rolled.
 For zones that use :ref:`native-operation`
 replication PowerDNS will serve valid RRSIGs on all servers.
 
-For :ref:`master <master-operation>` zones (where
-replication happens by means of AXFR), PowerDNS slaves will
+For :ref:`primary <primary-operation>` zones (where
+replication happens by means of AXFR), PowerDNS secondaries will
 automatically re-transfer the zone when it notices the RRSIGs have
 changed, even when the SOA serial is not increased. This ensures the
 zone never serves old signatures.
 
-If your DNS setup uses non-PowerDNS slaves, the slaves need to know when
-the signatures have been updated. This can be accomplished by setting
+If your DNS setup uses non-PowerDNS secondaries, the secondaries need to know
+when the signatures have been updated. This can be accomplished by setting
 the :ref:`metadata-soa-edit` metadata for DNSSEC signed
 zones. This value controls how the value of the SOA serial is modified
 by PowerDNS.
@@ -111,7 +200,7 @@ every zone.
 Possible SOA-EDIT values
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-The 'inception' refers to the time the RRSIGs got updated in
+The 'inception' refers to the time that the RRSIGs got updated in
 :ref:`live-signing mode <dnssec-online-signing>`. This happens every week (see
 :ref:`dnssec-signatures`). The inception time does not depend on
 local timezone, but some modes below will use localtime for
@@ -145,7 +234,7 @@ INCEPTION-INCREMENT
 
 Uses YYYYMMDDSS format for SOA serial numbers. If the SOA serial from
 the backend is within two days after inception, it gets incremented by
-two (the backend should keep SS below 98). Otherwise it uses the maximum
+two (the backend should keep SS below 98). Otherwise, it uses the maximum
 of the backend SOA serial number and inception time in YYYYMMDD01
 format. This requires your backend zone to use YYYYMMDDSS as SOA serial
 format. Uses localtime to find the day for inception time.
@@ -159,10 +248,10 @@ EPOCH
 Sets the SOA serial to the number of seconds since the epoch.
 
 .. warning::
-  Don't combine this with AXFR - the slaves would keep
+  Don't combine this with AXFR - the secondaries would keep
   refreshing all the time. If you need fast updates, sync the backend
   databases directly with incremental updates (or use the same database
-  server on the slaves)
+  server on the secondaries)
 
 NONE
 ^^^^
@@ -170,6 +259,22 @@ NONE
 Ignore :ref:`setting-default-soa-edit` and/or
 :ref:`setting-default-soa-edit-signed`
 settings.
+
+.. _soa-edit-spread-info:
+
+Spreading SOA serial updates over time
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 5.1.3
+
+The SOA-edit updates happen at the same time the RRSIG rolls (:ref:`Thursday midnight UTC <dnssec-signatures>`).
+When serving a large number of zones on the primary, it can happen that the primary becomes overloaded when all secondaries start transferring all these zones at the same time.
+This usually happens if the SOA REFRESH field is set to a low value.
+
+To prevent overloading the primary by secondaries, the :ref:`soa-edit-spread <setting-soa-edit-spread>` can be used to apply the serial increases over time (starting on Thursday midnight UTC).
+These increases happen within the amount of seconds for that setting based on the hash of the zone name.
+
+To prevent RRSIGs expiring on the secondaries when :ref:`soa-edit-spread <setting-soa-edit-spread>` is set to a high value, the :ref:`rrsig-expiry-extend <setting-rrsig-expiry-extend>` setting ensures that the RRSIG expiry time is extended by the same amount by default.
 
 Security
 --------
@@ -183,10 +288,10 @@ In some settings, having such (private) keying material available online
 is considered undesirable. In this case, consider running in pre-signed
 mode.
 
-A slightly more complex approach is running a *hidden* master in simple
+A slightly more complex approach is running a *hidden* primary in simple
 online signing mode, but on a highly secured system unreachable for the
-public. Internet-connected slaves can then transfer the zones pre-signed
-from this master over a secure private network. This topology offers
+public. Internet-connected secondaries can then transfer the zones pre-signed
+from this primary over a secure private network. This topology offers
 substantial security benefits with regards to key material while
 maintaining ease of daily operation by PowerDNS's features in online
 mode.
@@ -217,8 +322,7 @@ Note that the NSEC/NSEC3 records proving those negatives will get the high TTL i
 
 .. note::
 
-  This behaviour was changed in version 4.3.0.
-  We believe the language in RFC 4034 and 5155 about the NSEC(3) TTL is a mistake, and we have chosen to honour its spirit instead of its words.
+  NSEC/NSEC3 records get the negative TTL (which is the lowest of the SOA TTL and the SOA minimum), which means their TTL matches that of a response such as NXDOMAIN.
+  This conforms to :rfc:`RFC 9077 <9077#section-3>`.
 
-  NSEC(3) records now get the negative TTL (which is the lowest of the SOA TTL and the SOA minimum), which means their TTL matches that of an error such as NXDOMAIN.
-  The warning about RFC8198 no longer applies.
+  Prior to version 4.3.0, the behaviour was based on language in :rfc:`RFC 4034 <4034>` and :rfc:`RFC 5155 <5155>` about the NSEC/NSEC3 TTL.

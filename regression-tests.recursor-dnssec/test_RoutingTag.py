@@ -2,7 +2,6 @@ import dns
 import os
 import socket
 import struct
-import threading
 import time
 import clientsubnetoption
 import subprocess
@@ -10,11 +9,12 @@ from recursortests import RecursorTest
 from twisted.internet.protocol import DatagramProtocol
 from twisted.internet import reactor
 
-emptyECSText = 'No ECS received'
-nameECS = 'ecs-echo.example.'
-nameECSInvalidScope = 'invalid-scope.ecs-echo.example.'
+emptyECSText = "No ECS received"
+nameECS = "ecs-echo.example."
+nameECSInvalidScope = "invalid-scope.ecs-echo.example."
 ttlECS = 60
 routingReactorRunning = False
+
 
 class RoutingTagTest(RecursorTest):
     _config_template_default = """
@@ -64,55 +64,38 @@ ecs-add-for=0.0.0.0/0
 
     def setRoutingTag(self, tag):
         # This value is picked up by the gettag()
-        file = open('tagfile', 'w')
-        if tag:
-            file.write(tag)
-        file.close();
+        with open("tagfile", "w") as file:
+            if tag:
+                file.write(tag)
 
     @classmethod
     def startResponders(cls):
         global routingReactorRunning
         print("Launching responders..")
 
-        address = cls._PREFIX + '.24'
+        address = cls._PREFIX + ".24"
         port = 53
 
         if not routingReactorRunning:
             reactor.listenUDP(port, UDPRoutingResponder(), interface=address)
             routingReactorRunning = True
 
-        if not reactor.running:
-            cls._UDPResponder = threading.Thread(name='UDP Routing Responder', target=reactor.run, args=(False,))
-            cls._UDPResponder.setDaemon(True)
-            cls._UDPResponder.start()
-
-    @classmethod
-    def setUpClass(cls):
-        cls.setUpSockets()
-
-        cls.startResponders()
-
-        confdir = os.path.join('configs', cls._confdir)
-        cls.createConfigDir(confdir)
-
-        cls.generateRecursorConfig(confdir)
-        cls.startRecursor(confdir, cls._recursorPort)
-
-        print("Launching tests..")
+        cls.startReactor()
 
     @classmethod
     def tearDownClass(cls):
-        cls.tearDownRecursor()
-        os.unlink('tagfile')
+        os.unlink("tagfile")
+        super().tearDownClass()
+
 
 class RoutingTagTest(RoutingTagTest):
-    _confdir = 'RoutingTag'
+    _confdir = "RoutingTag"
 
     _config_template = """
 use-incoming-edns-subnet=yes
 edns-subnet-allow-list=ecs-echo.example.
 forward-zones=ecs-echo.example=%s.24
-    """ % (os.environ['PREFIX'])
+    """ % (os.environ["PREFIX"])
     _lua_dns_script_file = """
 
 function gettag(remote, ednssubnet, localip, qname, qtype, ednsoptions, tcp, proxyProtocolValues)
@@ -127,51 +110,51 @@ end
 
     def testSendECS(self):
         # First send an ECS query with routingTag
-        self.setRoutingTag('foo')
-        expected1 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, 'TXT', '192.0.2.0/24')
-        ecso = clientsubnetoption.ClientSubnetOption('192.0.2.1', 32)
-        query = dns.message.make_query(nameECS, 'TXT', 'IN', use_edns=True, options=[ecso], payload=512)
+        self.setRoutingTag("foo")
+        expected1 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, "TXT", "192.0.2.0/24")
+        ecso = clientsubnetoption.ClientSubnetOption("192.0.2.1", 32)
+        query = dns.message.make_query(nameECS, "TXT", "IN", use_edns=True, options=[ecso], payload=512)
         self.sendECSQuery(query, expected1)
 
         # Now check a cache hit with the same routingTag (but no ECS)
-        query = dns.message.make_query(nameECS, 'TXT', 'IN')
+        query = dns.message.make_query(nameECS, "TXT", "IN")
         self.checkECSQueryHit(query, expected1)
 
-        expected2 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, 'TXT', '127.0.0.0/24')
+        expected2 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, "TXT", "127.0.0.0/24")
         # And see if a different tag does *not* hit the first one
-        self.setRoutingTag('bar')
-        query = dns.message.make_query(nameECS, 'TXT', 'IN')
+        self.setRoutingTag("bar")
+        query = dns.message.make_query(nameECS, "TXT", "IN")
         self.sendECSQuery(query, expected2)
 
         # And see if a *no* tag does *not* hit the first one
-        expected3 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, 'TXT', '192.0.3.0/24')
+        expected3 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, "TXT", "192.0.3.0/24")
         self.setRoutingTag(None)
-        ecso = clientsubnetoption.ClientSubnetOption('192.0.3.1', 32)
-        query = dns.message.make_query(nameECS, 'TXT', 'IN', use_edns=True, options=[ecso], payload=512)
+        ecso = clientsubnetoption.ClientSubnetOption("192.0.3.1", 32)
+        query = dns.message.make_query(nameECS, "TXT", "IN", use_edns=True, options=[ecso], payload=512)
         self.sendECSQuery(query, expected3)
 
         # And see if an unknown tag from the same subnet does hit the last
-        self.setRoutingTag('baz')
-        ecso = clientsubnetoption.ClientSubnetOption('192.0.3.2', 32)
-        query = dns.message.make_query(nameECS, 'TXT', 'IN', use_edns=True, options=[ecso], payload=512)
+        self.setRoutingTag("baz")
+        ecso = clientsubnetoption.ClientSubnetOption("192.0.3.2", 32)
+        query = dns.message.make_query(nameECS, "TXT", "IN", use_edns=True, options=[ecso], payload=512)
         self.checkECSQueryHit(query, expected3)
 
         # And a no tag and no subnet query does hit the general case
         self.setRoutingTag(None)
-        query = dns.message.make_query(nameECS, 'TXT', 'IN')
+        query = dns.message.make_query(nameECS, "TXT", "IN")
         self.sendECSQuery(query, expected2)
 
-        # And a unknown tag and no subnet query does hit the general case
-        self.setRoutingTag('bag')
-        query = dns.message.make_query(nameECS, 'TXT', 'IN')
+        # And an unknown tag and no subnet query does hit the general case
+        self.setRoutingTag("bag")
+        query = dns.message.make_query(nameECS, "TXT", "IN")
         self.sendECSQuery(query, expected2)
 
-        return # remove this line to peek at cache
-        rec_controlCmd = [os.environ['RECCONTROL'],
-                          '--config-dir=%s' % 'configs/' + self._confdir,
-                          'dump-cache', 'x']
+        if not "PEEK_AT_CACHE" in os.environ:  # set to peek at cache
+            return
+
+        rec_controlCmd = [os.environ["RECCONTROL"], "--config-dir=%s" % "configs/" + self._confdir, "dump-cache", "x"]
         try:
-            expected = b'dumped 7 records\n'
+            expected = b"dumped 7 records\n"
             ret = subprocess.check_output(rec_controlCmd, stderr=subprocess.STDOUT)
             self.assertEqual(ret, expected)
 
@@ -179,14 +162,15 @@ end
             print(e.output)
             raise
 
+
 class RoutingTagFFITest(RoutingTagTest):
-    _confdir = 'RoutingTagFFI'
+    _confdir = "RoutingTagFFI"
 
     _config_template = """
 use-incoming-edns-subnet=yes
 edns-subnet-allow-list=ecs-echo.example.
 forward-zones=ecs-echo.example=%s.24
-    """ % (os.environ['PREFIX'])
+    """ % (os.environ["PREFIX"])
     _lua_dns_script_file = """
 
 local ffi = require("ffi")
@@ -206,53 +190,54 @@ function gettag_ffi(obj)
   return 0
 end
 """
+
     def testSendECS(self):
         # First send an ECS query with routingTag
-        self.setRoutingTag('foo')
-        expected1 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, 'TXT', '192.0.2.0/24')
-        ecso = clientsubnetoption.ClientSubnetOption('192.0.2.1', 32)
-        query = dns.message.make_query(nameECS, 'TXT', 'IN', use_edns=True, options=[ecso], payload=512)
+        self.setRoutingTag("foo")
+        expected1 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, "TXT", "192.0.2.0/24")
+        ecso = clientsubnetoption.ClientSubnetOption("192.0.2.1", 32)
+        query = dns.message.make_query(nameECS, "TXT", "IN", use_edns=True, options=[ecso], payload=512)
         self.sendECSQuery(query, expected1)
 
         # Now check a cache hit with the same routingTag (but no ECS)
-        query = dns.message.make_query(nameECS, 'TXT', 'IN')
+        query = dns.message.make_query(nameECS, "TXT", "IN")
         self.checkECSQueryHit(query, expected1)
 
-        expected2 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, 'TXT', '127.0.0.0/24')
+        expected2 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, "TXT", "127.0.0.0/24")
         # And see if a different tag does *not* hit the first one
-        self.setRoutingTag('bar')
-        query = dns.message.make_query(nameECS, 'TXT', 'IN')
+        self.setRoutingTag("bar")
+        query = dns.message.make_query(nameECS, "TXT", "IN")
         self.sendECSQuery(query, expected2)
 
         # And see if a *no* tag does *not* hit the first one
-        expected3 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, 'TXT', '192.0.3.0/24')
+        expected3 = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, "TXT", "192.0.3.0/24")
         self.setRoutingTag(None)
-        ecso = clientsubnetoption.ClientSubnetOption('192.0.3.1', 32)
-        query = dns.message.make_query(nameECS, 'TXT', 'IN', use_edns=True, options=[ecso], payload=512)
+        ecso = clientsubnetoption.ClientSubnetOption("192.0.3.1", 32)
+        query = dns.message.make_query(nameECS, "TXT", "IN", use_edns=True, options=[ecso], payload=512)
         self.sendECSQuery(query, expected3)
 
         # And see if an unknown tag from the same subnet does hit the last
-        self.setRoutingTag('baz')
-        ecso = clientsubnetoption.ClientSubnetOption('192.0.3.2', 32)
-        query = dns.message.make_query(nameECS, 'TXT', 'IN', use_edns=True, options=[ecso], payload=512)
+        self.setRoutingTag("baz")
+        ecso = clientsubnetoption.ClientSubnetOption("192.0.3.2", 32)
+        query = dns.message.make_query(nameECS, "TXT", "IN", use_edns=True, options=[ecso], payload=512)
         self.checkECSQueryHit(query, expected3)
 
         # And a no tag and no subnet query does hit the general case
         self.setRoutingTag(None)
-        query = dns.message.make_query(nameECS, 'TXT', 'IN')
+        query = dns.message.make_query(nameECS, "TXT", "IN")
         self.sendECSQuery(query, expected2)
 
-        # And a unknown tag and no subnet query does hit the general case
-        self.setRoutingTag('bag')
-        query = dns.message.make_query(nameECS, 'TXT', 'IN')
+        # And an unknown tag and no subnet query does hit the general case
+        self.setRoutingTag("bag")
+        query = dns.message.make_query(nameECS, "TXT", "IN")
         self.sendECSQuery(query, expected2)
 
-        return #remove this line to peek at cache
-        rec_controlCmd = [os.environ['RECCONTROL'],
-                          '--config-dir=%s' % 'configs/' + self._confdir,
-                          'dump-cache y']
+        if not "PEEK_AT_CACHE" in os.environ:  # set to peek at cache
+            return
+
+        rec_controlCmd = [os.environ["RECCONTROL"], "--config-dir=%s" % "configs/" + self._confdir, "dump-cache y"]
         try:
-            expected = 'dumped 6 records\n'
+            expected = "dumped 6 records\n"
             ret = subprocess.check_output(rec_controlCmd, stderr=subprocess.STDOUT)
             self.assertEqual(ret, expected)
 
@@ -260,16 +245,14 @@ end
             print(e.output)
             raise
 
+
 class UDPRoutingResponder(DatagramProtocol):
     @staticmethod
     def ipToStr(option):
         if option.family == clientsubnetoption.FAMILY_IPV4:
-            ip = socket.inet_ntop(socket.AF_INET, struct.pack('!L', option.ip))
+            ip = socket.inet_ntop(socket.AF_INET, struct.pack("!L", option.ip))
         elif option.family == clientsubnetoption.FAMILY_IPV6:
-            ip = socket.inet_ntop(socket.AF_INET6,
-                                  struct.pack('!QQ',
-                                              option.ip >> 64,
-                                              option.ip & (2 ** 64 - 1)))
+            ip = socket.inet_ntop(socket.AF_INET6, struct.pack("!QQ", option.ip >> 64, option.ip & (2**64 - 1)))
         return ip
 
     def datagramReceived(self, datagram, address):
@@ -279,12 +262,16 @@ class UDPRoutingResponder(DatagramProtocol):
         response.flags |= dns.flags.AA
         ecso = None
 
-        if (request.question[0].name == dns.name.from_text(nameECS) or request.question[0].name == dns.name.from_text(nameECSInvalidScope)) and request.question[0].rdtype == dns.rdatatype.TXT:
-
+        if (
+            request.question[0].name == dns.name.from_text(nameECS)
+            or request.question[0].name == dns.name.from_text(nameECSInvalidScope)
+        ) and request.question[0].rdtype == dns.rdatatype.TXT:
             text = emptyECSText
             for option in request.options:
-                if option.otype == clientsubnetoption.ASSIGNED_OPTION_CODE and isinstance(option, clientsubnetoption.ClientSubnetOption):
-                    text = self.ipToStr(option) + '/' + str(option.mask)
+                if option.otype == clientsubnetoption.ASSIGNED_OPTION_CODE and isinstance(
+                    option, clientsubnetoption.ClientSubnetOption
+                ):
+                    text = self.ipToStr(option) + "/" + str(option.mask)
 
                     # Send a scope more specific than the received source for nameECSInvalidScope
                     if request.question[0].name == dns.name.from_text(nameECSInvalidScope):
@@ -292,16 +279,18 @@ class UDPRoutingResponder(DatagramProtocol):
                     else:
                         ecso = clientsubnetoption.ClientSubnetOption(self.ipToStr(option), option.mask, option.mask)
 
-            answer = dns.rrset.from_text(request.question[0].name, ttlECS, dns.rdataclass.IN, 'TXT', text)
+            answer = dns.rrset.from_text(request.question[0].name, ttlECS, dns.rdataclass.IN, "TXT", text)
             response.answer.append(answer)
 
         elif request.question[0].name == dns.name.from_text(nameECS) and request.question[0].rdtype == dns.rdatatype.NS:
-            answer = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, 'NS', 'ns1.ecs-echo.example.')
+            answer = dns.rrset.from_text(nameECS, ttlECS, dns.rdataclass.IN, "NS", "ns1.ecs-echo.example.")
             response.answer.append(answer)
-            additional = dns.rrset.from_text('ns1.ecs-echo.example.', 15, dns.rdataclass.IN, 'A', os.environ['PREFIX'] + '.24')
+            additional = dns.rrset.from_text(
+                "ns1.ecs-echo.example.", 15, dns.rdataclass.IN, "A", os.environ["PREFIX"] + ".24"
+            )
             response.additional.append(additional)
 
         if ecso:
-            response.use_edns(options = [ecso])
+            response.use_edns(options=[ecso])
 
         self.transport.write(response.to_wire(), address)

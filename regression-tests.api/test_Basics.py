@@ -1,17 +1,17 @@
 import requests
 import socket
 import time
-from test_helper import ApiTestCase, is_auth
+import unittest
+from test_helper import ApiTestCase, is_auth, is_recursor
 
 
 class TestBasics(ApiTestCase):
-
     def test_unauth(self):
-        r = requests.get(self.url("/api/v1/servers/localhost"))
+        r = requests.get(self.url("/api/v1/servers/localhost"), verify=False)
         self.assertEqual(r.status_code, requests.codes.unauthorized)
 
     def test_index_html(self):
-        r = requests.get(self.url("/"), auth=('admin', self.server_web_password))
+        r = requests.get(self.url("/"), auth=("admin", self.server_web_password), verify=False)
         self.assertEqual(r.status_code, requests.codes.ok)
 
     def test_split_request(self):
@@ -24,7 +24,7 @@ class TestBasics(ApiTestCase):
         print("Sending request")
         for part in parts:
             print("Sending %s" % part)
-            s.sendall(part.encode('ascii'))
+            s.sendall(part.encode("ascii"))
             time.sleep(0.5)
 
         resp = s.recv(4096, socket.MSG_WAITALL)
@@ -33,32 +33,48 @@ class TestBasics(ApiTestCase):
         print("response", repr(resp))
 
         status = resp.splitlines(0)[0]
-        if b'400' in status:
-            raise Exception('Got unwanted response: %s' % status)
+        if b"400" in status:
+            raise Exception("Got unwanted response: %s" % status)
+
+    @unittest.skipIf(not is_recursor(), "Only applicable to recursors (for now)")
+    def test_big_request(self):
+        payload = bytearray(10000000)
+        url = "/api/v1/servers/localhost/zones"
+        r = self.session.post(self.url(url), data=payload, headers={"content-type": "application/json"})
+        self.assertEqual(r.status_code, 413)
 
     def test_cors(self):
         r = self.session.options(self.url("/api/v1/servers/localhost"))
         # look for CORS headers
 
         self.assertEqual(r.status_code, requests.codes.ok)
-        self.assertEqual(r.headers['access-control-allow-origin'], "*")
-        self.assertEqual(r.headers['access-control-allow-headers'], 'Content-Type, X-API-Key')
-        self.assertEqual(r.headers['access-control-allow-methods'], 'GET, OPTIONS')
+        self.assertNotIn("access-control-allow-origin", r.headers)
+        self.assertEqual(r.headers["access-control-allow-headers"], "Content-Type, X-API-Key")
+        self.assertEqual(r.headers["access-control-allow-methods"], "GET, OPTIONS")
 
         print("response", repr(r.headers))
 
         r = self.session.options(self.url("/api/v1/servers/localhost/zones/test"))
         self.assertEqual(r.status_code, requests.codes.ok)
-        self.assertEqual(r.headers['access-control-allow-origin'], "*")
-        self.assertEqual(r.headers['access-control-allow-headers'], 'Content-Type, X-API-Key')
+        self.assertNotIn("access-control-allow-origin", r.headers)
+        self.assertEqual(r.headers["access-control-allow-headers"], "Content-Type, X-API-Key")
         if is_auth():
-            self.assertEqual(r.headers['access-control-allow-methods'], 'GET, PATCH, PUT, DELETE, OPTIONS')
+            self.assertEqual(r.headers["access-control-allow-methods"], "GET, PATCH, PUT, DELETE, OPTIONS")
         else:
-            self.assertEqual(r.headers['access-control-allow-methods'], 'GET, PUT, DELETE, OPTIONS')
+            self.assertEqual(r.headers["access-control-allow-methods"], "GET, PUT, DELETE, OPTIONS")
 
         print("response", repr(r.headers))
 
         r = self.session.options(self.url("/api/v1/servers/localhost/invalid"))
         self.assertEqual(r.status_code, requests.codes.not_found)
+
+        r = self.session.options(self.url("/api/v1/servers/remotehost"))
+        self.assertEqual(r.status_code, requests.codes.not_found)
+
+        r = self.session.get(self.url("/api/v1/servers/remotehost"))
+        if is_auth():
+            self.assertEqual(r.status_code, requests.codes.not_found)
+        else:
+            self.assertEqual(r.status_code, requests.codes.unauthorized)
 
         print("response", repr(r.headers))

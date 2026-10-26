@@ -23,6 +23,7 @@
 
 #include <vector>
 #include <string>
+#include <utility>
 
 #include "config.h"
 #include "sstuff.hh"
@@ -34,27 +35,4 @@ void doClient(const std::string& command);
 void doConsole();
 void controlThread(Socket&& acceptFD);
 void clearHistory();
-
-#ifndef DISABLE_COMPLETION
-struct ConsoleKeyword
-{
-  std::string name;
-  bool function;
-  std::string parameters;
-  std::string description;
-  std::string toString() const
-  {
-    std::string res(name);
-    if (function) {
-      res += "(" + parameters + ")";
-    }
-    res += ": ";
-    res += description;
-    return res;
-  }
-};
-
-const std::vector<ConsoleKeyword>& getConsoleKeywords();
-#endif /* DISABLE_COMPLETION */
-void setupCompletion();
 }

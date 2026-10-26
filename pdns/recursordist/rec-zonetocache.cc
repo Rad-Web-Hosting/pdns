@@ -90,6 +90,9 @@ void ZoneData::parseDRForCache(DNSRecord& dnsRecord)
   if (dnsRecord.d_class != QClass::IN) {
     return;
   }
+  if (!dnsRecord.d_name.isPartOf(d_zone)) {
+    return;
+  }
   const auto key = pair(dnsRecord.d_name, dnsRecord.d_type);
 
   dnsRecord.d_ttl += d_now;
@@ -99,18 +102,18 @@ void ZoneData::parseDRForCache(DNSRecord& dnsRecord)
   case QType::NSEC3:
     break;
   case QType::RRSIG: {
-    const auto rrsig = getRR<RRSIGRecordContent>(dnsRecord);
+    auto rrsig = getRR<RRSIGRecordContent>(dnsRecord);
     if (rrsig == nullptr) {
       break;
     }
     const auto sigkey = pair(key.first, rrsig->d_type);
     auto found = d_sigs.find(sigkey);
     if (found != d_sigs.end()) {
-      found->second.push_back(rrsig);
+      found->second.push_back(std::move(rrsig));
     }
     else {
       vector<shared_ptr<const RRSIGRecordContent>> sigsrr;
-      sigsrr.push_back(rrsig);
+      sigsrr.push_back(std::move(rrsig));
       d_sigs.insert({sigkey, sigsrr});
     }
     break;
@@ -143,10 +146,10 @@ pdns::ZoneMD::Result ZoneData::getByAXFR(const RecZoneToCache::Config& config, p
   const TSIGTriplet tsigTriplet = config.d_tt;
   ComboAddress local = config.d_local;
   if (local == ComboAddress()) {
-    local = pdns::getQueryLocalAddress(primary.sin4.sin_family, 0);
+    local = pdns::getQueryLocalAddress(primary.sin4.sin_family, 0).d_address;
   }
 
-  AXFRRetriever axfr(primary, d_zone, tsigTriplet, &local, maxReceivedBytes, axfrTimeout);
+  AXFRRetriever axfr(d_log, primary, d_zone, tsigTriplet, &local, maxReceivedBytes, axfrTimeout);
   Resolver::res_t nop;
   vector<DNSRecord> chunk;
   time_t axfrStart = time(nullptr);
@@ -155,7 +158,7 @@ pdns::ZoneMD::Result ZoneData::getByAXFR(const RecZoneToCache::Config& config, p
   // coverity[store_truncates_time_t]
   while (axfr.getChunk(nop, &chunk, (axfrStart + axfrTimeout - axfrNow)) != 0) {
     for (auto& dnsRecord : chunk) {
-      if (config.d_zonemd != pdns::ZoneMD::Config::Ignore) {
+      if (config.d_zonemd != pdns::ZoneMD::Config::Ignore || config.d_dnssec != pdns::ZoneMD::Config::Ignore) {
         zonemd.readRecord(dnsRecord);
       }
       parseDRForCache(dnsRecord);
@@ -191,26 +194,26 @@ static std::vector<std::string> getLinesFromFile(const std::string& file)
   }
   std::string line;
   while (std::getline(stream, line)) {
-    lines.push_back(line);
+    lines.emplace_back(std::move(line));
   }
   return lines;
 }
 
-static std::vector<std::string> getURL(const RecZoneToCache::Config& config)
+static std::vector<std::string> getURL([[maybe_unused]] const RecZoneToCache::Config& config)
 {
   std::vector<std::string> lines;
 #ifdef HAVE_LIBCURL
   MiniCurl miniCurl;
   ComboAddress local = config.d_local;
-  std::string reply = miniCurl.getURL(config.d_sources.at(0), nullptr, local == ComboAddress() ? nullptr : &local, static_cast<int>(config.d_timeout), false, true);
+  std::string reply = miniCurl.getURL(config.d_sources.at(0), nullptr, local == ComboAddress() ? nullptr : &local, static_cast<int>(config.d_timeout), nullptr, false, true, config.d_maxReceivedBytes);
   if (config.d_maxReceivedBytes > 0 && reply.size() > config.d_maxReceivedBytes) {
-    // We should actually detect this *during* the GET
+    // minicurl still returns the transferred data up to max size
     throw std::runtime_error("Retrieved data exceeds maxReceivedBytes");
   }
   std::istringstream stream(reply);
   string line;
   while (std::getline(stream, line)) {
-    lines.push_back(line);
+    lines.emplace_back(std::move(line));
   }
 #else
   throw std::runtime_error("url method configured but libcurl not compiled in");
@@ -418,10 +421,12 @@ void ZoneData::ZoneToCache(const RecZoneToCache::Config& config)
         sigsrr = iter->second;
       }
       bool auth = isRRSetAuth(qname, qtype);
-      // Same decision as updateCacheFromRecords() (we do not test for NSEC since we skip those completely)
-      if (auth || (qtype == QType::NS || qtype == QType::A || qtype == QType::AAAA || qtype == QType::DS)) {
-        g_recCache->replace(d_now, qname, qtype, v, sigsrr,
-                            std::vector<std::shared_ptr<DNSRecord>>(), auth, d_zone);
+      // Same list as updateCacheFromRecords() (we do not test for NSEC since we skip those completely)
+      // Issue #15651
+      bool storeNonAuth = !SyncRes::isRecursiveForward(qname);
+      if (auth || (storeNonAuth && (qtype == QType::NS || qtype == QType::A || qtype == QType::AAAA || qtype == QType::DS))) {
+        g_recCache->replace(d_now, qname, qtype, v, sigsrr, {},
+                            auth, d_zone);
       }
       break;
     }

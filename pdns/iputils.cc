@@ -24,9 +24,14 @@
 #endif
 
 #include "iputils.hh"
+#include "logger.hh"
+#include "logging.hh"
 
+#ifdef __linux__
 #include <fstream>
+#endif
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <boost/format.hpp>
 
 #ifdef HAVE_GETIFADDRS
@@ -54,9 +59,25 @@ int SSocket(int family, int type, int flags)
   return ret;
 }
 
-int SConnect(int sockfd, const ComboAddress& remote)
+static int doConnect(int sockfd, [[maybe_unused]] bool fastopen, const ComboAddress& remote)
 {
-  int ret = connect(sockfd, reinterpret_cast<const struct sockaddr*>(&remote), remote.getSocklen()); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+#ifdef CONNECTX_FASTOPEN
+  if (fastopen) {
+    sa_endpoints_t endpoints{};
+
+    endpoints.sae_dstaddr = reinterpret_cast<const struct sockaddr*>(&remote); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    endpoints.sae_dstaddrlen = remote.getSocklen();
+
+    int flags = CONNECT_DATA_IDEMPOTENT | CONNECT_RESUME_ON_READ_WRITE;
+    return connectx(sockfd, &endpoints, SAE_ASSOCID_ANY, flags, nullptr, 0, nullptr, nullptr);
+  }
+#endif
+  return connect(sockfd, reinterpret_cast<const struct sockaddr*>(&remote), remote.getSocklen()); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+}
+
+int SConnect(int sockfd, bool fastopen, const ComboAddress& remote)
+{
+  int ret = doConnect(sockfd, fastopen, remote);
   if (ret < 0) {
     int savederrno = errno;
     RuntimeError("connecting socket to " + remote.toStringWithPort() + ": " + stringerror(savederrno));
@@ -64,9 +85,9 @@ int SConnect(int sockfd, const ComboAddress& remote)
   return ret;
 }
 
-int SConnectWithTimeout(int sockfd, const ComboAddress& remote, const struct timeval& timeout)
+int SConnectWithTimeout(int sockfd, bool fastopen, const ComboAddress& remote, const struct timeval& timeout)
 {
-  int ret = connect(sockfd, reinterpret_cast<const struct sockaddr*>(&remote), remote.getSocklen()); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+  int ret = doConnect(sockfd, fastopen, remote);
   if (ret < 0) {
     int savederrno = errno;
     if (savederrno == EINPROGRESS) {
@@ -77,7 +98,7 @@ int SConnectWithTimeout(int sockfd, const ComboAddress& remote, const struct tim
       /* we wait until the connection has been established */
       bool error = false;
       bool disconnected = false;
-      int res = waitForRWData(sockfd, false, static_cast<int>(timeout.tv_sec), static_cast<int>(timeout.tv_usec), &error, &disconnected);
+      int res = waitForRWData(sockfd, false, timeout, &error, &disconnected);
       if (res == 1) {
         if (error) {
           savederrno = 0;
@@ -360,19 +381,24 @@ void ComboAddress::truncate(unsigned int bits) noexcept
     len = 16;
   }
 
-  auto tozero = len * 8 - bits; // if set to 22, this will clear 1 byte, as it should
+  auto tozero = (len * 8) - bits; // if set to 22, this will clear 1 byte, as it should
 
-  memset(start + len - tozero / 8, 0, tozero / 8); // blot out the whole bytes on the right NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  memset(start + len - (tozero / 8), 0, tozero / 8); // blot out the whole bytes on the right NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
   auto bitsleft = tozero % 8; // 2 bits left to clear
+  if (bitsleft == 0) {
+    // the memset() above cleared whole bytes only, and for 0 bits the byte we
+    // would look at is the one before the address
+    return;
+  }
 
   // a b c d, to truncate to 22 bits, we just zeroed 'd' and need to zero 2 bits from c
   // so and by '11111100', which is ~((1<<2)-1)  = ~3
-  uint8_t* place = start + len - 1 - tozero / 8; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  uint8_t* place = start + len - 1 - (tozero / 8); // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   *place &= (~((1 << bitsleft) - 1));
 }
 
-size_t sendMsgWithOptions(int socketDesc, const void* buffer, size_t len, const ComboAddress* dest, const ComboAddress* local, unsigned int localItf, int flags)
+pdns::expected<size_t, int> sendMsgWithOptions(int socketDesc, const void* buffer, size_t len, const ComboAddress* dest, const ComboAddress* local, unsigned int localItf, int flags)
 {
   msghdr msgh{};
   iovec iov{};
@@ -437,7 +463,7 @@ size_t sendMsgWithOptions(int socketDesc, const void* buffer, size_t len, const 
       iov.iov_base = reinterpret_cast<void*>(reinterpret_cast<char*>(iov.iov_base) + written);
     }
     else if (res == 0) {
-      return res;
+      return static_cast<size_t>(0);
     }
     else if (res == -1) {
       int err = errno;
@@ -449,11 +475,11 @@ size_t sendMsgWithOptions(int socketDesc, const void* buffer, size_t len, const 
            especially with TCP Fast Open */
         return sent;
       }
-      unixDie("failed in sendMsgWithOptions");
+      return pdns::unexpected{err};
     }
   } while (true);
 
-  return 0;
+  // NOTREACHED
 }
 
 template class NetmaskTree<bool, Netmask>;
@@ -690,6 +716,10 @@ std::vector<Netmask> getListOfRangesOfNetworkInterface(const std::string& itf)
     if (ifa->ifa_addr == nullptr || (ifa->ifa_addr->sa_family != AF_INET && ifa->ifa_addr->sa_family != AF_INET6)) {
       continue;
     }
+    if (ifa->ifa_netmask == nullptr) {
+      continue;
+    }
+
     ComboAddress addr;
     try {
       addr.setSockaddr(ifa->ifa_addr, ifa->ifa_addr->sa_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6));
@@ -722,3 +752,19 @@ std::vector<Netmask> getListOfRangesOfNetworkInterface(const std::string& /* itf
   return result;
 }
 #endif // HAVE_GETIFADDRS
+
+#if !defined(DNSDIST) // [
+void SockaddrWrapper::tightenSocketPermissions(Logr::log_t slog, const std::string& gid) const
+{
+  if (!gid.empty()) {
+    if (chmod(toString().c_str(), 0660) < 0) {
+      SLOG(g_log << Logger::Error << "Unable to change permissions of Unix socket '" << toString() << "': " << stringerror() << endl,
+           slog->error(Logr::Error, errno, "Unable to change permissions of Unix socket", "path", Logging::Loggable(toString())));
+    }
+    if (chown(toString().c_str(), static_cast<uid_t>(-1), strToGID(gid)) < 0) {
+      SLOG(g_log << Logger::Error << "Unable to change group ownership of Unix socket '" << toString() << "': " << stringerror() << endl,
+           slog->error(Logr::Error, errno, "Unable to change group ownership of Unix socket", "path", Logging::Loggable(toString())));
+    }
+  }
+}
+#endif // ] DNSDIST

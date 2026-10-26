@@ -39,7 +39,7 @@ PowerLDAP::SearchResult::~SearchResult()
 {
   if (!d_finished)
     ldap_abandon_ext(d_ld, d_msgid, NULL, NULL); // We don't really care about the return code as there's
-      // not much we can do now
+                                                 // not much we can do now
 }
 
 bool PowerLDAP::SearchResult::getNext(PowerLDAP::sentry_t& entry, bool dn, int /* timeout */)
@@ -208,53 +208,10 @@ void PowerLDAP::getOption(int option, int* value)
   ldapGetOption(d_ld, option, (void*)value);
 }
 
-void PowerLDAP::bind(LdapAuthenticator* authenticator)
+void PowerLDAP::bind(Logr::log_t log, LdapAuthenticator* authenticator)
 {
-  if (!authenticator->authenticate(d_ld))
+  if (!authenticator->authenticate(log, d_ld))
     throw LDAPException("Failed to bind to LDAP server: " + authenticator->getError());
-}
-
-void PowerLDAP::bind(const string& ldapbinddn, const string& ldapsecret, int /* method */)
-{
-  int msgid;
-
-#ifdef HAVE_LDAP_SASL_BIND
-  int rc;
-  struct berval passwd;
-
-  passwd.bv_val = (char*)ldapsecret.c_str();
-  passwd.bv_len = strlen(passwd.bv_val);
-
-  if ((rc = ldap_sasl_bind(d_ld, ldapbinddn.c_str(), LDAP_SASL_SIMPLE, &passwd, NULL, NULL, &msgid)) != LDAP_SUCCESS) {
-    throw LDAPException("Failed to bind to LDAP server: " + getError(rc));
-  }
-#else
-  if ((msgid = ldap_bind(d_ld, ldapbinddn.c_str(), ldapsecret.c_str(), method)) == -1) {
-    throw LDAPException("Failed to bind to LDAP server: " + getError(msgid));
-  }
-#endif
-
-  ldapWaitResult(d_ld, msgid, d_timeout, NULL);
-}
-
-/**
- * Deprecated, use PowerLDAP::bind() instead
- */
-
-void PowerLDAP::simpleBind(const string& ldapbinddn, const string& ldapsecret)
-{
-  this->bind(ldapbinddn, ldapsecret, LDAP_AUTH_SIMPLE);
-}
-
-void PowerLDAP::add(const string& dn, LDAPMod* mods[])
-{
-  int rc;
-
-  rc = ldap_add_ext_s(d_ld, dn.c_str(), mods, NULL, NULL);
-  if (rc == LDAP_SERVER_DOWN || rc == LDAP_CONNECT_ERROR)
-    throw LDAPNoConnection();
-  else if (rc != LDAP_SUCCESS)
-    throw LDAPException("Error adding LDAP entry " + dn + ": " + getError(rc));
 }
 
 void PowerLDAP::modify(const string& dn, LDAPMod* mods[], LDAPControl** scontrols, LDAPControl** ccontrols)
@@ -266,17 +223,6 @@ void PowerLDAP::modify(const string& dn, LDAPMod* mods[], LDAPControl** scontrol
     throw LDAPNoConnection();
   else if (rc != LDAP_SUCCESS)
     throw LDAPException("Error modifying LDAP entry " + dn + ": " + getError(rc));
-}
-
-void PowerLDAP::del(const string& dn)
-{
-  int rc;
-
-  rc = ldap_delete_ext_s(d_ld, dn.c_str(), NULL, NULL);
-  if (rc == LDAP_SERVER_DOWN || rc == LDAP_CONNECT_ERROR)
-    throw LDAPNoConnection();
-  else if (rc != LDAP_SUCCESS && rc != LDAP_NO_SUCH_OBJECT)
-    throw LDAPException("Error deleting LDAP entry " + dn + ": " + getError(rc));
 }
 
 PowerLDAP::SearchResult::Ptr PowerLDAP::search(const string& base, int scope, const string& filter, const char** attr)
@@ -377,37 +323,73 @@ bool PowerLDAP::getSearchEntry(int msgid, sentry_t& entry, bool dn)
   return true;
 }
 
-void PowerLDAP::getSearchResults(int msgid, sresult_t& result, bool dn)
-{
-  sentry_t entry;
-
-  result.clear();
-  while (getSearchEntry(msgid, entry, dn)) {
-    result.push_back(entry);
-  }
-}
-
 const string PowerLDAP::getError(int rc)
 {
   return ldapGetError(d_ld, rc);
 }
 
-const string PowerLDAP::escape(const string& str)
+// Escape sensitive characters according to the rules in RFC4514, section 2.4
+// and RFC4515, section 3.
+const std::string PowerLDAP::escape(const string& input)
 {
-  string a;
-  string::const_iterator i;
-  char tmp[4];
+  std::string out;
+  std::array<char, 1 + 3> hexbuf{};
+  auto length = input.length();
 
-  for (i = str.begin(); i != str.end(); i++) {
-    // RFC4515 3
-    if ((unsigned char)*i == '*' || (unsigned char)*i == '(' || (unsigned char)*i == ')' || (unsigned char)*i == '\\' || (unsigned char)*i == '\0' || (unsigned char)*i > 127) {
-      snprintf(tmp, sizeof(tmp), "\\%02x", (unsigned char)*i);
-
-      a += tmp;
+  out.reserve(length);
+  for (decltype(length) pos = 0; pos < length; ++pos) {
+    uint8_t chr = static_cast<uint8_t>(input[pos]);
+    // Perform UTF-8 encoding of 8-bit values if needed
+    if (chr >= 0x80) {
+      ::snprintf(hexbuf.data(), hexbuf.size(), "\\%02X",
+                 static_cast<uint8_t>(0xc0 | ((chr >> 6) & 0x3f)));
+      out.append(hexbuf.data());
+      ::snprintf(hexbuf.data(), hexbuf.size(), "\\%02X",
+                 static_cast<uint8_t>(0x80 | (chr & 0x3f)));
+      out.append(hexbuf.data());
     }
-    else
-      a += *i;
+    else {
+      bool escape4514{false};
+      bool escape4515{false};
+      // Characters which need escaping regardless of their position
+      switch (chr) {
+      case '"':
+      case '+':
+      case ',':
+      case ';':
+      case '<':
+      case '>':
+        escape4514 = true;
+        break;
+      case '*':
+      case '(':
+      case ')':
+      case '\\':
+      case '\0':
+        escape4515 = true;
+        break;
+      default:
+        break;
+      }
+      // Characters which need escaping if in first position
+      if (pos == 0) {
+        escape4514 |= chr == ' ' || chr == '#';
+      }
+      // Characters which need escaping if in last position
+      if (pos == length - 1) {
+        escape4514 |= chr == ' ';
+      }
+      if (escape4515) {
+        ::snprintf(hexbuf.data(), hexbuf.size(), "\\%02X", chr);
+        out.append(hexbuf.data());
+      }
+      else {
+        if (escape4514) {
+          out.append(1, '\\');
+        }
+        out.append(1, chr);
+      }
+    }
   }
-
-  return a;
+  return out;
 }

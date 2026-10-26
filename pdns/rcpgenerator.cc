@@ -19,6 +19,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
+#include "svc-records.hh"
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -36,7 +37,8 @@
 #include "base64.hh"
 #include "namespaces.hh"
 
-RecordTextReader::RecordTextReader(string  str, DNSName  zone) : d_string(std::move(str)), d_zone(std::move(zone)), d_pos(0)
+RecordTextReader::RecordTextReader(string str, ZoneName zone) :
+  d_string(std::move(str)), d_zone(std::move(zone))
 {
    /* remove whitespace */
    if(!d_string.empty() && ( dns_isspace(*d_string.begin()) || dns_isspace(*d_string.rbegin()) ))
@@ -46,16 +48,18 @@ RecordTextReader::RecordTextReader(string  str, DNSName  zone) : d_string(std::m
 
 void RecordTextReader::xfr48BitInt(uint64_t &val)
 {
+  auto oldpos = d_pos;
   xfr64BitInt(val);
-  if (val > 281474976710655LL)
-    throw RecordTextException("Overflow reading 48 bit integer from record content"); // fixme improve
+  if (val >= (1ULL << 48)) {
+    throw RecordTextException("Numerical value " + d_string.substr(oldpos, d_pos - oldpos) + " at position " + std::to_string(oldpos) + " is too large for a 48-bit integer");
+  }
 }
 
 void RecordTextReader::xfrNodeOrLocatorID(NodeOrLocatorID& val) {
   skipSpaces();
   size_t len;
   for(len=0;
-      d_pos+len < d_string.length() && (isxdigit(d_string.at(d_pos+len)) || d_string.at(d_pos+len) == ':');
+      d_pos+len < d_string.length() && (isxdigit(static_cast<unsigned char>(d_string.at(d_pos+len))) != 0 || d_string.at(d_pos+len) == ':');
       len++) ;   // find length of ID
 
   // Parse as v6, and then strip the final 64 zero bytes
@@ -74,9 +78,9 @@ void RecordTextReader::xfr64BitInt(uint64_t &val)
 {
   skipSpaces();
 
-  if(!isdigit(d_string.at(d_pos)))
+  if (isdigit(static_cast<unsigned char>(d_string.at(d_pos))) == 0) {
     throw RecordTextException("expected digits at position "+std::to_string(d_pos)+" in '"+d_string+"'");
-
+  }
   size_t pos;
   val=std::stoull(d_string.substr(d_pos), &pos);
 
@@ -88,9 +92,9 @@ void RecordTextReader::xfr32BitInt(uint32_t &val)
 {
   skipSpaces();
 
-  if(!isdigit(d_string.at(d_pos)))
+  if (isdigit(static_cast<unsigned char>(d_string.at(d_pos))) == 0) {
     throw RecordTextException("expected digits at position "+std::to_string(d_pos)+" in '"+d_string+"'");
-
+  }
   size_t pos;
   val = pdns::checked_stoi<uint32_t>(d_string.c_str() + d_pos, &pos);
 
@@ -121,6 +125,13 @@ void RecordTextReader::xfrTime(uint32_t &val)
     throw RecordTextException("unable to parse '"+std::to_string(itmp)+"' into a valid time at position "+std::to_string(d_pos)+" in '"+d_string+"'");
   }
 
+  // Note tm_mon is still in 1..12 range at this point
+  if (tm.tm_sec < 0 || tm.tm_sec > 60 || tm.tm_min < 0 || tm.tm_min > 59 ||
+      tm.tm_hour < 0 || tm.tm_hour > 23 || tm.tm_mday < 0 || tm.tm_mday > 31 ||
+      tm.tm_mon < 1 || tm.tm_mon > 12) {
+    throw RecordTextException("invalid time specification '"+std::to_string(itmp)+"' at position "+std::to_string(d_pos)+" in '"+d_string+"'");
+  }
+
   tm.tm_year-=1900;
   tm.tm_mon-=1;
   // coverity[store_truncates_time_t]
@@ -131,9 +142,9 @@ void RecordTextReader::xfrIP(uint32_t &val)
 {
   skipSpaces();
 
-  if(!isdigit(d_string.at(d_pos)))
+  if (isdigit(static_cast<unsigned char>(d_string.at(d_pos))) == 0) {
     throw RecordTextException("while parsing IP address, expected digits at position "+std::to_string(d_pos)+" in '"+d_string+"'");
-
+  }
   uint32_t octet=0;
   val=0;
   char count=0;
@@ -151,7 +162,7 @@ void RecordTextReader::xfrIP(uint32_t &val)
       if(count > 3)
         throw RecordTextException(string("unable to parse IP address, too many dots"));
     }
-    else if(isdigit(d_string.at(d_pos))) {
+    else if (isdigit(static_cast<unsigned char>(d_string.at(d_pos))) != 0) {
       last_was_digit = true;
       octet*=10;
       octet+=d_string.at(d_pos) - '0';
@@ -186,7 +197,7 @@ void RecordTextReader::xfrIP6(std::string &val)
   size_t len;
   // lookup end of value - think of ::ffff encoding too, has dots in it!
   for(len=0;
-      d_pos+len < d_string.length() && (isxdigit(d_string.at(d_pos+len)) || d_string.at(d_pos+len) == ':' || d_string.at(d_pos+len)=='.');
+      d_pos+len < d_string.length() && (isxdigit(static_cast<unsigned char>(d_string.at(d_pos+len))) != 0 || d_string.at(d_pos+len) == ':' || d_string.at(d_pos+len)=='.');
     len++);
 
   if(!len)
@@ -226,31 +237,35 @@ void RecordTextReader::xfrCAPort(ComboAddress &val)
   val.sin4.sin_port = port;
 }
 
-bool RecordTextReader::eof()
+bool RecordTextReader::eof() const
 {
   return d_pos==d_end;
 }
 
 void RecordTextReader::xfr16BitInt(uint16_t &val)
 {
-  uint32_t tmp;
+  auto oldpos = d_pos;
+  uint32_t tmp{0};
   xfr32BitInt(tmp);
   val=tmp;
-  if(val!=tmp)
-    throw RecordTextException("Overflow reading 16 bit integer from record content"); // fixme improve
+  if(val!=tmp) {
+    throw RecordTextException("Numerical value " + d_string.substr(oldpos, d_pos - oldpos) + " at position " + std::to_string(oldpos) + " is too large for a 16-bit integer");
+  }
 }
 
 void RecordTextReader::xfr8BitInt(uint8_t &val)
 {
-  uint32_t tmp;
+  auto oldpos = d_pos;
+  uint32_t tmp{0};
   xfr32BitInt(tmp);
   val=tmp;
-  if(val!=tmp)
-    throw RecordTextException("Overflow reading 8 bit integer from record content"); // fixme improve
+  if(val!=tmp) {
+    throw RecordTextException("Numerical value " + d_string.substr(oldpos, d_pos - oldpos) + " at position " + std::to_string(oldpos) + " is too large for a 8-bit integer");
+  }
 }
 
 // this code should leave all the escapes around
-void RecordTextReader::xfrName(DNSName& val, bool, bool)
+void RecordTextReader::xfrName(DNSName& val, [[maybe_unused]] bool compress)
 {
   skipSpaces();
   DNSName sval;
@@ -270,10 +285,10 @@ void RecordTextReader::xfrName(DNSName& val, bool, bool)
   }
 
   if (sval.empty()) {
-    sval = d_zone;
+    sval = DNSName(d_zone);
   }
   else if (!d_zone.empty()) {
-    sval += d_zone;
+    sval += DNSName(d_zone);
   }
   val = std::move(sval);
 }
@@ -293,12 +308,15 @@ static bool isbase64(char c, bool acceptspace)
   return false;
 }
 
-void RecordTextReader::xfrBlobNoSpaces(string& val, int len) {
+void RecordTextReader::xfrBlobNoSpaces(string& val, int len)
+{
   skipSpaces();
-  int pos=(int)d_pos;
+  auto pos = d_pos;
   const char* strptr=d_string.c_str();
-  while(d_pos < d_end && isbase64(strptr[d_pos], false))
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  while(d_pos < d_end && isbase64(strptr[d_pos], false)) {
     d_pos++;
+  }
 
   string tmp;
   tmp.assign(d_string.c_str()+pos, d_string.c_str() + d_pos);
@@ -310,19 +328,25 @@ void RecordTextReader::xfrBlobNoSpaces(string& val, int len) {
     throw RecordTextException("Record length "+std::to_string(val.size()) + " does not match expected length '"+std::to_string(len));
 }
 
-void RecordTextReader::xfrBlob(string& val, int)
+void RecordTextReader::xfrBlob(string& val, int len)
 {
   skipSpaces();
-  int pos=(int)d_pos;
+  auto pos = d_pos;
   const char* strptr=d_string.c_str();
-  while(d_pos < d_end && isbase64(strptr[d_pos], true))
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  while(d_pos < d_end && isbase64(strptr[d_pos], true)) {
     d_pos++;
+  }
 
   string tmp;
   tmp.assign(d_string.c_str()+pos, d_string.c_str() + d_pos);
   boost::erase_all(tmp," ");
   val.clear();
   B64Decode(tmp, val);
+
+  if (len>-1 && val.size() != static_cast<size_t>(len)) {
+    throw RecordTextException("Record length "+std::to_string(val.size()) + " does not match expected length '"+std::to_string(len));
+  }
 }
 
 void RecordTextReader::xfrRFC1035CharString(string &val) {
@@ -335,15 +359,16 @@ void RecordTextReader::xfrSVCBValueList(vector<string> &val) {
   d_pos += ctr;
 }
 
-void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val)
+void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readability-function-cognitive-complexity)
 {
+  set<SvcParam::SvcParamKey> seenKeys;
   while (d_pos != d_end) {
     skipSpaces();
     if (d_pos == d_end)
       return;
 
     // Find the SvcParamKey
-    size_t pos = d_pos;
+    auto pos = d_pos;
     while (d_pos != d_end) {
       if (d_string.at(d_pos) == '=' || d_string.at(d_pos) == ' ') {
         break;
@@ -361,10 +386,11 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val)
       throw RecordTextException(e.what());
     }
 
-    if (key != SvcParam::no_default_alpn) {
-      if (d_pos == d_end || d_string.at(d_pos) != '=') {
-        throw RecordTextException("expected '=' after " + k);
-      }
+    if (!seenKeys.insert(key).second) {
+      throw RecordTextException("SvcParamKey '" + k + "' appears more than once");
+    }
+
+    if (d_pos != d_end && d_string.at(d_pos) == '=') {
       d_pos++; // Now on the first character after '='
       if (d_pos == d_end || d_string.at(d_pos) == ' ') {
         throw RecordTextException("expected value after " + k + "=");
@@ -372,8 +398,10 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val)
     }
 
     switch (key) {
-    case SvcParam::no_default_alpn:
-      if (d_pos != d_end && d_string.at(d_pos) == '=') {
+    case SvcParam::no_default_alpn: [[fallthrough]];
+    case SvcParam::ohttp: [[fallthrough]];
+    case SvcParam::pvd:
+      if (d_pos != d_end && d_string.at(d_pos) != ' ') {
         throw RecordTextException(k + " key can not have values");
       }
       val.insert(SvcParam(key));
@@ -386,6 +414,9 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val)
         string value;
         xfrRFC1035CharString(value);
         size_t len = key == SvcParam::ipv4hint ? 4 : 16;
+        if (value.empty()) {
+          throw RecordTextException("value is required for SVC Param " + k);
+        }
         if (value.size() % len != 0) {
           throw RecordTextException(k + " in generic format has wrong number of bytes");
         }
@@ -405,17 +436,21 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val)
           hints.push_back(ComboAddress(v));
         }
       }
+      if (!doAuto && hints.empty()) {
+        throw RecordTextException("value is required for SVC Param " + k);
+      }
       try {
         auto p = SvcParam(key, std::move(hints));
         p.setAutoHint(doAuto);
-        val.insert(p);
+        val.insert(std::move(p));
       }
       catch (const std::invalid_argument& e) {
         throw RecordTextException(e.what());
       }
       break;
     }
-    case SvcParam::alpn: {
+    case SvcParam::alpn: [[fallthrough]];
+    case SvcParam::docpath: {
       vector<string> value;
       if (generic) {
         string v;
@@ -424,14 +459,33 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val)
         while (spos < v.length()) {
           len = v.at(spos);
           spos += 1;
+          if (len == 0) {
+            throw RecordTextException("values for " + k + " cannot be empty strings");
+          }
+          if (len > 255) {
+            throw RecordTextException("Length of " + k + " value goes over 255");
+          }
           if (len > v.length() - spos) {
-            throw RecordTextException("Length of ALPN value goes over total length of alpn SVC Param");
+            throw RecordTextException("Length of value goes over total length of " + k + " SVC Param");
           }
           value.push_back(v.substr(spos, len));
           spos += len;
         }
       } else {
         xfrSVCBValueList(value);
+        for (const auto& item : value) {
+          if (item.length() > 255) {
+            throw RecordTextException("Length of SVC value goes over 255");
+          }
+        }
+      }
+      if (value.empty() && key != SvcParam::docpath) {
+        throw RecordTextException("value is required for SVC Param " + k);
+      }
+      for (const auto &alpn_value : value) {
+        if (alpn_value.empty()) {
+          throw RecordTextException(k + " values cannot be empty strings");
+        }
       }
       val.insert(SvcParam(key, std::move(value)));
       break;
@@ -440,13 +494,16 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val)
       if (generic) {
         string v;
         xfrRFC1035CharString(v);
+        if (v.empty()) {
+          throw RecordTextException("value is required for SVC Param " + k);
+        }
         if (v.length() % 2 != 0) {
           throw RecordTextException("Wrong number of bytes in SVC Param " + k);
         }
         std::set<SvcParam::SvcParamKey> keys;
         for (size_t i=0; i < v.length(); i += 2) {
-          uint16_t mand = (v.at(i) << 8);
-          mand += v.at(i+1);
+          uint16_t mand = (static_cast<uint8_t>(v.at(i)) << 8);
+          mand += static_cast<uint8_t>(v.at(i+1));
           keys.insert(SvcParam::SvcParamKey(mand));
         }
         val.insert(SvcParam(key, std::move(keys)));
@@ -454,6 +511,9 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val)
       }
       vector<string> parts;
       xfrSVCBValueList(parts);
+      if (parts.empty()) {
+        throw RecordTextException("value is required for SVC Param " + k);
+      }
       set<string> values(parts.begin(), parts.end());
       val.insert(SvcParam(key, std::move(values)));
       break;
@@ -463,13 +523,25 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val)
       if (generic) {
         string v;
         xfrRFC1035CharString(v);
+        if (v.empty()) {
+          throw RecordTextException("value is required for SVC Param " + k);
+        }
         if (v.length() != 2) {
           throw RecordTextException("port in generic format has the wrong length, expected 2, got " + std::to_string(v.length()));
         }
-        port = (v.at(0) << 8);
-        port += v.at(1);
+        port = static_cast<uint8_t>(v.at(0)) << 8;
+        port += static_cast<uint8_t>(v.at(1));
       } else {
-        xfr16BitInt(port);
+        string portstring;
+        xfrRFC1035CharString(portstring);
+        if (portstring.empty()) {
+          throw RecordTextException("value is required for SVC Param " + k);
+        }
+        try {
+          pdns::checked_stoi_into(port, portstring);
+        } catch (const std::exception &e) {
+          throw RecordTextException(e.what());
+        }
       }
       val.insert(SvcParam(key, port));
       break;
@@ -491,12 +563,54 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val)
           d_pos++;
         }
       }
+      if (value.empty()) {
+        throw RecordTextException("value is required for SVC Param " + k);
+      }
+      val.insert(SvcParam(key, value));
+      break;
+    }
+    case SvcParam::tls_supported_groups: {
+      string string_value;
+      xfrRFC1035CharString(string_value);
+      if (string_value.empty()) {
+        throw RecordTextException("Value is required for SVC Param " + k);
+      }
+
+      vector<string> parts;
+      stringtok(parts, string_value, ",");
+
+      vector<uint16_t> values;
+      values.reserve(parts.size());
+      for (const auto& part : parts) {
+        uint16_t int_part{0};
+        try {
+          pdns::checked_stoi_into(int_part, part);
+        } catch (const std::invalid_argument&) {
+          throw RecordTextException("Value in invalid format for SVC Param " + k);
+        }
+        values.emplace_back(int_part);
+      }
+
+      val.insert(SvcParam(key, std::move(values)));
+      break;
+    }
+    case SvcParam::dohpath: {
+      string value;
+      xfrRFC1035CharString(value);
+      if (value.empty()) {
+        throw RecordTextException("Value is required for SVC Param " + k);
+      }
       val.insert(SvcParam(key, value));
       break;
     }
     default: {
       string value;
       xfrRFC1035CharString(value);
+      if (!generic && value.empty()) {
+        // for generic format, we do not know.
+        // Known keys which forbid having a value need to implement a switch case, above.
+        throw RecordTextException("value is required for SVC Param " + k);
+      }
       val.insert(SvcParam(key, value));
       break;
     }
@@ -504,62 +618,69 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val)
   }
 }
 
-static inline uint8_t hextodec(uint8_t val)
+static uint8_t hextodec(uint8_t val)
 {
-  if(val >= '0' && val<='9')
+  if (val >= '0' && val<='9') {
     return val-'0';
-  else if(val >= 'A' && val<='F')
+  }
+  if (val >= 'A' && val<='F') {
     return 10+(val-'A');
-  else if(val >= 'a' && val<='f')
+  }
+  if (val >= 'a' && val<='f') {
     return 10+(val-'a');
-  else
-    throw RecordTextException("Unknown hexadecimal character '"+std::to_string(val)+"'");
+  }
+  // We do not perform an isprint() check before printing the offending
+  // character, as we are relying upon our only caller to only pass
+  // values which satisfy isalnum().
+  throw RecordTextException("Invalid hexadecimal character '"+std::string(1, static_cast<char>(val))+"'");
 }
 
-
-static void HEXDecode(const char* begin, const char* end, string& out)
+static void HEXDecode(std::string_view chunk, string& out)
 {
-  if(end - begin == 1 && *begin=='-') {
-    out.clear();
+  out.clear();
+  if (chunk.length() == 1 && chunk[0] == '-') {
     return;
   }
-  out.clear();
-  out.reserve((end-begin)/2);
-  uint8_t mode=0, val=0;
-  for(; begin != end; ++begin) {
-    if(!isalnum(*begin))
+  out.reserve(chunk.length() / 2);
+  bool lowdigit{false};
+  uint8_t val{0};
+  for (auto chr : chunk) {
+    if(isalnum(static_cast<unsigned char>(chr)) == 0) {
       continue;
-    if(mode==0) {
-      val = 16*hextodec(*begin);
-      mode=1;
+    }
+    if (!lowdigit) {
+      val = 16*hextodec(chr);
+      lowdigit = true;
     } else {
-      val += hextodec(*begin);
+      val += hextodec(chr);
       out.append(1, (char) val);
-      mode = 0;
+      lowdigit = false;
       val = 0;
     }
   }
-  if(mode)
-    out.append(1, (char) val);
-
+  if (lowdigit) {
+    throw RecordTextException("Hexadecimal blob '" + std::string(chunk) + "' contains an odd number of hex digits");
+  }
 }
 
 void RecordTextReader::xfrHexBlob(string& val, bool keepReading)
 {
   skipSpaces();
-  int pos=(int)d_pos;
-  while(d_pos < d_end && (keepReading || !dns_isspace(d_string[d_pos])))
+  auto pos = d_pos;
+  while(d_pos < d_end && (keepReading || !dns_isspace(d_string[d_pos]))) {
     d_pos++;
+  }
 
-  HEXDecode(d_string.c_str()+pos, d_string.c_str() + d_pos, val);
+  HEXDecode(std::string_view(d_string).substr(pos, d_pos - pos), val);
 }
 
 void RecordTextReader::xfrBase32HexBlob(string& val)
 {
   skipSpaces();
-  int pos=(int)d_pos;
-  while(d_pos < d_end && !dns_isspace(d_string[d_pos]))
+  auto pos = d_pos;
+  while(d_pos < d_end && !dns_isspace(d_string[d_pos])) {
     d_pos++;
+  }
 
   val=fromBase32Hex(string(d_string.c_str()+pos, d_pos-pos));
 }
@@ -579,37 +700,66 @@ void RecordTextReader::xfrText(string& val, bool multi, bool /* lenField */)
   val.clear();
   val.reserve(d_end - d_pos);
 
-  while(d_pos != d_end) {
-    if(!val.empty())
+  while (d_pos != d_end) {
+    if (!val.empty()) {
       val.append(1, ' ');
+    }
 
     skipSpaces();
-    if(d_string[d_pos]!='"') { // special case 'plenus' - without quotes
-      string::size_type pos = d_pos;
-      while(pos != d_end && isalnum(d_string[pos]))
-        pos++;
-      if(pos == d_end) {
-        val.append(1, '"');
-        val.append(d_string.c_str() + d_pos, d_end - d_pos);
-        val.append(1, '"');
-        d_pos = d_end;
+    char delimiter{'"'};
+    bool quoted = d_string[d_pos] == '"';
+    // If the word is quoted, process up to the next quote; otherwise,
+    // process up to the next whitespace (but output it in quotes).
+    val.append(1, '"');
+    if (quoted) {
+      ++d_pos;
+    }
+    else {
+      // RFC1035: ``a contiguous set of characters without interior spaces''
+      delimiter = ' ';
+    }
+    while (d_pos != d_end && d_string[d_pos] != delimiter) {
+      if (d_string[d_pos] == '\\' && d_pos + 1 != d_end) {
+        val.append(1, d_string[d_pos++]); // copy escape slash
+        char chr = d_string[d_pos];
+        if (chr >= '0' && chr <= '9') {
+          bool valid{false};
+          // Must be a three-digit character escape sequence
+          if (d_end - d_pos >= 3) {
+            char chr2 = d_string[d_pos + 1];
+            char chr3 = d_string[d_pos + 2];
+            if (chr2 >= '0' && chr2 <= '9' && chr3 >= '0' && chr3 <= '9') {
+              valid = 100 * (chr - '0') + 10 * (chr2 - '0') + chr3 - '0' < 256;
+            }
+          }
+          if (!valid) {
+            throw RecordTextException("Data field in DNS contains an invalid escape at position "+std::to_string(d_pos)+" of '"+d_string+"'");
+          }
+        }
+        // Not advancing d_pos, we'll append the next 1 or 3 characters as
+        // part of the regular case.
+      }
+      if (!quoted && d_string[d_pos] == '"') {
+        // Bind allows a non-quoted text to be immediately followed by a
+        // quoted text, without any whitespace in between, so handle this
+        // as a delimiter.
         break;
       }
-      throw RecordTextException("Data field in DNS should start with quote (\") at position "+std::to_string(d_pos)+" of '"+d_string+"'");
-    }
-    val.append(1, '"');
-    while(++d_pos < d_end && d_string[d_pos]!='"') {
-      if(d_string[d_pos]=='\\' && d_pos+1!=d_end) {
-        val.append(1, d_string[d_pos++]);
-      }
       val.append(1, d_string[d_pos]);
+      ++d_pos;
     }
     val.append(1,'"');
-    if(d_pos == d_end)
-      throw RecordTextException("Data field in DNS should end on a quote (\") in '"+d_string+"'");
-    d_pos++;
-    if(!multi)
+    if (quoted) {
+      // If we reached the end in a quoted section, the closing quote is missing.
+      if (d_pos == d_end) {
+        throw RecordTextException("Data field in DNS should end on a quote (\") in '"+d_string+"'");
+      }
+      // Skip closing quote
+      ++d_pos;
+    }
+    if (!multi) {
       break;
+    }
   }
 }
 
@@ -631,9 +781,10 @@ void RecordTextReader::xfrUnquotedText(string& val, bool /* lenField */)
 void RecordTextReader::xfrType(uint16_t& val)
 {
   skipSpaces();
-  int pos=(int)d_pos;
-  while(d_pos < d_end && !dns_isspace(d_string[d_pos]))
+  auto pos = d_pos;
+  while(d_pos < d_end && !dns_isspace(d_string[d_pos])) {
     d_pos++;
+  }
 
   string tmp;
   tmp.assign(d_string.c_str()+pos, d_string.c_str() + d_pos);
@@ -787,7 +938,7 @@ void RecordTextWriter::xfr8BitInt(const uint8_t& val)
 }
 
 // should not mess with the escapes
-void RecordTextWriter::xfrName(const DNSName& val, bool /* unused */, bool /* noDot */)
+void RecordTextWriter::xfrName(const DNSName& val, bool /* unused */)
 {
   if(!d_string.empty())
     d_string.append(1,' ');
@@ -832,27 +983,6 @@ void RecordTextWriter::xfrHexBlob(const string& val, bool)
   }
 }
 
-// FIXME copied from dnsparser.cc, see #6010 and #3503 if you want a proper solution
-static string txtEscape(const string &name)
-{
-  string ret;
-  char ebuf[5];
-
-  for(char i : name) {
-    if((unsigned char) i >= 127 || (unsigned char) i < 32) {
-      snprintf(ebuf, sizeof(ebuf), "\\%03u", (unsigned char)i);
-      ret += ebuf;
-    }
-    else if(i=='"' || i=='\\'){
-      ret += '\\';
-      ret += i;
-    }
-    else
-      ret += i;
-  }
-  return ret;
-}
-
 void RecordTextWriter::xfrSVCBValueList(const vector<string> &val) {
   bool shouldQuote{false};
   vector<string> escaped;
@@ -875,7 +1005,7 @@ void RecordTextWriter::xfrSVCBValueList(const vector<string> &val) {
       }
       unescaped += ch;
     }
-    escaped.push_back(unescaped);
+    escaped.push_back(std::move(unescaped));
   }
   if (shouldQuote) {
     d_string.append(1, '"');
@@ -892,13 +1022,14 @@ void RecordTextWriter::xfrSvcParamKeyVals(const set<SvcParam>& val) {
       d_string.append(1, ' ');
 
     d_string.append(SvcParam::keyToString(param.getKey()));
-    if (param.getKey() != SvcParam::no_default_alpn) {
+    if (param.getKey() != SvcParam::no_default_alpn && param.getKey() != SvcParam::ohttp && !(param.getKey() == SvcParam::docpath && param.getALPN().empty()) && param.getKey() != SvcParam::pvd) { // NOLINT(readability-simplify-boolean-expr)
       d_string.append(1, '=');
     }
 
     switch (param.getKey())
     {
-    case SvcParam::no_default_alpn:
+    case SvcParam::no_default_alpn: [[fallthrough]];
+    case SvcParam::pvd:
       break;
     case SvcParam::ipv4hint: /* fall-through */
     case SvcParam::ipv6hint:
@@ -909,7 +1040,8 @@ void RecordTextWriter::xfrSvcParamKeyVals(const set<SvcParam>& val) {
       }
       d_string.append(ComboAddress::caContainerToString(param.getIPHints(), false));
       break;
-    case SvcParam::alpn:
+    case SvcParam::alpn: [[fallthrough]];
+    case SvcParam::docpath:
       xfrSVCBValueList(param.getALPN());
       break;
     case SvcParam::mandatory:
@@ -937,6 +1069,24 @@ void RecordTextWriter::xfrSvcParamKeyVals(const set<SvcParam>& val) {
       d_string = str + '"' + d_string + '"';
       break;
     }
+    case SvcParam::ohttp:
+      // no value
+      break;
+    case SvcParam::tls_supported_groups: {
+      auto str = d_string;
+      d_string.clear();
+      bool first = true;
+      for (auto const &group: param.getTLSSupportedGroups()) {
+        if (!first) {
+          str += ',';
+        }
+        str += std::to_string(group);
+        first = false;
+      }
+      d_string = std::move(str);
+      break;
+    }
+    case SvcParam::dohpath:
     default:
       auto str = d_string;
       d_string.clear();
@@ -952,7 +1102,12 @@ void RecordTextWriter::xfrText(const string& val, bool /* multi */, bool /* lenF
   if(!d_string.empty())
     d_string.append(1,' ');
 
-  d_string.append(val);
+  if (val.empty()) {
+    d_string.append(2, '"');
+  }
+  else {
+    d_string.append(val);
+  }
 }
 
 void RecordTextWriter::xfrUnquotedText(const string& val, bool /* lenField */)

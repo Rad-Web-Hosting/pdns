@@ -55,6 +55,18 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <boost/type_traits.hpp>
 #include <lua.hpp>
 
+#if __cplusplus >= 201703L
+#include <variant>
+#include <optional>
+#endif /* C++17 */
+
+// Set the older gcc define for tsan if clang or modern gcc tell us we have tsan.
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define __SANITIZE_THREAD__ 1
+#endif
+#endif
+
 #if defined(_MSC_VER) && _MSC_VER < 1900
 #   include "misc/exception.hpp"
 #endif
@@ -66,6 +78,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 #define LUACONTEXT_GLOBAL_EQ "e5ddced079fc405aa4937b386ca387d2"
+#define LUACONTEXT_DEBUG_TRACEBACK "8d143f0add7ad7fa323d0d1d12f3f114" // I would prefer a lightuserdata in the registry index
 #define EQ_FUNCTION_NAME "__eq"
 #define TOSTRING_FUNCTION_NAME "__tostring"
 
@@ -96,7 +109,17 @@ public:
     explicit LuaContext(bool openDefaultLibs = true)
     {
         // luaL_newstate can return null if allocation failed
-        mState = luaL_newstate();
+#if defined(__SANITIZE_THREAD__) && defined(LUAJIT_VERSION) && defined(__aarch64__)
+        // on arm64 with luajit and TSAN, allocation may fail spuriously, so keep retrying a bit
+        int tries = 100;
+#else
+        int tries = 1;
+#endif
+        for (; tries > 0; tries--) {
+          mState = luaL_newstate();
+          if (mState != nullptr) { break; }
+        }
+#undef RETRIES
         if (mState == nullptr)
             throw std::bad_alloc();
 
@@ -112,7 +135,12 @@ public:
         if (openDefaultLibs)
             luaL_openlibs(mState);
 
-         writeGlobalEq();
+        writeGlobalEq();
+        lua_pushliteral(mState, LUACONTEXT_DEBUG_TRACEBACK); // ref
+        lua_getglobal(mState, "debug"); // ref, debug
+        lua_getfield(mState, -1, "traceback"); // ref, debug, traceback
+        lua_remove(mState, -2); // ref, traceback
+        lua_settable(mState, LUA_REGISTRYINDEX); // []
     }
 
     void writeGlobalEq() {
@@ -122,7 +150,7 @@ public:
           lua_gettable(lua, -2);
           /* if not found, return false */
           if (lua_isnil(lua, -1)) {
-            lua_pop(lua, -2);
+            lua_pop(lua, 2);
             lua_pushboolean(lua, false);
             return 1;
           }
@@ -1417,9 +1445,8 @@ private:
     }
     
     static int gettraceback(lua_State* L) {
-        lua_getglobal(L, "debug"); // stack: error, debug library
-        lua_getfield(L, -1, "traceback"); // stack: error, debug library, debug.traceback function
-        lua_remove(L, -2); // stack: error, debug.traceback function
+        lua_pushliteral(L, LUACONTEXT_DEBUG_TRACEBACK); // stack: error, ref
+        lua_rawget(L, LUA_REGISTRYINDEX); // stack: error, debug.traceback
         lua_pushstring(L, ""); // stack: error, debug.traceback, ""
         lua_pushinteger(L, 2); // stack: error, debug.traceback, "", 2
         lua_call(L, 2, 1); // stack: error, traceback
@@ -1449,21 +1476,26 @@ private:
 
         // if pcall failed, analyzing the problem and throwing
         if (pcallReturnValue != 0) {
+            switch (pcallReturnValue) {
+                case LUA_ERRMEM:
+                    throw std::bad_alloc{};
+                case LUA_ERRERR:
+                    throw ExecutionErrorException("while handling a Lua error, the traceback handler failed (LUA_ERRERR)");
+                // all other values should have left us an error and a traceback
+            }
+   
 
-            // stack top: {error, traceback}
-            lua_rawgeti(state, -1, 1); // stack top: {error, traceback}, error
-            lua_rawgeti(state, -2, 2); // stack top: {error, traceback}, error, traceback
-            lua_remove(state, -3); // stack top: error, traceback
+            if (lua_gettop(state) >= 1 && lua_type(state, -1) == LUA_TTABLE) {
+                // stack top: {error, traceback}
+                lua_rawgeti(state, -1, 1); // stack top: {error, traceback}, error
+                lua_rawgeti(state, -2, 2); // stack top: {error, traceback}, error, traceback
+                lua_remove(state, -3); // stack top: error, traceback
 
-            PushedObject traceBackRef{state, 1};
-            const auto traceBack = readTopAndPop<std::string>(state, std::move(traceBackRef)); // stack top: error
-            PushedObject errorCode{state, 1};
+                PushedObject traceBackRef{state, 1};
+                const auto traceBack = readTopAndPop<std::string>(state, std::move(traceBackRef)); // stack top: error
+                PushedObject errorCode{state, 1};
 
-            // an error occurred during execution, either an error message or a std::exception_ptr was pushed on the stack
-            if (pcallReturnValue == LUA_ERRMEM) {
-                throw std::bad_alloc{};
-
-            } else if (pcallReturnValue == LUA_ERRRUN) {
+                // an error occurred during execution, either an error message or a std::exception_ptr was pushed on the stack
                 if (lua_isstring(state, 1)) {
                     // the error is a string
                     const auto str = readTopAndPop<std::string>(state, std::move(errorCode));
@@ -1483,6 +1515,9 @@ private:
                     }
                     throw ExecutionErrorException{"Unknown Lua error"};
                 }
+            }
+            else {
+                throw ExecutionErrorException("while handling a Lua error, the traceback handler did not return a table (" + std::to_string(pcallReturnValue) + ")");
             }
         }
 
@@ -1873,8 +1908,8 @@ private:
     // the only case where "min != max" is with boost::optional at the end of the list
     template<typename... TArgumentsList>
     struct FunctionArgumentsCounter {};
-    
-    // true is the template parameter is a boost::optional
+
+    // true if the template parameter is a boost::optional or std::optional
     template<typename T>
     struct IsOptional : public std::false_type {};
 };
@@ -1970,6 +2005,10 @@ struct LuaContext::FunctionArgumentsCounter<> {
 // implementation of IsOptional
 template<typename T>
 struct LuaContext::IsOptional<boost::optional<T>> : public std::true_type {};
+#if __cplusplus >= 201703L
+template<typename T>
+struct LuaContext::IsOptional<std::optional<T>> : public std::true_type {};
+#endif /* C++ 17 */
 
 // implementation of LuaFunctionCaller
 template<typename TFunctionType>
@@ -2523,6 +2562,25 @@ private:
     };
 };
 
+#if __cplusplus >= 201703L
+// std::variant
+template<typename... TTypes>
+struct LuaContext::Pusher<std::variant<TTypes...>>
+{
+    static const int minSize = PusherMinSize<TTypes...>::size;
+    static const int maxSize = PusherMaxSize<TTypes...>::size;
+
+    static PushedObject push(lua_State* state, const std::variant<TTypes...>& value) noexcept {
+        PushedObject obj{state, 0};
+        std::visit([&](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            obj = Pusher<T>::push(state, arg);
+        }, value);
+        return obj;
+    }
+};
+#endif /* C++17 */
+
 // boost::optional
 template<typename TType>
 struct LuaContext::Pusher<boost::optional<TType>> {
@@ -2541,6 +2599,27 @@ struct LuaContext::Pusher<boost::optional<TType>> {
         }
     }
 };
+
+#if __cplusplus >= 201703L
+// std::optional
+template<typename TType>
+struct LuaContext::Pusher<std::optional<TType>> {
+    typedef Pusher<typename std::decay<TType>::type>
+        UnderlyingPusher;
+
+    static const int minSize = UnderlyingPusher::minSize < 1 ? UnderlyingPusher::minSize : 1;
+    static const int maxSize = UnderlyingPusher::maxSize > 1 ? UnderlyingPusher::maxSize : 1;
+
+    static PushedObject push(lua_State* state, const std::optional<TType>& value) noexcept {
+        if (value.has_value()) {
+            return UnderlyingPusher::push(state, value.value());
+        } else {
+            lua_pushnil(state);
+            return PushedObject{state, 1};
+        }
+    }
+};
+#endif /* C++17 */
 
 // tuple
 template<typename... TTypes>
@@ -2891,7 +2970,27 @@ struct LuaContext::Reader<boost::optional<TType>>
     }
 };
 
-// variant
+#if __cplusplus >= 201703L
+// NOLINTBEGIN(clang-analyzer-cplusplus.NewDeleteLeaks)
+template<typename TType>
+struct LuaContext::Reader<std::optional<TType>>
+{
+    static auto read(lua_State* state, int index)
+        -> boost::optional<std::optional<TType>>
+    {
+        if (lua_isnil(state, index)) {
+          return boost::optional<std::optional<TType>>{std::optional<TType>()};
+        }
+        if (auto&& other = Reader<TType>::read(state, index)) {
+            return std::move(std::optional<TType>(*other));
+        }
+        return boost::none;
+    }
+};
+// NOLINTEND(clang-analyzer-cplusplus.NewDeleteLeaks)
+#endif /* C++ 17 */
+
+// boost::variant
 template<typename... TTypes>
 struct LuaContext::Reader<boost::variant<TTypes...>>
 {
@@ -2937,6 +3036,42 @@ public:
         return MainVariantReader::read(state, index);
     }
 };
+
+#if __cplusplus >= 201703L
+// std::variant
+template<typename... TTypes>
+struct LuaContext::Reader<std::variant<TTypes...>>
+{
+    using ReturnType = std::variant<TTypes...>;
+
+private:
+    template<std::size_t I = 0> static boost::optional<ReturnType> variantRead(lua_State* state, int index)
+    {
+        constexpr auto nbTypes = std::variant_size_v<ReturnType>;
+        if constexpr (I >= nbTypes) {
+            return boost::none;
+        }
+        using InitialType = std::variant_alternative_t<I, ReturnType>;
+        using DecayedType = std::decay_t<InitialType>;
+        if (const auto val = Reader<DecayedType>::read(state, index)) {
+            // we are using the initial, non-decayed type so that a
+            // cv-qualifiers are not ignored
+            return ReturnType{std::in_place_type<InitialType>, *val};
+        }
+        if constexpr (I < (nbTypes - 1)) {
+            return variantRead<I + 1>(state, index);
+        }
+        return boost::none;
+    }
+
+public:
+    static auto read(lua_State* state, int index)
+        -> boost::optional<ReturnType>
+    {
+        return variantRead(state, index);
+    }
+};
+#endif /* C++ 17 */
 
 // reading a tuple
 // tuple have an additional argument for their functions, that is the maximum size to read

@@ -42,6 +42,8 @@ using std::map;
 using std::string;
 using std::vector;
 
+bool g_slogStructured{false};
+
 StatBag S;
 ArgvMap args;
 bool g_dnsttl;
@@ -49,7 +51,7 @@ bool g_pdnsinfo;
 unsigned int g_domainid;
 string g_basedn;
 string g_metadatadn;
-DNSName g_zonename;
+ZoneName g_zonename;
 map<DNSName,bool> g_objects;
 map<string, bool> g_entries;
 map<DNSName,bool> g_recorddata;
@@ -91,11 +93,11 @@ static void callback_simple( unsigned int domain_id, const DNSName &domain, cons
         std::string stripped=stripDot(content);
         std::string rrvalue = stripped + ((stripped.empty() || stripped[stripped.size()-1]==' ') ? "." : "");
         std::string dn = "dc=";
-        if( host.countLabels() ) { dn += host.toStringNoDot() + ",dc="; }
+        if( host.hasLabels() ) { dn += host.toStringNoDot() + ",dc="; }
         dn += g_zonename.toStringNoDot() + "," + g_basedn;
         cout << "dn: " << dn << endl;
 
-        if( host.countLabels() == 0 ) { host = g_zonename; }
+        if( !host.hasLabels() ) { host = g_zonename.operator const DNSName&(); }
 
         if( !g_entries[dn] )
         {
@@ -312,13 +314,13 @@ int main( int argc, char* argv[] )
                                 }
                                 try
                                 {
-                                  if( i.name != g_rootdnsname && i.name != DNSName("localhost") && i.name != DNSName("0.0.127.in-addr.arpa") )
+                                  if( i.name != g_rootzonename && i.name != ZoneName("localhost") && i.name != ZoneName("0.0.127.in-addr.arpa") )
                                         {
                                                 cerr << "Parsing file: " << i.filename << ", domain: " << i.name << endl;
                                                 g_zonename = i.name;
                                                 ZoneParserTNG zpt(i.filename, i.name, BP.getDirectory());
-                                                zpt.setMaxGenerateSteps(args.asNum("max-generate-steps"));
-                                                zpt.setMaxIncludes(args.asNum("max-include-depth"));
+                                                zpt.setMaxGenerateSteps(args.asNum<size_t>("max-generate-steps"));
+                                                zpt.setMaxIncludes(args.asNum<size_t>("max-include-depth"));
                                                 DNSResourceRecord rr;
                                                 while(zpt.get(rr)) {
                                                         callback(g_domainid, rr.qname, rr.qtype.toString(), encode_non_ascii(rr.content), rr.ttl);
@@ -345,9 +347,9 @@ int main( int argc, char* argv[] )
                                         return 1;
                         }
 
-                        g_zonename = DNSName(args["zone-name"]);
+                        g_zonename = ZoneName(args["zone-name"]);
                         ZoneParserTNG zpt(args["zone-file"], g_zonename);
-                        zpt.setMaxGenerateSteps(args.asNum("max-generate-steps"));
+                        zpt.setMaxGenerateSteps(args.asNum<size_t>("max-generate-steps"));
                         DNSResourceRecord rr;
                         while(zpt.get(rr)) {
                                 callback(g_domainid, rr.qname, rr.qtype.toString(), encode_non_ascii(rr.content), rr.ttl);

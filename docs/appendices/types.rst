@@ -9,11 +9,12 @@ grouped.
   Host names and the MNAME of a SOA records are NEVER
   terminated with a '.' in PowerDNS storage! If a trailing '.' is present
   it will inevitably cause problems, problems that may be hard to debug.
-  Use ``pdnsutil check-zone`` to validate your zone data.
+  Use ``pdnsutil zone check`` (or ``pdnsutil check-zone`` prior to version
+  5.0) to validate your zone data.
 
 .. note::
-  Whenever the storage format is mentioned, this relates only to
-  the way the record should be stored in one of the :doc:`generic SQL <../backends/generic-sql>` backends. The other
+  Whenever the storage format is mentioned, this relates only to the way
+  that the record should be stored in one of the :doc:`generic SQL <../backends/generic-sql>` backends. The other
   backends should use their *native* format.
 
 The PowerDNS Recursor can serve and store all record types, regardless
@@ -242,11 +243,19 @@ The RRSIG DNSSEC record type is fully supported, as described in :rfc:`4034`.
 
 .. _types-soa:
 
+SMIMEA
+------
+
+Since 4.1. The SMIMEA record type, specified in :rfc:`8162`, is used to bind S/MIME
+certificates to domains.
+
+.. _types-txt:
+
 SOA
 ---
 
 The Start of Authority record is one of the most complex available. It
-specifies a lot about a domain: the name of the master nameserver ('the
+specifies a lot about a domain: the name of the primary nameserver ('the
 primary'), the hostmaster and a set of numbers indicating how the data
 in this domain expires and how often it needs to be checked. Further
 more, it contains a serial number which should rise on each change of
@@ -327,14 +336,6 @@ certificate to named hosts and ports.
 
 .. _types-smimea:
 
-SMIMEA
-------
-
-Since 4.1. The SMIMEA record type, specified in :rfc:`8162`, is used to bind S/MIME
-certificates to domains.
-
-.. _types-txt:
-
 TXT
 ---
 
@@ -392,6 +393,7 @@ The following, rarely used or obsolete record types, are also supported:
 -  MR (:rfc:`1035`)
 -  NID (:rfc:`6742`)
 -  RKEY (`draft-reid-dnsext-rkey-00.txt <https://tools.ietf.org/html/draft-reid-dnsext-rkey-00>`__)
+- WALLET (`wallet-completed-template <https://www.iana.org/assignments/dns-parameters/WALLET/wallet-completed-template>`__)
 
 .. _types-unknown:
 
@@ -405,4 +407,4 @@ PowerDNS supports (:rfc:`3597`) syntax for serving unknown record types. For exa
    e.example.   IN          TYPE1               \# 4 0A000001
 
 Beware that PowerDNS will attempt to parse known record types even if written in this syntax.
-This bug will be fixed in future release.
+This bug will be fixed in a future release.

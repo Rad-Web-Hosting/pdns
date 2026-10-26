@@ -20,9 +20,9 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #pragma once
-#include "namespaces.hh"
+
 #include "validate.hh"
-#include "logging.hh"
+#include "logr.hh"
 
 /* Off: 3.x behaviour, we do no DNSSEC, no EDNS
    ProcessNoValidate: we gather DNSSEC records on all queries, but we will never validate
@@ -31,7 +31,7 @@
    ValidateAll: DNSSEC issue -> servfail
 */
 
-enum class DNSSECMode
+enum class DNSSECMode : uint8_t
 {
   Off,
   Process,
@@ -46,4 +46,4 @@ bool checkDNSSECDisabled();
 bool warnIfDNSSECDisabled(const string& msg);
 vState increaseDNSSECStateCounter(const vState& state);
 vState increaseXDNSSECStateCounter(const vState& state);
-bool updateTrustAnchorsFromFile(const std::string& fname, map<DNSName, dsset_t>& dsAnchors, Logr::log_t);
+bool updateTrustAnchorsFromFile(const std::string& fname, std::map<DNSName, dsset_t>& dsAnchors, Logr::log_t);

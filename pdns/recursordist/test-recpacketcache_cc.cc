@@ -47,16 +47,16 @@ BOOST_AUTO_TEST_CASE(test_recPacketCacheSimple)
   pw.commit();
   string rpacket((const char*)&packet[0], packet.size());
 
-  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), now, ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), now, ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
   rpc.doPruneTo(now, 0);
   BOOST_CHECK_EQUAL(rpc.size(), 0U);
-  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), now, ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), now, ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
   rpc.doWipePacketCache(qname);
   BOOST_CHECK_EQUAL(rpc.size(), 0U);
 
-  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), now, ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), now, ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
   uint32_t qhash2 = 0;
   bool found = rpc.getResponsePacket(tag, qpacket, now, &fpacket, &age, &qhash2);
@@ -117,7 +117,7 @@ BOOST_AUTO_TEST_CASE(test_recPacketCacheSimpleWithRefresh)
   pw.commit();
   string rpacket((const char*)&packet[0], packet.size());
 
-  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), now, ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), now, ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
   uint32_t qhash2 = 0;
   bool found = rpc.getResponsePacket(tag, qpacket, qname, QType::A, QClass::IN, now, &fpacket, &age, &qhash2);
@@ -177,17 +177,17 @@ BOOST_AUTO_TEST_CASE(test_recPacketCacheSimplePost2038)
   pw.commit();
   string rpacket((const char*)&packet[0], packet.size());
 
-  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), future, ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), future, ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
   rpc.doPruneTo(time(nullptr), 0);
   BOOST_CHECK_EQUAL(rpc.size(), 0U);
-  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), future, ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), future, ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
 
   rpc.doWipePacketCache(qname);
   BOOST_CHECK_EQUAL(rpc.size(), 0U);
 
-  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), future, ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag, qhash, string(qpacket), qname, QType::A, QClass::IN, string(rpacket), future, ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
   uint32_t qhash2 = 0;
   bool found = rpc.getResponsePacket(tag, qpacket, future, &fpacket, &age, &qhash2);
@@ -253,7 +253,7 @@ BOOST_AUTO_TEST_CASE(test_recPacketCache_Tags)
   BOOST_CHECK_EQUAL(rpc.getResponsePacket(tag1, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, &temphash), false);
   BOOST_CHECK_EQUAL(qhash, temphash);
 
-  /* Different tag, should still get get the same hash, for both interfaces */
+  /* Different tag, should still get the same hash, for both interfaces */
   BOOST_CHECK_EQUAL(rpc.getResponsePacket(tag2, qpacket, time(nullptr), &fpacket, &age, &temphash), false);
   BOOST_CHECK_EQUAL(qhash, temphash);
   BOOST_CHECK_EQUAL(rpc.getResponsePacket(tag2, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, &temphash), false);
@@ -276,11 +276,11 @@ BOOST_AUTO_TEST_CASE(test_recPacketCache_Tags)
   BOOST_CHECK(r1packet != r2packet);
 
   /* inserting a response for tag1 */
-  rpc.insertResponsePacket(tag1, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag1, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
 
   /* inserting a different response for tag2, should not override the first one */
-  rpc.insertResponsePacket(tag2, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag2, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 2U);
 
   /* remove all responses from the cache */
@@ -288,10 +288,10 @@ BOOST_AUTO_TEST_CASE(test_recPacketCache_Tags)
   BOOST_CHECK_EQUAL(rpc.size(), 0U);
 
   /* reinsert both */
-  rpc.insertResponsePacket(tag1, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag1, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
 
-  rpc.insertResponsePacket(tag2, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag2, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 2U);
 
   /* remove the responses by qname, should remove both */
@@ -299,7 +299,7 @@ BOOST_AUTO_TEST_CASE(test_recPacketCache_Tags)
   BOOST_CHECK_EQUAL(rpc.size(), 0U);
 
   /* insert the response for tag1 */
-  rpc.insertResponsePacket(tag1, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag1, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
 
   /* we can retrieve it */
@@ -318,7 +318,7 @@ BOOST_AUTO_TEST_CASE(test_recPacketCache_Tags)
   BOOST_CHECK_EQUAL(temphash, qhash);
 
   /* adding a response for the second tag */
-  rpc.insertResponsePacket(tag2, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(tag2, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 2U);
 
   /* We still get the correct response for the first tag */
@@ -362,14 +362,16 @@ BOOST_AUTO_TEST_CASE(test_recPacketCache_TCP)
   string qpacket(reinterpret_cast<const char*>(&packet[0]), packet.size());
   pw.startRecord(qname, QType::A, ttd);
 
+  std::pair<uint16_t, uint16_t> ecsInfo;
+
   /* Both interfaces (with and without the qname/qtype/qclass) should get the same hash */
   BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, time(nullptr), &fpacket, &age, &qhash), false);
-  BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, nullptr, &temphash, nullptr, false), false);
+  BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, nullptr, &temphash, nullptr, false, ecsInfo), false);
   BOOST_CHECK_EQUAL(qhash, temphash);
 
-  /* Different tcp/udp, should still get get the same hash, for both interfaces */
+  /* Different tcp/udp, should still get the same hash, for both interfaces */
   BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, time(nullptr), &fpacket, &age, &qhash), false);
-  BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, nullptr, &temphash, nullptr, true), false);
+  BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, nullptr, &temphash, nullptr, true, ecsInfo), false);
   BOOST_CHECK_EQUAL(qhash, temphash);
 
   {
@@ -389,11 +391,11 @@ BOOST_AUTO_TEST_CASE(test_recPacketCache_TCP)
   BOOST_CHECK(r1packet != r2packet);
 
   /* inserting a response for udp */
-  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
 
   /* inserting a different response for tcp, should not override the first one */
-  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, boost::none, true);
+  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, std::nullopt, true);
   BOOST_CHECK_EQUAL(rpc.size(), 2U);
 
   /* remove all responses from the cache */
@@ -401,10 +403,10 @@ BOOST_AUTO_TEST_CASE(test_recPacketCache_TCP)
   BOOST_CHECK_EQUAL(rpc.size(), 0U);
 
   /* reinsert both */
-  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
 
-  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, boost::none, true);
+  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, std::nullopt, true);
   BOOST_CHECK_EQUAL(rpc.size(), 2U);
 
   /* remove the responses by qname, should remove both */
@@ -412,12 +414,12 @@ BOOST_AUTO_TEST_CASE(test_recPacketCache_TCP)
   BOOST_CHECK_EQUAL(rpc.size(), 0U);
 
   /* insert the response for tcp */
-  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, boost::none, true);
+  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r1packet), time(0), ttd, vState::Indeterminate, std::nullopt, true);
   BOOST_CHECK_EQUAL(rpc.size(), 1U);
 
   vState vState;
   /* we can retrieve it */
-  BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, &vState, &temphash, nullptr, true), true);
+  BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, &vState, &temphash, nullptr, true, ecsInfo), true);
   BOOST_CHECK_EQUAL(qhash, temphash);
   BOOST_CHECK_EQUAL(fpacket, r1packet);
 
@@ -427,12 +429,12 @@ BOOST_AUTO_TEST_CASE(test_recPacketCache_TCP)
   BOOST_CHECK_EQUAL(fpacket, r1packet);
 
   /* and not with explicit udp */
-  BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, &vState, &temphash, nullptr, false), false);
+  BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, &vState, &temphash, nullptr, false, ecsInfo), false);
   /* we should still get the same hash */
   BOOST_CHECK_EQUAL(temphash, qhash);
 
   /* adding a response for udp */
-  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, boost::none, false);
+  rpc.insertResponsePacket(0, qhash, string(qpacket), qname, QType::A, QClass::IN, string(r2packet), time(0), ttd, vState::Indeterminate, std::nullopt, false);
   BOOST_CHECK_EQUAL(rpc.size(), 2U);
 
   /* We get the correct response for udp now */
@@ -445,7 +447,7 @@ BOOST_AUTO_TEST_CASE(test_recPacketCache_TCP)
   BOOST_CHECK_EQUAL(fpacket, r2packet);
 
   /* and the correct response for tcp */
-  BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, &vState, &temphash, nullptr, true), true);
+  BOOST_CHECK_EQUAL(rpc.getResponsePacket(0, qpacket, qname, QType::A, QClass::IN, time(nullptr), &fpacket, &age, &vState, &temphash, nullptr, true, ecsInfo), true);
   BOOST_CHECK_EQUAL(qhash, temphash);
   BOOST_CHECK_EQUAL(fpacket, r1packet);
 }

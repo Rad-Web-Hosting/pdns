@@ -18,14 +18,19 @@ import unidiff
 
 def create_argument_parser():
     """Create command-line argument parser."""
-    parser = argparse.ArgumentParser(
-        description="Filter git diff files that are not in the product"
-    )
+    parser = argparse.ArgumentParser(description="Filter git diff files that are not in the product")
     parser.add_argument(
         "--product",
         type=str,
         required=True,
         help="Product (auth, dnsdist or rec)",
+    )
+    parser.add_argument(
+        "--database",
+        type=str,
+        required=False,
+        default="",
+        help="Path to the directory where the compile_commands.json database can be found",
     )
     return parser.parse_args()
 
@@ -34,8 +39,8 @@ def main():
     """Start the script."""
     args = create_argument_parser()
     product = args.product
-
-    compdb = helpers.load_compdb("compile_commands.json")
+    compdb_path = os.path.join(args.database, "compile_commands.json")
+    compdb = helpers.load_compdb(compdb_path)
     compdb = helpers.index_compdb(compdb)
 
     cwd = Path(os.getcwd())
@@ -54,7 +59,12 @@ def main():
         # - files that live in pdns/ and are used by several products (but
         #   possibly not with the same compilation flags, so it is actually
         #   important that they are processed for all products: pdns/misc.cc
-        path = Path(patch.path)
+        if patch.path in (None, "/dev/null") and patch.target_file not in (None, "/dev/null"):
+            # if this is a rename, prefer the target filename
+            path = Path(patch.target_file)
+        else:
+            path = Path(patch.path)
+
         if product == "auth":
             path = Path(cwd).joinpath(path)
         else:

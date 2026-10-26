@@ -17,15 +17,15 @@ static void testZoneMD(const std::string& zone, const std::string& file, bool ex
   if (!p) {
     p = ".";
   }
-  DNSName z(zone);
+  ZoneName zonename(zone);
   std::ostringstream pathbuf;
   pathbuf << p << "/../regression-tests/zones/" + file;
-  ZoneParserTNG zpt(pathbuf.str(), z);
+  ZoneParserTNG zpt(pathbuf.str(), zonename);
 
   bool validationDone = false, validationOK = false;
 
   try {
-    auto zonemd = pdns::ZoneMD(z);
+    auto zonemd = pdns::ZoneMD(zonename);
     zonemd.readRecords(zpt);
     zonemd.verify(validationDone, validationOK);
   }
@@ -103,6 +103,16 @@ BOOST_AUTO_TEST_CASE(test_zonemd12)
 BOOST_AUTO_TEST_CASE(test_zonemd13)
 {
   testZoneMD("xxx", "zonemd1.zone", false, false, false);
+}
+
+BOOST_AUTO_TEST_CASE(test_zonemd14)
+{
+  testZoneMD("example", "zonemd-invalidscheme.zone", false, true, false);
+}
+
+BOOST_AUTO_TEST_CASE(test_zonemd15)
+{
+  testZoneMD("example", "zonemd-scheme0.zone", false, true, false);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

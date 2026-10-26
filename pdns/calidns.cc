@@ -39,11 +39,14 @@
 #include "ednsoptions.hh"
 #include "ednssubnet.hh"
 #include "misc.hh"
+#include "proxy-protocol.hh"
 #include "sstuff.hh"
 #include "statbag.hh"
 
 using std::thread;
 using std::unique_ptr;
+
+bool g_slogStructured{false};
 
 StatBag S;
 
@@ -120,10 +123,10 @@ static void recvThread(const std::shared_ptr<std::vector<std::unique_ptr<Socket>
   }
 }
 
-static ComboAddress getRandomAddressFromRange(const Netmask& ecsRange)
+static ComboAddress getRandomAddressFromRange(const Netmask& range)
 {
-  ComboAddress result = ecsRange.getMaskedNetwork();
-  uint8_t bits = ecsRange.getBits();
+  ComboAddress result = range.getMaskedNetwork();
+  uint8_t bits = range.getBits();
   if (bits > 0) {
     uint32_t mod = 1 << (32 - bits);
     result.sin4.sin_addr.s_addr = result.sin4.sin_addr.s_addr + htonl(dns_random(mod));
@@ -135,21 +138,37 @@ static ComboAddress getRandomAddressFromRange(const Netmask& ecsRange)
   return result;
 }
 
-static void replaceEDNSClientSubnet(vector<uint8_t>* packet, const Netmask& ecsRange)
+static void replaceEDNSClientSubnet(vector<uint8_t>& packet, const Netmask& ecsRange)
 {
   /* the last 4 bytes of the packet are the IPv4 address */
   ComboAddress rnd = getRandomAddressFromRange(ecsRange);
   uint32_t addr = rnd.sin4.sin_addr.s_addr;
 
-  const auto packetSize = packet->size();
+  const auto packetSize = packet.size();
   if (packetSize < sizeof(addr)) {
     return;
   }
 
-  memcpy(&packet->at(packetSize - sizeof(addr)), &addr, sizeof(addr));
+  memcpy(&packet.at(packetSize - sizeof(addr)), &addr, sizeof(addr));
 }
 
-static void sendPackets(const vector<std::unique_ptr<Socket>>& sockets, const vector<vector<uint8_t>* >& packets, uint32_t qps, ComboAddress dest, const Netmask& ecsRange)
+static void replaceSourceIPInProxyProtocolPayload(std::vector<uint8_t>& packet, const Netmask& range)
+{
+  /* the first 12 bytes of the packet are the Proxy Protocol magic, then one byte for version and command,
+   one byte for protocol, 2 bytes for length, then the 4 bytes of the source IPv4 address */
+  constexpr size_t position = 12 + 1 + 1 + 2;
+  ComboAddress rnd = getRandomAddressFromRange(range);
+  uint32_t addr = rnd.sin4.sin_addr.s_addr;
+
+  const auto packetSize = packet.size();
+  if (packetSize < position + sizeof(addr)) {
+    return;
+  }
+
+  memcpy(&packet.at(position), &addr, sizeof(addr));
+}
+
+static void sendPackets(const vector<std::unique_ptr<Socket>>& sockets, const vector<vector<uint8_t>* >& packets, uint32_t qps, ComboAddress dest, const Netmask& range, bool ecs, bool proxyProtocol)
 {
   unsigned int burst=100;
   const auto nsecPerBurst=1*(unsigned long)(burst*1000000000.0/qps);
@@ -173,8 +192,11 @@ static void sendPackets(const vector<std::unique_ptr<Socket>>& sockets, const ve
 
     Unit u;
 
-    if (!ecsRange.empty()) {
-      replaceEDNSClientSubnet(p, ecsRange);
+    if (ecs) {
+      replaceEDNSClientSubnet(*p, range);
+    }
+    else if (proxyProtocol) {
+      replaceSourceIPInProxyProtocolPayload(*p, range);
     }
 
     fillMSGHdr(&u.msgh, &u.iov, nullptr, 0, (char*)&(*p)[0], p->size(), &dest);
@@ -207,8 +229,11 @@ static void usage(po::options_description &desc) {
 }
 
 namespace {
-void parseQueryFile(const std::string& queryFile, vector<std::shared_ptr<vector<uint8_t>>>& unknown, bool useECSFromFile, bool wantRecursion, bool addECS)
+  void parseQueryFile(const std::string& queryFile, vector<std::shared_ptr<vector<uint8_t>>>& unknown, bool useRangeFromFile, bool wantRecursion, bool addECS, bool addProxyProtocol)
 {
+  const ComboAddress emptyAddr("0.0.0.0");
+  const ComboAddress localAddr("127.0.0.1");
+  const Netmask emptyNetmask("0.0.0.0/32");
   ifstream ifs(queryFile);
   string line;
   std::vector<std::string> fields;
@@ -224,7 +249,7 @@ void parseQueryFile(const std::string& queryFile, vector<std::shared_ptr<vector<
 
     fields.clear();
     stringtok(fields, line, "\t ");
-    if ((useECSFromFile && fields.size() < 3) || fields.size() < 2) {
+    if ((useRangeFromFile && fields.size() < 3) || fields.size() < 2) {
       cerr<<"Skipping invalid line '"<<line<<", it does not contain enough values"<<endl;
       continue;
     }
@@ -233,7 +258,7 @@ void parseQueryFile(const std::string& queryFile, vector<std::shared_ptr<vector<
     const std::string& qtype = fields.at(1);
     std::string subnet;
 
-    if (useECSFromFile) {
+    if (useRangeFromFile) {
       subnet = fields.at(2);
     }
 
@@ -241,17 +266,23 @@ void parseQueryFile(const std::string& queryFile, vector<std::shared_ptr<vector<
     packetWriter.getHeader()->rd = wantRecursion;
     packetWriter.getHeader()->id = dns_random_uint16();
 
-    if (!subnet.empty() || addECS) {
+    if (addECS) {
       EDNSSubnetOpts opt;
-      opt.source = Netmask(subnet.empty() ? "0.0.0.0/32" : subnet);
-      ednsOptions.emplace_back(EDNSOptionCode::ECS, makeEDNSSubnetOptsString(opt));
+      opt.setSource(subnet.empty() ? emptyNetmask : Netmask(subnet));
+      ednsOptions.emplace_back(EDNSOptionCode::ECS, opt.makeOptString());
     }
 
     if (!ednsOptions.empty() || (packetWriter.getHeader()->id % 2) != 0) {
       packetWriter.addOpt(1500, 0, EDNSOpts::DNSSECOK, ednsOptions);
       packetWriter.commit();
     }
-    unknown.push_back(std::make_shared<vector<uint8_t>>(packet));
+
+    if (addProxyProtocol) {
+      auto payload = makeProxyHeader(false, subnet.empty() ? emptyAddr : ComboAddress(subnet), localAddr, {});
+      packet.insert(packet.begin(), payload.begin(), payload.end());
+    }
+
+    unknown.emplace_back(std::make_shared<vector<uint8_t>>(std::move(packet)));
   }
 
   shuffle(unknown.begin(), unknown.end(), pdns::dns_random_engine());
@@ -282,8 +313,7 @@ void parseQueryFile(const std::string& queryFile, vector<std::shared_ptr<vector<
 
 */
 
-int main(int argc, char** argv)
-try
+static std::optional<int> parse_options(int argc, char** argv)
 {
   po::options_description desc("Options");
   desc.add_options()
@@ -291,6 +321,8 @@ try
     ("version", "Show the version number")
     ("ecs", po::value<string>(), "Add EDNS Client Subnet option to outgoing queries using random addresses from the specified range (IPv4 only)")
     ("ecs-from-file", "Read IP or subnet values from the query file and add them as EDNS Client Subnet options to outgoing queries")
+    ("proxy-protocol", po::value<string>(), "Send a Proxy Protocol payload in front of outgoing queries using random addresses from the specified range (IPv4 only) as the initial source IP")
+    ("proxy-protocol-from-file", "Read IP or subnet values from the query file and use them as the source IP in Proxy Protocol payloads in front of outgoing queries")
     ("increment", po::value<float>()->default_value(1.1),  "Set the factor to increase the QPS load per run")
     ("maximum-qps", po::value<uint32_t>(), "Stop incrementing once this rate has been reached, to provide a stable load")
     ("minimum-success-rate", po::value<double>()->default_value(0), "Stop the test as soon as the success rate drops below this value, in percent")
@@ -330,6 +362,17 @@ try
     return EXIT_FAILURE;
   }
 
+  return std::nullopt;
+}
+
+int main(int argc, char** argv)
+try
+{
+  auto result = parse_options(argc, argv);
+  if (result) {
+    return *result;
+  }
+
   float increment = 1.1;
   try {
     increment = g_vm["increment"].as<float>();
@@ -339,6 +382,9 @@ try
 
   bool wantRecursion = g_vm.count("want-recursion");
   bool useECSFromFile = g_vm.count("ecs-from-file");
+  bool addECS = useECSFromFile || g_vm.count("ecs");
+  bool useProxyProtocolFromFile = g_vm.count("proxy-protocol-from-file");
+  bool addProxyProtocol = useProxyProtocolFromFile || g_vm.count("proxy-protocol");
   g_quiet = g_vm.count("quiet");
 
   double hitrate = g_vm["hitrate"].as<double>();
@@ -360,25 +406,44 @@ try
     return EXIT_FAILURE;
   }
 
-  Netmask ecsRange;
-  if (g_vm.count("ecs")) {
+  if (addECS && addProxyProtocol) {
+    cerr<<"Enabling ECS and the Proxy Protocol at the same time, is not supported at the moment!"<<endl;
+    return EXIT_FAILURE;
+  }
 
+  Netmask range;
+  if (g_vm.count("ecs") || g_vm.count("proxy-protocol")) {
     try {
-      ecsRange = Netmask(g_vm["ecs"].as<string>());
-      if (!ecsRange.empty()) {
+      if (g_vm.count("ecs")) {
+        range = Netmask(g_vm["ecs"].as<string>());
+      }
+      else {
+        range = Netmask(g_vm["proxy-protocol"].as<string>());
+      }
 
-        if (!ecsRange.isIPv4()) {
-          cerr<<"Only IPv4 ranges are supported for ECS at the moment!"<<endl;
+      if (!range.empty()) {
+        if (!range.isIPv4()) {
+          cerr<<"Only IPv4 ranges are supported for ECS and Proxy Protocol at the moment!"<<endl;
           return EXIT_FAILURE;
         }
 
         if (!g_quiet) {
-          cout<<"Adding ECS option to outgoing queries with random addresses from the "<<ecsRange.toString()<<" range"<<endl;
+          if (g_vm.count("ecs")) {
+            cout<<"Adding ECS option to outgoing queries with random addresses from the "<<range.toString()<<" range"<<endl;
+          }
+          else {
+            cout<<"Adding a Proxy Protocol payload in front of outgoing queries with random source IP addresses from the "<<range.toString()<<" range"<<endl;
+          }
         }
       }
     }
     catch (const NetmaskException& e) {
-      cerr<<"Error while parsing the ECS netmask: "<<e.reason<<endl;
+      if (g_vm.count("ecs")) {
+        cerr<<"Error while parsing the ECS netmask: "<<e.reason<<endl;
+      }
+      else {
+        cerr<<"Error while parsing the Proxy Protocol netmask: "<<e.reason<<endl;
+      }
       return EXIT_FAILURE;
     }
   }
@@ -387,7 +452,7 @@ try
   param.sched_priority=99;
 
 #ifdef HAVE_SCHED_SETSCHEDULER
-  if(sched_setscheduler(0, SCHED_FIFO, &param) < 0) {
+  if (sched_setscheduler(0, SCHED_FIFO, &param) < 0) {
     if (!g_quiet) {
       cerr<<"Unable to set SCHED_FIFO: "<<stringerror()<<endl;
     }
@@ -397,7 +462,7 @@ try
   reportAllTypes();
   vector<std::shared_ptr<vector<uint8_t>>> unknown;
   vector<std::shared_ptr<vector<uint8_t>>> known;
-  parseQueryFile(g_vm["query-file"].as<string>(), unknown, useECSFromFile, wantRecursion, !ecsRange.empty());
+  parseQueryFile(g_vm["query-file"].as<string>(), unknown, useECSFromFile || useProxyProtocolFromFile, wantRecursion, addECS, addProxyProtocol);
 
   if (!g_quiet) {
     cout<<"Generated "<<unknown.size()<<" ready to use queries"<<endl;
@@ -432,7 +497,7 @@ try
       }
     }
 
-    sockets->push_back(std::move(sock));
+    sockets->emplace_back(std::move(sock));
   }
 
   {
@@ -490,7 +555,7 @@ try
     DTime dt;
     dt.set();
 
-    sendPackets(*sockets, toSend, qps, dest, ecsRange);
+    sendPackets(*sockets, toSend, qps, dest, range, addECS, addProxyProtocol);
 
     const auto udiff = dt.udiffNoReset();
     const auto realqps=toSend.size()/(udiff/1000000.0);
@@ -548,6 +613,11 @@ catch (const std::exception& exp)
   return EXIT_FAILURE;
 }
 catch (const NetmaskException& exp)
+{
+  cerr<<"Fatal error: "<<exp.reason<<endl;
+  return EXIT_FAILURE;
+}
+catch (const PDNSException& exp)
 {
   cerr<<"Fatal error: "<<exp.reason<<endl;
   return EXIT_FAILURE;

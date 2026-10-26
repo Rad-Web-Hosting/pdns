@@ -1,33 +1,14 @@
-import os
 import requests
 
 from recursortests import RecursorTest
 
-class APIRecursorTest(RecursorTest):
 
-    @classmethod
-    def setUpClass(cls):
-
-        # we don't need all the auth stuff
-        cls.setUpSockets()
-        cls.startResponders()
-
-        confdir = os.path.join('configs', cls._confdir)
-        cls.createConfigDir(confdir)
-
-        cls.generateRecursorConfig(confdir)
-        cls.startRecursor(confdir, cls._recursorPort)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.tearDownRecursor()
-
-class APIAllowedRecursorTest(APIRecursorTest):
-    _confdir = 'APIAllowedRecursor'
+class APIAllowedRecursorTest(RecursorTest):
+    _confdir = "APIAllowedRecursor"
     _wsPort = 8042
     _wsTimeout = 2
-    _wsPassword = 'secretpassword'
-    _apiKey = 'secretapikey'
+    _wsPassword = "secretpassword"
+    _apiKey = "secretapikey"
 
     _config_template = """
 webserver=yes
@@ -40,19 +21,20 @@ api-key=%s
 
     def testAPI(self):
         self.waitForTCPSocket("127.0.0.1", self._wsPort)
-        headers = {'x-api-key': self._apiKey}
-        url = 'http://127.0.0.1:' + str(self._wsPort) + '/api/v1/servers/localhost/statistics'
+        headers = {"x-api-key": self._apiKey}
+        url = "http://127.0.0.1:" + str(self._wsPort) + "/api/v1/servers/localhost/statistics"
         r = requests.get(url, headers=headers, timeout=self._wsTimeout)
         self.assertTrue(r)
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json())
 
-class APIDeniedRecursorTest(APIRecursorTest):
-    _confdir = 'APIDeniedRecursor'
+
+class APIDeniedRecursorTest(RecursorTest):
+    _confdir = "APIDeniedRecursor"
     _wsPort = 8042
     _wsTimeout = 2
-    _wsPassword = 'secretpassword'
-    _apiKey = 'secretapikey'
+    _wsPassword = "secretpassword"
+    _apiKey = "secretapikey"
 
     _config_template = """
 webserver=yes
@@ -65,10 +47,10 @@ api-key=%s
 
     def testAPI(self):
         self.waitForTCPSocket("127.0.0.1", self._wsPort)
-        headers = {'x-api-key': self._apiKey}
-        url = 'http://127.0.0.1:' + str(self._wsPort) + '/api/v1/servers/localhost/statistics'
+        headers = {"x-api-key": self._apiKey}
+        url = "http://127.0.0.1:" + str(self._wsPort) + "/api/v1/servers/localhost/statistics"
         try:
-            r = requests.get(url, headers=headers, timeout=self._wsTimeout)
-            self.assertTrue(False)
+            requests.get(url, headers=headers, timeout=self._wsTimeout)
+            self.fail()
         except requests.exceptions.ConnectionError as exp:
             pass

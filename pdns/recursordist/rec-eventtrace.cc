@@ -21,10 +21,7 @@
  */
 #include "rec-eventtrace.hh"
 
-#define NameEntry(M) \
-  {                  \
-    M, #M            \
-  }
+#define NameEntry(M) {M, #M}
 
 const std::unordered_map<RecEventTrace::EventType, std::string> RecEventTrace::s_eventNames = {
   NameEntry(CustomEvent),
@@ -41,4 +38,112 @@ const std::unordered_map<RecEventTrace::EventType, std::string> RecEventTrace::s
   NameEntry(LuaPostResolve),
   NameEntry(LuaNoData),
   NameEntry(LuaNXDomain),
-  NameEntry(LuaPostResolveFFI)};
+  NameEntry(LuaPostResolveFFI),
+  NameEntry(AuthRequest),
+  NameEntry(PacketParse),
+  NameEntry(ProcessUDP),
+  NameEntry(ProcessTCP),
+};
+
+using namespace pdns::trace;
+
+static void addValue(const RecEventTrace::Entry& event, Span& work, bool start)
+{
+  if (std::holds_alternative<std::nullopt_t>(event.d_value)) {
+    return;
+  }
+  string key = start ? event.d_valueName : "result";
+  if (std::holds_alternative<bool>(event.d_value)) {
+    work.attributes.emplace_back(KeyValue{std::move(key), {std::get<bool>(event.d_value)}});
+  }
+  else if (std::holds_alternative<int64_t>(event.d_value)) {
+    work.attributes.emplace_back(KeyValue{std::move(key), {std::get<int64_t>(event.d_value)}});
+  }
+  else if (std::holds_alternative<std::string>(event.d_value)) {
+    work.attributes.emplace_back(KeyValue{std::move(key), {std::get<std::string>(event.d_value)}});
+  }
+  else {
+    work.attributes.emplace_back(KeyValue{std::move(key), {RecEventTrace::toString(event.d_value)}});
+  }
+  for (const auto& [ekey, value] : event.d_extraValues) {
+    if (std::holds_alternative<bool>(value)) {
+      work.attributes.emplace_back(KeyValue{ekey, {std::get<bool>(value)}});
+    }
+    else if (std::holds_alternative<int64_t>(value)) {
+      work.attributes.emplace_back(KeyValue{ekey, {std::get<int64_t>(value)}});
+    }
+    else if (std::holds_alternative<std::string>(value)) {
+      work.attributes.emplace_back(KeyValue{ekey, {std::get<std::string>(value)}});
+    }
+    else {
+      work.attributes.emplace_back(KeyValue{ekey, {RecEventTrace::toString(value)}});
+    }
+  }
+}
+
+// The event trace uses start-stop records which need to be mapped to OpenTelemetry Spans, which is a
+// list of spans. Spans can refer to other spans as their parent.
+std::vector<pdns::trace::Span> RecEventTrace::convertToOT(const InitialSpanInfo& span) const
+{
+  timespec realtime{};
+  clock_gettime(CLOCK_REALTIME, &realtime);
+  timespec monotime{};
+  clock_gettime(CLOCK_MONOTONIC, &monotime);
+  auto diff = (1000000000ULL * realtime.tv_sec) + realtime.tv_nsec - ((1000000000ULL * monotime.tv_sec) + monotime.tv_nsec);
+  diff += d_base;
+
+  std::vector<pdns::trace::Span> ret;
+  ret.reserve((d_events.size() / 2) + 1);
+
+  // The parent of all Spans
+  ret.emplace_back(Span{
+    .trace_id = span.trace_id,
+    .span_id = span.span_id,
+    .trace_state = "",
+    .parent_span_id = span.parent_span_id,
+    .name = "RecRequest",
+    .kind = pdns::trace::Span::SpanKind::SPAN_KIND_SERVER,
+    .start_time_unix_nano = span.start_time_unix_nano,
+    .end_time_unix_nano = timestamp(),
+  });
+
+  std::vector<SpanID> spanIDs; // mapping of span index in ret vector to SpanID
+  std::map<size_t, size_t> ids; // mapping from event record index to index in ret vector (Spans)
+
+  size_t index = 0;
+  for (const auto& event : d_events) {
+    if (event.d_start) {
+      // It's an open event
+      Span work{};
+      work.trace_id = span.trace_id;
+      work.name = RecEventTrace::toString(event.d_event);
+      work.start_time_unix_nano = static_cast<uint64_t>(event.d_ts + diff);
+      work.end_time_unix_nano = static_cast<uint64_t>(event.d_ts + diff); // will be updated when we process the close event
+      if (event.d_parent == 0 || event.d_parent >= spanIDs.size()) {
+        // Use the given parent
+        work.parent_span_id = span.span_id;
+      }
+      else {
+        // The parent is coming from the events we already processed
+        work.parent_span_id = spanIDs.at(event.d_parent);
+      }
+      // Assign a span id.
+      work.span_id.makeRandom();
+      addValue(event, work, true);
+      spanIDs.emplace_back(work.span_id);
+      ret.emplace_back(work);
+      ids[index] = ret.size() - 1;
+    }
+    else {
+      // It's a close event
+      if (const auto match = ids.find(event.d_matching); match != ids.end()) {
+        auto& work = ret.at(match->second);
+        addValue(event, work, false);
+        work.end_time_unix_nano = static_cast<uint64_t>(event.d_ts + diff);
+        spanIDs.emplace_back(work.span_id);
+      }
+    }
+    ++index;
+  }
+  return ret;
+}

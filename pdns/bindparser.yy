@@ -105,6 +105,37 @@ void BindParser::commit(BindDomainInfo DI)
   d_zonedomains.push_back(DI);
 }
 
+void BindParser::lexer_error(const char* msg, const char* filename, int error)
+{
+  std::string text;
+
+  if (filename == nullptr) {
+    extern char *current_filename;
+    text = std::string("Lexer error in bind configuration '") + string(current_filename) + "' around line " + std::to_string(linenumber) + ": " + std::string(msg);
+  }
+  else {
+    if (error < 0) {
+      text = std::string(msg) + ": '" + std::string(filename) + "'";
+    }
+    else {
+      text = std::string("File '") + std::string(filename) + "': " + std::string(msg);
+      if (error != 0) {
+        text.append(": ").append(strerror(error));
+      }
+    }
+  }
+  throw PDNSException(text);
+}
+
+extern "C" {
+
+void lexer_error(const char* msg, const char* filename, int error)
+{
+  BindParser::lexer_error(msg, filename, error);
+}
+
+}
+
 %}
 
 %token AWORD QUOTEDWORD OBRACE EBRACE SEMICOLON ZONETOK FILETOK OPTIONSTOK
@@ -132,7 +163,7 @@ command:
 global_zone_command:
 	ZONETOK quotedname zone_block
 	{
-		s_di.name=DNSName($2);
+		s_di.name=ZoneName($2);
 		free($2);
 		parent->commit(s_di);
 		s_di.clear();
@@ -140,7 +171,7 @@ global_zone_command:
 	|
 	ZONETOK quotedname AWORD zone_block
 	{
-	        s_di.name=DNSName($2);
+	        s_di.name=ZoneName($2);
 		free($2);
 		parent->commit(s_di);
 		s_di.clear();

@@ -14,10 +14,18 @@
 #include "lock.hh"
 #include "dns_random.hh"
 #include "arguments.hh"
+#include "shuffle.hh"
 
 #if defined(HAVE_LIBSODIUM)
 #include <sodium.h>
 #endif
+
+bool g_slogStructured{false};
+ArgvMap &arg()
+{
+  static ArgvMap theArg;
+  return theArg;
+}
 
 #ifndef RECURSOR
 #include "statbag.hh"
@@ -145,7 +153,7 @@ struct GetUniqueLockUncontendedTest
   void operator()() const
   {
     for (size_t idx = 0; idx < 1000; idx++) {
-      std::unique_lock<decltype(d_testlock)> lock(d_testlock);
+      auto lock = std::scoped_lock(d_testlock);
       ++d_value;
     }
   }
@@ -164,7 +172,7 @@ struct GetLockGuardUncontendedTest
   void operator()() const
   {
     for (size_t idx = 0; idx < 1000; idx++) {
-      std::lock_guard<decltype(d_testlock)> lock(d_testlock);
+      auto lock = std::scoped_lock(d_testlock);
       ++d_value;
     }
   }
@@ -1081,21 +1089,15 @@ private:
 
 struct RndSpeedTest
 {
-  explicit RndSpeedTest(std::string which) : name(which){
-    ::arg().set("entropy-source", "If set, read entropy from this file")="/dev/urandom";
-    ::arg().set("rng", "") = which;
-  }
   string getName() const
   {
-    return "Random test " + name;
+    return "Random test arc4random";
   }
 
   void operator()() const
   {
     dns_random_uint16();
   }
-
-  const std::string name;
 };
 
 struct CredentialsVerifyTest
@@ -1180,6 +1182,47 @@ private:
   unsigned char d_key[crypto_shorthash_KEYBYTES];
 };
 #endif
+
+struct DedupRecordsTest
+{
+  explicit DedupRecordsTest(size_t howmany, bool dedup, bool withdup = false) : d_howmany(howmany), d_dedup(dedup), d_withdup(withdup)
+  {
+    d_vec.reserve(d_howmany);
+    std::string name("some.name.in.some.domain");
+    auto count = d_howmany;
+    if (d_withdup) {
+      count--;
+    }
+    for (size_t i = 0; i < count; i++) {
+      auto content = DNSRecordContent::make(QType::TXT, QClass::IN, "\"a text " + std::to_string(i) + "\"");
+      DNSRecord rec(name, content, QType::TXT);
+      if (i == 0 && d_withdup) {
+        d_vec.emplace_back(rec);
+      }
+      d_vec.emplace_back(std::move(rec));
+    }
+  }
+
+  [[nodiscard]] string getName() const
+  {
+    return std::to_string(d_howmany) + " DedupRecords" + std::string(d_dedup ? "" : " (setup only)") +
+      std::string(d_withdup ? " (with dup)" : "");
+  }
+
+  void operator()() const
+  {
+    auto vec{d_vec};
+    if (d_dedup) {
+      pdns::dedupRecords(vec);
+    }
+  }
+
+private:
+  vector<DNSRecord> d_vec;
+  size_t d_howmany;
+  bool d_dedup;
+  bool d_withdup;
+};
 
 int main()
 {
@@ -1289,19 +1332,7 @@ int main()
 
     doRun(UUIDGenTest());
 
-#if defined(HAVE_GETRANDOM)
-    doRun(RndSpeedTest("getrandom"));
-#endif
-#if defined(HAVE_ARC4RANDOM)
-    doRun(RndSpeedTest("arc4random"));
-#endif
-#if defined(HAVE_RANDOMBYTES_STIR)
-    doRun(RndSpeedTest("sodium"));
-#endif
-#if defined(HAVE_RAND_BYTES)
-    doRun(RndSpeedTest("openssl"));
-#endif
-    doRun(RndSpeedTest("urandom"));
+    doRun(RndSpeedTest());
 
     doRun(NSEC3HashTest(1, "ABCD"));
     doRun(NSEC3HashTest(10, "ABCD"));
@@ -1335,6 +1366,15 @@ int main()
 #ifdef HAVE_LIBSODIUM
     doRun(SipHashTest("a string of chars"));
 #endif
+    doRun(DedupRecordsTest(2, false));
+    doRun(DedupRecordsTest(2, true));
+    doRun(DedupRecordsTest(2, true, true));
+    doRun(DedupRecordsTest(256, false));
+    doRun(DedupRecordsTest(256, true));
+    doRun(DedupRecordsTest(256, true, true));
+    doRun(DedupRecordsTest(4096, false));
+    doRun(DedupRecordsTest(4096, true));
+    doRun(DedupRecordsTest(4096, true, true));
 
     cerr<<"Total runs: " << g_totalRuns<<endl;
   }
@@ -1344,10 +1384,4 @@ int main()
   catch (...) {
     cerr<<"Fatal: unexpected exception"<<endl;
   }
-}
-
-ArgvMap& arg()
-{	
-  static ArgvMap theArg;
-  return theArg;
 }

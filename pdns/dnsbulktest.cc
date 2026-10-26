@@ -43,18 +43,14 @@
 #include "dns_random.hh"
 #include "arguments.hh"
 
+bool g_slogStructured{false};
+
 using namespace boost::accumulators;
 namespace po = boost::program_options;
 
 po::variables_map g_vm;
 
 StatBag S;
-
-ArgvMap &arg()
-{
-  static ArgvMap theArg;
-  return theArg;
-}
 
 bool g_quiet=false;
 bool g_envoutput=false;
@@ -141,7 +137,7 @@ struct SendReceive
 
   bool receive(Identifier& iden, DNSResult& dnsResult)
   {
-    if (waitForData(d_socket.getHandle(), 0, 500000) > 0) {
+    if (waitForData(d_socket.getHandle(), 0, 500) > 0) {
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init): no need to initialize the buffer
       std::array<char, 512> buf;
 
@@ -231,9 +227,6 @@ static void usage(po::options_description &desc) {
 int main(int argc, char** argv)
 try
 {
-  ::arg().set("rng", "Specify random number generator to use. Valid values are auto,sodium,openssl,getrandom,arc4random,urandom.")="auto";
-  ::arg().set("entropy-source", "If set, read entropy from this file")="/dev/urandom";
-
   po::options_description desc("Allowed options");
   desc.add_options()
     ("help,h", "produce help message")
@@ -317,8 +310,7 @@ try
     pos=split.second.find('/');
     if(pos != string::npos) // alexa has whole urls in the list now.
       split.second.resize(pos);
-    if(find_if(split.second.begin(), split.second.end(), isalpha) == split.second.end())
-    {
+    if (std::none_of(split.second.begin(), split.second.end(), isalpha)) {
       continue; // this was an IP address
     }
     domains.push_back(TypedQuery(split.second, qtype));

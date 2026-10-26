@@ -8,19 +8,320 @@ Please upgrade to the PowerDNS Authoritative Server 4.0.0 from 3.4.2+.
 See the `3.X <https://doc.powerdns.com/3/authoritative/upgrading/>`__
 upgrade notes if your version is older than 3.4.2.
 
-4.9.0 to 5.0.0/master
----------------------
+5.1.x to master
+---------------
+
+Cryptographic library requirements
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Vestigial (and probably by now not sufficient enough) support for building with
+very old OpenSSL (or compatible) libraries, not providing the OpenSSL 1.1.0
+API, has been removed. No operating system aged less than 10 years should be
+affected by this, but we're mentioning it, just in case.
+
+New TSIG query for SQL backends
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In order to support the ability to delete a TSIG key matching a specific algorithm only, a new query, ``delete-tsig-key-algorithm-query``, has been added to the SQL backends.
+
+This query is similar to the existing ``delete-tsig-key-query``, but should match on a key name and algorithm, instead of on a key name alone.
+
+If you have modified the ``delete-tsig-key-query`` in your particular setup, be sure to add a matching ``delete-tsig-key-algorithm-query``.
+
+NAPTR additional answers
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Since version 5.0, the information of the `a` and `s` NAPTR records are added to the additional answers section. This behaviour can be disabled by setting :ref:`setting-naptr-additional-processing` to `no`.
+
+PKCS#11 now requires setting an option
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When PowerDNS is built with :doc:`PKCS#11 support <dnssec/pkcs11>`, the PKCS#11 engine is disabled by the :ref:`setting-pkcs11` configuration setting by default. To use the PKCS#11 engine, this setting must be set to ``yes``.
+
+5.0.x to 5.1.x
+--------------
+
+Cross origin requests
+^^^^^^^^^^^^^^^^^^^^^
+
+The embedded webserver now no longer includes a ``access-control-allow-origin: *`` header by default.
+See :ref:`setting-webserver-cross-origin-request-header`.
+
+zone display
+^^^^^^^^^^^^
+
+Display of records in various :doc:`pdnsutil <manpages/pdnsutil.1>` commands
+will now always contain explicit trailing dots, for consistency.
+
+Record handling in the API
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Record data sent through the API will now be normalized to be closer to their
+actual zone representation.
+As a result of this change, reading back these records may show a different
+representation than expected.
+
+TSIG key updates using PostgreSQL
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The default value of the ``set-tsig-key-query`` query used to update TSIG
+keys, for the :doc:`PostgreSQL <backends/generic-postgresql>` backend, has been
+updated to be able to perform key replacement, rather than failing, when an
+existing key with the given algorithm exists.
+
+This updated query relies upon functionality only made available from
+PostgreSQL version 9.5 onwards.
+
+If you are using an older version, the old query can be restored using::
+
+  gpgsql-set-tsig-key-query=insert into tsigkeys (name,algorithm,secret) values($1,$2,$3)
+
+but it is advised to upgrade to a supported version of PostgreSQL whenever
+possible.
+
+LUA record updates no longer allowed by default
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Modifications of :doc:`LUA records <lua-records/index>`, either from AXFR/IXFR,
+DNS Update, or the API, are now only allowed if the new
+:ref:`setting-enable-lua-record-updates` configuration setting is set to
+``yes``.
+Its default value being ``no``, a configuration update will be
+necessary when upgrading to 5.1 in order to allow such updates.
+
+4.9.0 to 5.0.0
+--------------
+
+Leftover backend module files
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Until version 5.0.0, built-in backend modules also had a matching dynamic
+module being built. From version 5.0.0 onwards, this is no longer the case,
+but if not upgrading with a package manager, unless files from previous versions
+are manually removed, the Authoritative server will try to load these old
+files anyway, and fail.
+
+In this case, it is recommended that you run::
+
+  rm /usr/local/lib/pdns/lib*.so
+
+(substituting the appropriate PowerDNS installation directory to ``/usr/local``)
+prior to the installation.
+Or you can inspect the contents of this directory after installation and
+remove the files which are not present in version 5.0.0, based on their
+timestamps.
+
+LMDB backend, views
+^^^^^^^^^^^^^^^^^^^
+
+Version 5.0.0-alpha1 ships a new version of the LMDB database schema (called version 6), in support of the new views feature.
+There is no downgrade process.
+If you upgrade your database (by starting 5.0.0 without setting :ref:`setting-lmdb-schema-version` to ``5``), you cannot go back.
+
+Upgrading is supported from schema version 3 and up.
+
+The implementation of views involved a massive refactoring of many parts of the code base.
+While many things have been thoroughly tested, some loose ends likely remain.
+Catalog zones support for views is limited, see :ref:`views-catalog-zones`.
+Most other things are expected to work; if you find something wrong, please :ref:`let us know <getting-support>`.
+
+LMDB backend, DNS Update support
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The LMDB backend also now supports :doc:`DNS Update <dnsupdate>` (RFC2136).
+
+LMDB backend, search support
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The record search from the :doc:`HTTP API <http-api/search>` functionality has 
+been implemented in the LMDB backend.
+
+LOC record parsing
+^^^^^^^^^^^^^^^^^^
+
+The parsing and validation of LOC records is modified to be conforming to the :rfc:`1876`.
+This may cause records previously rejected to be accepted and vice versa.
 
 LUA records whitespace insertion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 :ref:`setting-lua-records-insert-whitespace`, introduced in 4.9.1 with the default value (``yes``) set to maintain the old behaviour of inserting whitespace, is set to ``no`` in 5.0.
 
+lua-records-exec-limit feature restored
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The :ref:`setting-lua-records-exec-limit` setting, which will abort Lua records
+taking too much time to complete, had unintentionally been rendered ineffective
+in 4.3.0. Its functionality has been restored, which could cause existing
+configurations to stop working if this setting had been used with a too small
+value.
+
 ixfrdist IPv6 support
 ^^^^^^^^^^^^^^^^^^^^^
 
 ``ixfrdist`` now binds listening sockets with `IPV6_V6ONLY set`, which means that ``[::]`` no longer accepts IPv4 connections.
 If you want to listen on both IPv4 and IPv6, you need to add a line with ``0.0.0.0`` to the ``listen`` section of your ixfrdist configuration.
+
+pdnsutil syntax and behaviour changes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The :doc:`pdnsutil <manpages/pdnsutil.1>` syntax has been overhauled in order to be more
+orthogonal and consistent. Most commands will now take the form
+``pdnsutil <object> <action> [arguments...]``, where ``<object>`` is a noun and
+``<action>`` is a verb; a few commands which do not apply to any particular
+object kind use only the verb.
+
+The old syntax is still recognized, so that existing scripts and finger memory
+will keep working. However, you are advised to switch to the new command syntax,
+using this conversion table:
+
+.. list-table:: pdnsutil syntax conversion table
+   :header-rows: 1
+
+   * - Old syntax
+     - New syntax
+   * - ``activate-tsig-key``
+     - ``tsigkey activate``
+   * - ``activate-zone-key``
+     - ``zone activate-key``
+   * - ``add-autoprimary``
+     - ``autoprimary add``
+   * - ``add-meta``
+     - ``metadata add``
+   * - ``add-record``
+     - ``rrset add``
+   * - ``add-zone-key``
+     - ``zone add-key``
+   * - ``change-secondary-zone-primary``
+     - ``zone change-primary``
+   * - ``check-all-zones``
+     - ``zone check-all``
+   * - ``check-zone``
+     - ``zone check``
+   * - ``clear-zone``
+     - ``zone clear``
+   * - ``create-secondary-zone``
+     - ``zone create-secondary``
+   * - ``create-zone``
+     - ``zone create``
+   * - ``deactivate-tsig-key``
+     - ``tsigkey deactivate``
+   * - ``deactivate-zone-key``
+     - ``zone deactivate-key``
+   * - ``delete-rrset``
+     - ``rrset delete``
+   * - ``delete-tsig-key``
+     - ``tsigkey delete``
+   * - ``delete-zone``
+     - ``zone delete``
+   * - ``disable-dnssec``
+     - ``zone dnssec-disable``
+   * - ``edit-zone``
+     - ``zone edit``
+   * - ``export-zone-dnskey``
+     - ``zone export-dnskey``
+   * - ``export-zone-ds``
+     - ``zone export-ds``
+   * - ``export-zone-key``
+     - ``zone export-key``
+   * - ``export-zone-key-pem``
+     - ``zone export-key-pem``
+   * - ``generate-tsig-key``
+     - ``tsigkey generate``
+   * - ``generate-zone-key``
+     - ``zone generate-key``
+   * - ``get-meta``
+     - ``metadata get``
+   * - ``hash-zone-record``
+     - ``rrset hash``
+   * - ``import-tsig-key``
+     - ``tsigkey import``
+   * - ``import-zone-key``
+     - ``zone import-key``
+   * - ``import-zone-key-pem``
+     - ``zone import-key-pem``
+   * - ``increase-serial``
+     - ``zone increase-serial``
+   * - ``list-all-zones``
+     - ``zone list-all``
+   * - ``list-autoprimaries``
+     - ``autoprimary list``
+   * - ``list-keys``
+     - ``zone list-keys``
+   * - ``list-member-zones``
+     - ``catalog list-members``
+   * - ``list-tsig-keys``
+     - ``tsigkey list``
+   * - ``list-zone``
+     - ``zone list``
+   * - ``load-zone``
+     - ``zone load``
+   * - ``publish-zone-key``
+     - ``zone publish-key``
+   * - ``rectify-all-zones``
+     - ``zone rectify-all``
+   * - ``rectify-zone``
+     - ``zone rectify``
+   * - ``remove-autoprimary``
+     - ``autoprimary remove``
+   * - ``remove-zone-key``
+     - ``zone remove-key``
+   * - ``replace-rrset``
+     - ``rrset replace``
+   * - ``secure-all-zones``
+     - ``zone secure-all``
+   * - ``secure-zone``
+     - ``zone secure``
+   * - ``set-account``
+     - ``zone set-account``
+   * - ``set-catalog``
+     - ``catalog set``
+   * - ``set-kind``
+     - ``zone set-kind``
+   * - ``set-meta``
+     - ``metadata set``
+   * - ``set-nsec3``
+     - ``zone set-nsec3``
+   * - ``set-option``
+     - ``zone set-option``
+   * - ``set-options-json``
+     - ``zone set-options-json``
+   * - ``set-presigned``
+     - ``zone set-presigned``
+   * - ``set-publish-cdnskey``
+     - ``zone set-publish-cdnskey``
+   * - ``set-publish-cds``
+     - ``zone set-publish-cds``
+   * - ``show-zone``
+     - ``zone show``
+   * - ``unpublish-zone-key``
+     - ``zone unpublish-key``
+   * - ``unset-nsec3``
+     - ``zone unset-nsec3``
+   * - ``unset-presigned``
+     - ``zone unset-presigned``
+   * - ``unset-publish-cdnskey``
+     - ``zone unset-publish-cdnskey``
+   * - ``unset-publish-cds``
+     - ``zone unset-publish-cds``
+   * - ``zonemd-verify-file``
+     - ``zone zonemd-verify-file``
+
+Commands not listed above have not changed syntax.
+
+A few changes of behaviour have been implemented as well:
+
+* The ``zone add-key`` command used to default to creating a ZSK,
+  if no key type was given. This default has changed to KSK.
+* The ``rrset add``, ``rrset delete``, ``rrset replace``, ``zone edit``
+  and ``zone increase-serial`` operations will now refuse to work on secondary
+  zones unless the ``--force`` option is passed.
+* When a zone gets created with either ``zone create``,
+  ``zone create-secondary`` or ``zone load`` (if the zone wasn't existing
+  already), a :ref:`metadata-soa-edit-api` metadata with a value of ``DEFAULT``
+  will be added to the zone.
+* ``add-record`` and ``delete-rrset`` now treat all names as absolute. This
+  means the name ``@`` no longer has any special meaning.
 
 4.8.0 to 4.9.0
 --------------
@@ -117,7 +418,7 @@ However, this feature interacts badly with handling of presigned zones.
 In version 4.5.0, this feature was accidentally broken in the implementation of the zone cache.
 In 4.6.0, this automatic conversion is fully removed.
 If you still have ``@`` signs in any SOA RNAMEs, 4.6.0 will serve those out literally.
-You can find any stray ``@`` signs by running ``pdnsutil check-all-zones``.
+You can find any stray ``@`` signs by running ``pdnsutil zone check-all``.
 
 New default NSEC3 parameters
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -127,7 +428,7 @@ Following `draft-ietf-dnsop-nsec3-guidance (Guidance for NSEC3 parameter setting
 SHA1 DSes
 ^^^^^^^^^
 
-``pdnsutil show-zone`` and ``pdnsutil export-zone-ds`` no longer emit SHA1 DS records, unless ``--verbose`` is in use.
+``pdnsutil zone show`` and ``pdnsutil zone export-ds`` no longer emit SHA1 DS records, unless ``--verbose`` is in use.
 
 Privileged port binding in Docker
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -268,7 +569,7 @@ SOA autofilling (i.e. allowing incomplete SOAs in the database) and the API ``se
 * :ref:`setting-soa-retry-default`
 
 Replace them with :ref:`setting-default-soa-content`, but be aware that this will only be used at zone creation time.
-Please run ``pdnsutil check-all-zones`` to check for incomplete SOAs.
+Please run ``pdnsutil zone check-all`` to check for incomplete SOAs.
 
 The :ref:`setting-do-ipv6-additional-processing` setting was removed. IPv6 additional processing now always happens when IPv4 additional processing happens.
 
@@ -293,7 +594,7 @@ On RHEL/CentOS 8, the gmysql backend now uses ``mariadb-connector-c`` instead of
 This change was made because the default MySQL implementation for RHEL8 is MariaDB, and MariaDB and MySQL cannot be installed in parallel due to conflicting RPM packages.
 The mariadb client lib will connect to your existing MySQL servers without trouble.
 
-Unknown record encoding (`RFC 3597 <https://tools.ietf.org/html/rfc3597>`__) has become more strict as a result of the fixes for :doc:`PowerDNS Security Advisory 2020-05 <../security-advisories/powerdns-advisory-2020-05>`. Please use ``pdnsutil check-all-zones`` to review your zone contents.
+Unknown record encoding (`RFC 3597 <https://tools.ietf.org/html/rfc3597>`__) has become more strict as a result of the fixes for :doc:`PowerDNS Security Advisory 2020-05 <../security-advisories/powerdns-advisory-2020-05>`. Please use ``pdnsutil zone check-all`` to review your zone contents.
 
 The previous set of indexes for the gsqlite3 backend was found to be poor.
 4.3.1 ships a new schema, and a migration:
@@ -303,10 +604,10 @@ The previous set of indexes for the gsqlite3 backend was found to be poor.
 4.2.x to 4.3.0
 --------------
 
-NSEC(3) TTL changed
-^^^^^^^^^^^^^^^^^^^
+NSEC/NSEC3 TTL changed
+^^^^^^^^^^^^^^^^^^^^^^
 
-NSEC(3) records now use the negative TTL, instead of the SOA minimum TTL.
+NSEC/NSEC3 records now use the negative TTL, instead of the SOA minimum TTL.
 See :ref:`the DNSSEC TTL notes <dnssec-ttl-notes>`  for more information.
 
 Lua Netmask class methods changed
@@ -368,7 +669,7 @@ Schema changes
 Implicit 5->7 algorithm upgrades
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Since version 3.0 (the first version of the PowerDNS Authoritative Server that supported DNSSEC signing), we have automatically, silently, upgraded algorithm 5 (RSASHA1) keys to algorithm 7 (RSASHA1-NSEC3-SHA1) when the user enabled NSEC3. This has been a source of confusion, and because of that, we introduced warnings for users of this feature in 4.0 and 4.1. To see if you are affected, run ``pdnsutil check-all-zones`` from version 4.0 or up. In this release, the automatic upgrade is gone, and affected zones will break if no action is taken.
+Since version 3.0 (the first version of the PowerDNS Authoritative Server that supported DNSSEC signing), we have automatically, silently, upgraded algorithm 5 (RSASHA1) keys to algorithm 7 (RSASHA1-NSEC3-SHA1) when the user enabled NSEC3. This has been a source of confusion, and because of that, we introduced warnings for users of this feature in 4.0 and 4.1. To see if you are affected, run ``pdnsutil zone check-all`` from version 4.0 or up. In this release, the automatic upgrade is gone, and affected zones will break if no action is taken.
 
 .. _ixfr-in-corruption-4.3.0:
 
@@ -382,7 +683,7 @@ You could accomplish that by deleting all records in the zone with an SQL query 
 4.2.X to 4.2.3
 --------------
 
-Unknown record encoding (`RFC 3597 <https://tools.ietf.org/html/rfc3597>`__) has become more strict as a result of the fixes for :doc:`PowerDNS Security Advisory 2020-05 <../security-advisories/powerdns-advisory-2020-05>`. Please use ``pdnsutil check-all-zones`` to review your zone contents.
+Unknown record encoding (`RFC 3597 <https://tools.ietf.org/html/rfc3597>`__) has become more strict as a result of the fixes for :doc:`PowerDNS Security Advisory 2020-05 <../security-advisories/powerdns-advisory-2020-05>`. Please use ``pdnsutil zone check-all`` to review your zone contents.
 
 4.X.X to 4.2.2
 --------------
@@ -409,7 +710,7 @@ You could accomplish that by deleting all records in the zone with an SQL query 
 4.1.X to 4.1.14
 ---------------
 
-Unknown record encoding (`RFC 3597 <https://tools.ietf.org/html/rfc3597>`__) has become more strict as a result of the fixes for :doc:`PowerDNS Security Advisory 2020-05 <../security-advisories/powerdns-advisory-2020-05>`. Please use ``pdnsutil check-all-zones`` to review your zone contents.
+Unknown record encoding (`RFC 3597 <https://tools.ietf.org/html/rfc3597>`__) has become more strict as a result of the fixes for :doc:`PowerDNS Security Advisory 2020-05 <../security-advisories/powerdns-advisory-2020-05>`. Please use ``pdnsutil zone check-all`` to review your zone contents.
 
 4.1.0 to 4.1.1
 --------------
@@ -569,4 +870,4 @@ MBOXFW records. Thus, make sure to clean up the records in the DB.
 
 In version 3.X, the PowerDNS Authoritative Server silently ignored records that
 have a 'priority' field (like MX or SRV), but where one was not in the database.
-In 4.X, :doc:`pdnsutil check-zone <manpages/pdnsutil.1>` will complain about this.
+In 4.X, :doc:`pdnsutil zone check <manpages/pdnsutil.1>` will complain about this.

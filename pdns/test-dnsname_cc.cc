@@ -5,6 +5,8 @@
 #define BOOST_TEST_NO_MAIN
 
 #include <boost/test/unit_test.hpp>
+#include <boost/assign/list_of.hpp>
+#include <boost/tuple/tuple.hpp>
 
 #include <cmath>
 #include <numeric>
@@ -24,8 +26,8 @@ BOOST_AUTO_TEST_CASE(test_basic) {
   DNSName aroot("a.root-servers.net"), broot("b.root-servers.net");
   BOOST_CHECK(aroot < broot);
   BOOST_CHECK(!(broot < aroot));
-  BOOST_CHECK(aroot.canonCompare(broot));
-  BOOST_CHECK(!broot.canonCompare(aroot));
+  BOOST_CHECK(aroot.canonCompare_three_way(broot) < 0);
+  BOOST_CHECK(broot.canonCompare_three_way(aroot) > 0);
 
 
   string before("www.ds9a.nl.");
@@ -188,6 +190,14 @@ BOOST_AUTO_TEST_CASE(test_trim) {
 
   DNSName root(".");
   BOOST_CHECK_EQUAL(root.countLabels(), 0U);
+
+  w.trimToLabels(0);
+  BOOST_CHECK(w == root);
+
+  w.clear();
+  BOOST_CHECK(w.empty());
+  w.trimToLabels(0);
+  BOOST_CHECK(w.empty());
 }
 
 BOOST_AUTO_TEST_CASE(test_toolong) {
@@ -265,7 +275,6 @@ BOOST_AUTO_TEST_CASE(test_Append) {
 }
 
 BOOST_AUTO_TEST_CASE(test_packetCompress) {
-  reportBasicTypes();
   vector<unsigned char> packet;
   DNSPacketWriter dpw(packet, DNSName("www.ds9a.nl."), QType::AAAA);
   dpw.startRecord(DNSName("ds9a.nl"), QType::SOA);
@@ -302,7 +311,6 @@ BOOST_AUTO_TEST_CASE(test_packetCompress) {
 }
 
 BOOST_AUTO_TEST_CASE(test_packetCompressLong) {
-  reportBasicTypes();
   vector<unsigned char> packet;
   DNSName loopback("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa");
   DNSPacketWriter dpw(packet, loopback, QType::PTR);
@@ -330,7 +338,6 @@ BOOST_AUTO_TEST_CASE(test_packetCompressLong) {
 
 BOOST_AUTO_TEST_CASE(test_PacketParse) {
   vector<unsigned char> packet;
-  reportBasicTypes();
   DNSName root(".");
   DNSPacketWriter dpw1(packet, g_rootdnsname, QType::AAAA);
   DNSName p((char*)&packet[0], packet.size(), 12, false);
@@ -393,7 +400,6 @@ BOOST_AUTO_TEST_CASE(test_hashContainer) {
 
 BOOST_AUTO_TEST_CASE(test_QuestionHash) {
   vector<unsigned char> packet(sizeof(dnsheader));
-  reportBasicTypes();
 
   bool ok;
   // A return init case
@@ -453,7 +459,6 @@ BOOST_AUTO_TEST_CASE(test_QuestionHash) {
 
 BOOST_AUTO_TEST_CASE(test_packetParse) {
   vector<unsigned char> packet;
-  reportBasicTypes();
   DNSPacketWriter dpw(packet, DNSName("www.ds9a.nl."), QType::AAAA);
 
   uint16_t qtype, qclass;
@@ -689,7 +694,7 @@ BOOST_AUTO_TEST_CASE(test_compare_naive) {
 BOOST_AUTO_TEST_CASE(test_compare_empty) {
   DNSName a, b;
   BOOST_CHECK(!(a<b));
-  BOOST_CHECK(!a.canonCompare(b));
+  BOOST_CHECK(a.canonCompare_three_way(b) == 0);
 }
 
 BOOST_AUTO_TEST_CASE(test_casing) {
@@ -707,11 +712,11 @@ BOOST_AUTO_TEST_CASE(test_casing) {
 
 BOOST_AUTO_TEST_CASE(test_compare_canonical) {
   DNSName lower("bert.com."), higher("alpha.nl.");
-  BOOST_CHECK(lower.canonCompare(higher));
+  BOOST_CHECK(lower.canonCompare_three_way(higher) < 0);
 
-  BOOST_CHECK(DNSName("bert.com").canonCompare(DNSName("www.bert.com")));
-  BOOST_CHECK(DNSName("BeRt.com").canonCompare(DNSName("WWW.berT.com")));
-  BOOST_CHECK(!DNSName("www.BeRt.com").canonCompare(DNSName("WWW.berT.com")));
+  BOOST_CHECK(DNSName("bert.com").canonCompare_three_way(DNSName("www.bert.com")) < 0);
+  BOOST_CHECK(DNSName("BeRt.com").canonCompare_three_way(DNSName("WWW.berT.com")) < 0);
+  BOOST_CHECK(DNSName("www.BeRt.com").canonCompare_three_way(DNSName("WWW.berT.com")) == 0);
 
   CanonDNSNameCompare a;
   BOOST_CHECK(a(g_rootdnsname, DNSName("www.powerdns.com")));
@@ -743,6 +748,14 @@ BOOST_AUTO_TEST_CASE(test_compare_canonical) {
   BOOST_CHECK(vec==right);
 }
 
+BOOST_AUTO_TEST_CASE(test_compare_pretty) {
+  BOOST_CHECK(DNSName("99.2.1.10.in-addr.arpa").canonCompare(DNSName("101.2.1.10.in-addr.arpa"), true));
+  BOOST_CHECK(!DNSName("101.2.1.10.in-addr.arpa").canonCompare(DNSName("99.2.1.10.in-addr.arpa"), true));
+  BOOST_CHECK(DNSName("ns12.example.com").canonCompare(DNSName("ns8.example.com"), true));
+  BOOST_CHECK(!DNSName("ns8.example.com").canonCompare(DNSName("ns12.example.com"), true));
+  BOOST_CHECK(DNSName("135.org").canonCompare(DNSName("2x.org"), true));
+  BOOST_CHECK(!DNSName("2x.org").canonCompare(DNSName("135.org"), true));
+}
 
 BOOST_AUTO_TEST_CASE(test_empty_label) { // empty label
 
@@ -847,6 +860,17 @@ BOOST_AUTO_TEST_CASE(test_invalid_label_length) { // Invalid label length in qna
   BOOST_CHECK_THROW(DNSName dn(name.c_str(), name.size(), 0, true), std::range_error);
 }
 
+BOOST_AUTO_TEST_CASE(test_name_length_too_long_from_wire) {
+
+  string name("\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x05""stats""\x05""stats""\x02""fr""\x00", 256);
+  BOOST_CHECK_THROW(DNSName(name.c_str(), name.size(), 0, true), std::range_error);
+}
+
+BOOST_AUTO_TEST_CASE(test_name_length_too_long_from_wire_compressed) {
+  string name("\x0a""wwwwwwwwww""\x00""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x05""stats""\x05""stats""\x02""fr""\xc0""\x00", 265);
+  BOOST_CHECK_THROW(DNSName(name.c_str(), name.size(), 12, true), std::range_error);
+}
+
 BOOST_AUTO_TEST_CASE(test_compression) { // Compression test
 
   string name("\x03""com\x00""\x07""example\xc0""\x00""\x03""www\xc0""\x05", 21);
@@ -944,8 +968,30 @@ BOOST_AUTO_TEST_CASE(test_compression_loop1) { // Compression loop (pointer loop
 BOOST_AUTO_TEST_CASE(test_compression_loop2) { // Compression loop (deep recursion)
 
   int i;
+  DNSName::s_maxPointersToPointers = 98;
+  DNSName::s_maxPointersPerName = 99;
   string name("\x00\xc0\x00", 3);
   for (i=0; i<98; ++i) {
+    name.append( 1, ((i >> 7) & 0xff) | 0xc0);
+    name.append( 1, ((i << 1) & 0xff) | 0x01);
+  }
+  size_t budget = 99;
+  BOOST_CHECK_NO_THROW(DNSName dn(name.c_str(), name.size(), name.size()-2, true, nullptr, nullptr, nullptr, 0, &budget));
+
+  ++i;
+  name.append( 1, ((i >> 7) & 0xff) | 0xc0);
+  name.append( 1, ((i << 1) & 0xff) | 0x01);
+
+  BOOST_CHECK_THROW(DNSName dn(name.c_str(), name.size(), name.size()-2, true), std::range_error);
+  DNSName::s_maxPointersToPointers = 4;
+  DNSName::s_maxPointersPerName = 10;
+}
+
+BOOST_AUTO_TEST_CASE(test_compression_loop3) { // Compression loop (direct pointer to pointer)
+
+  int i;
+  string name("\x00\xc0\x00", 3);
+  for (i=0; i<2; ++i) {
     name.append( 1, ((i >> 7) & 0xff) | 0xc0);
     name.append( 1, ((i << 1) & 0xff) | 0x01);
   }
@@ -1035,6 +1081,157 @@ BOOST_AUTO_TEST_CASE(test_getcommonlabels) {
   const DNSName name5;
   BOOST_CHECK_EQUAL(name1.getCommonLabels(name5), DNSName());
   BOOST_CHECK_EQUAL(name5.getCommonLabels(name1), DNSName());
+}
+
+BOOST_AUTO_TEST_CASE(test_raw_data_comparison) {
+  const DNSName aroot("a.root-servers.net");
+  PacketBuffer query;
+  GenericDNSPacketWriter<PacketBuffer> packetWriter(query, aroot, QType::A, QClass::IN, 0);
+
+  {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    const std::string_view raw(reinterpret_cast<const char*>(query.data()) + sizeof(dnsheader), query.size() - sizeof(dnsheader));
+    BOOST_CHECK(aroot.matchesUncompressedName(raw));
+
+    const DNSName differentCase("A.RooT-Servers.NET");
+    BOOST_CHECK(differentCase.matchesUncompressedName(raw));
+
+    const DNSName broot("b.root-servers.net");
+    BOOST_CHECK(!(broot.matchesUncompressedName(raw)));
+
+    /* last character differs */
+    const DNSName notaroot("a.root-servers.nes");
+    BOOST_CHECK(!(notaroot.matchesUncompressedName(raw)));
+  }
+
+  {
+    /* too short */
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    const std::string_view raw(reinterpret_cast<const char*>(query.data() + sizeof(dnsheader)), aroot.wirelength() - 1);
+    BOOST_CHECK(!(aroot.matchesUncompressedName(raw)));
+  }
+}
+
+#if defined(PDNS_AUTH)
+BOOST_AUTO_TEST_CASE(test_variantnames) {
+  ZoneName zone1("..variant");
+  ZoneName zone2("bug.less..variant");
+  ZoneName zone3(R"(actually\..not.a.variant)");
+  ZoneName zone4(R"(still\\\..not.a.variant)");
+  ZoneName zone5(R"(anti-\\..variant)");
+  ZoneName zone6(R"(sl\\\\\..a\\\..sh\...overflow)");
+
+  BOOST_CHECK(zone1.hasVariant());
+  BOOST_CHECK(zone1.operator const DNSName&().isRoot());
+
+  BOOST_CHECK(zone2.hasVariant());
+  BOOST_CHECK_EQUAL(zone2.operator const DNSName&().toString(), "bug.less.");
+  BOOST_CHECK_EQUAL(zone2.getVariant(), "variant");
+
+  BOOST_CHECK(!zone3.hasVariant());
+  BOOST_CHECK(!zone4.hasVariant());
+
+  BOOST_CHECK(zone5.hasVariant());
+  BOOST_CHECK_EQUAL(zone5.operator const DNSName&().toString(), R"(anti-\\.)");
+  BOOST_CHECK_EQUAL(zone5.getVariant(), "variant");
+
+  BOOST_CHECK(zone6.hasVariant());
+  BOOST_CHECK_EQUAL(zone6.getVariant(), "overflow");
+
+  BOOST_CHECK_THROW(ZoneName zone("variants.r.us..dot..dot...dot....dot.....dots"),std::out_of_range);
+}
+#endif
+
+BOOST_AUTO_TEST_CASE(test_isHostname)
+{
+  // Name, allowUnderscore
+  std::list<std::tuple<const std::string, const bool>> goodCases {
+    {"foobar.example.com", false},
+    {"foobar.example.com", true},
+    {"foobar2.example.com", false},
+    {"foobar2.example.com", true},
+    {"foo2bar.example.com", false},
+    {"foo2bar.example.com", true},
+    {"2foobar.example.com", false},
+    {"2foobar.example.com", true},
+    {"foo-bar.example.com", false},
+    {"foo-bar.example.com", true},
+    {"foo-2bar.example.com", false},
+    {"foo-2bar.example.com", true},
+    {"foo-bar2.example.com", false},
+    {"foo-bar2.example.com", true},
+
+    {"_foobar.example.com", true},
+    {"foo_bar.example.com", true},
+    {"foobar_.example.com", true},
+    {"_-foobar.example.com", true}, // somehow allowed :)
+  };
+
+  std::list<std::tuple<const std::string, const bool>> brokenCases {
+    // Leading dash
+    {"-foobar.example.com", false},
+    {"-foobar.example.com", true},
+    {"-foobar_.example.com", true},
+    {"-foo_bar.example.com", true},
+
+    // Trailing dash
+    {"foobar-.example.com", false},
+    {"foobar-.example.com", true},
+  };
+
+  for (const auto& [name, allowUnderScore] : goodCases) {
+    DNSName toTest(name);
+    BOOST_CHECK_MESSAGE(toTest.isHostname(allowUnderScore), name + " is unexpectedly marked as not a hostname");
+  }
+
+  for (const auto& [name, allowUnderScore] : brokenCases) {
+    DNSName toTest(name);
+    BOOST_CHECK_MESSAGE(!toTest.isHostname(allowUnderScore), name + " is unexpectedly marked as a hostname");
+  }
+}
+
+BOOST_AUTO_TEST_CASE(test_pdns_ilexicographical_compare) {
+  using case_t = boost::tuple<const std::string, const std::string, bool>;
+  using cases_t = std::list<case_t>;
+
+  cases_t cases = boost::assign::list_of
+    (case_t(std::string(""), std::string(""), false))
+    (case_t(std::string(""), std::string("abc"), true))
+    (case_t(std::string("abc"), std::string(""), false))
+    (case_t(std::string("abc"), std::string("abcd"), true))
+    (case_t(std::string("abcd"), std::string("abc"), false))
+    (case_t(std::string("abd"), std::string("abc"), false))
+    (case_t(std::string("abc"), std::string("abd"), true))
+    (case_t(std::string("abc"), std::string("Abc"), false))
+    (case_t(std::string("Abc"), std::string("abc"), false))
+  ;
+
+  for(const case_t& val :  cases) {
+    bool res = pdns_ilexicographical_compare(val.get<0>(), val.get<1>());
+    BOOST_CHECK_EQUAL(res, val.get<2>());
+  }
+}
+
+BOOST_AUTO_TEST_CASE(test_pdns_iequals) {
+  using case_t = boost::tuple<const std::string, const std::string, bool>;
+  using cases_t = std::list<case_t>;
+
+  cases_t cases = boost::assign::list_of
+    (case_t(std::string(""), std::string(""), true))
+    (case_t(std::string(""), std::string("abc"), false))
+    (case_t(std::string("abc"), std::string(""), false))
+    (case_t(std::string("abc"), std::string("abcd"), false))
+    (case_t(std::string("abcd"), std::string("abc"), false))
+    (case_t(std::string("abd"), std::string("abc"), false))
+    (case_t(std::string("abc"), std::string("abd"), false))
+    (case_t(std::string("abc"), std::string("Abc"), true))
+    (case_t(std::string("Abc"), std::string("abc"), true))
+  ;
+
+  for(const case_t& val :  cases) {
+    bool res = pdns_iequals(val.get<0>(), val.get<1>());
+    BOOST_CHECK_EQUAL(res, val.get<2>());
+  }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -67,7 +67,7 @@ static vector<uint8_t> generateTSIGQuery(const DNSName& qname, const DNSName& ts
   trc.d_origID = ntohs(pw.getHeader()->id);
   trc.d_eRcode = 0;
 
-  addTSIG(pw, trc, tt.name, tt.secret, "", false);
+  addTSIG(nullptr, pw, trc, tt.name, tt.secret, "", false);
   return packet;
 }
 
@@ -116,7 +116,7 @@ static void checkTSIG(const DNSName& tsigName, const DNSName& tsigAlgo, const st
   tt.algo = tsigAlgo;
   tt.secret = tsigSecret;
 
-  BOOST_CHECK(validateTSIG(packetStr, mdp.getTSIGPos(), tt, trc, "", theirMac, false));
+  BOOST_CHECK(validateTSIG(nullptr, packetStr, mdp.getTSIGPos(), tt, trc, "", theirMac, false));
 }
 
 BOOST_AUTO_TEST_CASE(test_TSIG_valid) {
@@ -141,6 +141,17 @@ BOOST_AUTO_TEST_CASE(test_TSIG_different_case_algo) {
   checkTSIG(tsigName, tsigAlgo.makeLowerCase(), tsigSecret, packet);
 }
 
+BOOST_AUTO_TEST_CASE(test_TSIG_different_case_name) {
+  DNSName tsigName("tsig.Name");
+  DNSName tsigAlgo("HMAC-MD5.SIG-ALG.REG.INT");
+  DNSName qname("test.valid.tsig");
+  string tsigSecret("verysecret");
+
+  vector<uint8_t> packet = generateTSIGQuery(qname, tsigName, tsigAlgo, tsigSecret);
+
+  checkTSIG(tsigName.makeLowerCase(), tsigAlgo.makeLowerCase(), tsigSecret, packet);
+}
+
 BOOST_AUTO_TEST_CASE(test_TSIG_different_name_same_algo) {
   DNSName tsigName("tsig.name");
   DNSName tsigAlgo("HMAC-MD5.SIG-ALG.REG.INT");
@@ -149,7 +160,7 @@ BOOST_AUTO_TEST_CASE(test_TSIG_different_name_same_algo) {
 
   vector<uint8_t> packet = generateTSIGQuery(qname, tsigName, tsigAlgo, tsigSecret);
 
-  checkTSIG(tsigName, DNSName("hmac-md5."), tsigSecret, packet);
+  checkTSIG(tsigName, g_hmacmd5dnsname, tsigSecret, packet);
 }
 
 BOOST_AUTO_TEST_CASE(test_TSIG_bad_key_name) {

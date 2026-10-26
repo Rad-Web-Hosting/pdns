@@ -21,6 +21,7 @@
  */
 #include "dns.hh"
 #include "dnsparser.hh"
+#include <exception>
 #include <stdexcept>
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -70,6 +71,8 @@ AuthPacketCache PC;
 // NOLINTNEXTLINE(readability-identifier-length)
 AuthQueryCache QC;
 AuthZoneCache g_zoneCache;
+bool g_logDNSQueries{false};
+bool g_views{false};
 
 ArgvMap &arg()
 {
@@ -78,7 +81,9 @@ ArgvMap &arg()
 }
 /* END Needed because of deeper dependencies */
 
-// Allows reading/writing ComboAddresses and DNSNames in YAML-cpp
+bool g_slogStructured{false};
+
+// Allows reading/writing ComboAddresses and ZoneNames in YAML-cpp
 namespace YAML {
 template<>
 struct convert<ComboAddress> {
@@ -101,16 +106,16 @@ struct convert<ComboAddress> {
 };
 
 template<>
-struct convert<DNSName> {
-  static Node encode(const DNSName& rhs) {
+struct convert<ZoneName> {
+  static Node encode(const ZoneName& rhs) {
     return Node(rhs.toStringRootDot());
   }
-  static bool decode(const Node& node, DNSName& rhs) {
+  static bool decode(const Node& node, ZoneName& rhs) {
     if (!node.IsScalar()) {
       return false;
     }
     try {
-      rhs = DNSName(node.as<string>());
+      rhs = ZoneName(node.as<string>());
       return true;
     } catch(const runtime_error &e) {
       return false;
@@ -165,14 +170,14 @@ struct ixfrdistdomain_t {
 };
 
 // This contains the configuration for each domain
-static map<DNSName, ixfrdistdomain_t> g_domainConfigs;
+static map<ZoneName, ixfrdistdomain_t> g_domainConfigs;
 
 // Map domains and their data
-static LockGuarded<std::map<DNSName, std::shared_ptr<ixfrinfo_t>>> g_soas;
+static LockGuarded<std::map<ZoneName, std::shared_ptr<ixfrinfo_t>>> g_soas;
 
 // Queue of received NOTIFYs, already verified against their primary IPs
 // Lazily implemented as a set
-static LockGuarded<std::set<DNSName>> g_notifiesReceived;
+static LockGuarded<std::set<ZoneName>> g_notifiesReceived;
 
 // Queue of outgoing NOTIFY
 static LockGuarded<NotificationQueue> g_notificationQueue;
@@ -212,12 +217,7 @@ static void usage(po::options_description &desc) {
   cerr << desc << "\n";
 }
 
-// The compiler does not like using rfc1982LessThan in std::sort directly
-static bool sortSOA(uint32_t i, uint32_t j) {
-  return rfc1982LessThan(i, j);
-}
-
-static void cleanUpDomain(const DNSName& domain, const uint16_t& keep, const string& workdir) {
+static void cleanUpDomain(const ZoneName& domain, const uint16_t& keep, const string& workdir) {
   string dir = workdir + "/" + domain.toString();
   vector<uint32_t> zoneVersions;
   auto directoryError = pdns::visit_directory(dir, [&zoneVersions]([[maybe_unused]] ino_t inodeNumber, const std::string_view& name) {
@@ -244,7 +244,7 @@ static void cleanUpDomain(const DNSName& domain, const uint16_t& keep, const str
   g_log<<Logger::Info<<"cleaning up the oldest "<<zoneVersions.size() - keep<<endl;
 
   // Sort the versions
-  std::sort(zoneVersions.begin(), zoneVersions.end(), sortSOA);
+  std::sort(zoneVersions.begin(), zoneVersions.end(), rfc1982LessThan<uint32_t>);
 
   // And delete all the old ones
   {
@@ -288,12 +288,12 @@ static void makeIXFRDiff(const records_t& from, const records_t& to, std::shared
 }
 
 /* you can _never_ alter the content of the resulting shared pointer */
-static std::shared_ptr<ixfrinfo_t> getCurrentZoneInfo(const DNSName& domain)
+static std::shared_ptr<ixfrinfo_t> getCurrentZoneInfo(const ZoneName& domain)
 {
   return (*g_soas.lock())[domain];
 }
 
-static void updateCurrentZoneInfo(const DNSName& domain, std::shared_ptr<ixfrinfo_t>& newInfo)
+static void updateCurrentZoneInfo(const ZoneName& domain, std::shared_ptr<ixfrinfo_t>& newInfo)
 {
   auto soas = g_soas.lock();
   (*soas)[domain] = newInfo;
@@ -301,11 +301,11 @@ static void updateCurrentZoneInfo(const DNSName& domain, std::shared_ptr<ixfrinf
   // FIXME: also report zone size?
 }
 
-static void sendNotification(int sock, const DNSName& domain, const ComboAddress& remote, uint16_t notificationId)
+static void sendNotification(int sock, const ZoneName& domain, const ComboAddress& remote, uint16_t notificationId)
 {
   std::vector<std::string> meta;
   std::vector<uint8_t> packet;
-  DNSPacketWriter packetWriter(packet, domain, QType::SOA, 1, Opcode::Notify);
+  DNSPacketWriter packetWriter(packet, domain.operator const DNSName&(), QType::SOA, 1, Opcode::Notify);
   packetWriter.getHeader()->id = notificationId;
   packetWriter.getHeader()->aa = true;
 
@@ -327,13 +327,13 @@ static void communicatorReceiveNotificationAnswers(const int sock4, const int so
 
   // receive incoming notification answers on the nonblocking sockets and take them off the list
   while (waitForMultiData(fds, 0, 0, &sock) > 0) {
-    Utility::socklen_t fromlen = sizeof(from);
+    socklen_t fromlen = sizeof(from);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     const auto size = recvfrom(sock, buffer.data(), buffer.size(), 0, reinterpret_cast<struct sockaddr*>(&from), &fromlen);
     if (size < 0) {
       break;
     }
-    DNSPacket packet(true);
+    DNSPacket packet(nullptr, true); // no structured logging in ixfrdist yet
     packet.setRemote(&from);
 
     if (packet.parse(buffer.data(), (size_t)size) < 0) {
@@ -345,7 +345,7 @@ static void communicatorReceiveNotificationAnswers(const int sock4, const int so
       g_log << Logger::Warning << "Received unsuccessful notification report for '" << packet.qdomain << "' from " << from.toStringWithPort() << ", error: " << RCode::to_s(packet.d.rcode) << endl;
     }
 
-    if (g_notificationQueue.lock()->removeIf(from, packet.d.id, packet.qdomain)) {
+    if (g_notificationQueue.lock()->removeIf(from, packet.d.id, ZoneName(packet.qdomain))) {
       g_log << Logger::Notice << "Removed from notification list: '" << packet.qdomain << "' to " << from.toStringWithPort() << " " << (packet.d.rcode != 0 ? RCode::to_s(packet.d.rcode) : "(was acknowledged)") << endl;
     }
     else {
@@ -356,7 +356,7 @@ static void communicatorReceiveNotificationAnswers(const int sock4, const int so
 
 static void communicatorSendNotifications(const int sock4, const int sock6)
 {
-  DNSName domain;
+  ZoneName domain;
   string destinationIp;
   uint16_t notificationId = 0;
   bool purged{false};
@@ -380,8 +380,8 @@ static void communicatorSendNotifications(const int sock4, const int sock6)
 static void communicatorThread()
 {
   setThreadName("ixfrdist/communicator");
-  auto sock4 = makeQuerySocket(pdns::getQueryLocalAddress(AF_INET, 0), true);
-  auto sock6 = makeQuerySocket(pdns::getQueryLocalAddress(AF_INET6, 0), true);
+  auto sock4 = makeQuerySocket(pdns::getQueryLocalAddress(AF_INET, 0).d_address, true);
+  auto sock6 = makeQuerySocket(pdns::getQueryLocalAddress(AF_INET6, 0).d_address, true);
 
   if (sock4 < 0) {
     throw std::runtime_error("Unable to create local query socket");
@@ -407,18 +407,18 @@ static void communicatorThread()
 
 static void updateThread(const string& workdir, const uint16_t& keep, const uint16_t& axfrTimeout, const uint16_t& soaRetry, const uint32_t axfrMaxRecords) { // NOLINT(readability-function-cognitive-complexity) 13400 https://github.com/PowerDNS/pdns/issues/13400 Habbie:  ixfrdist: reduce complexity
   setThreadName("ixfrdist/update");
-  std::map<DNSName, time_t> lastCheck;
+  std::map<ZoneName, time_t> lastCheck;
 
   // Initialize the serials we have
   for (const auto &domainConfig : g_domainConfigs) {
-    DNSName domain = domainConfig.first;
+    ZoneName domain = domainConfig.first;
     lastCheck[domain] = 0;
     string dir = workdir + "/" + domain.toString();
     try {
       g_log<<Logger::Info<<"Trying to initially load domain "<<domain<<" from disk"<<endl;
       auto serial = getSerialFromDir(dir);
       shared_ptr<const SOARecordContent> soa;
-      uint32_t soaTTL;
+      uint32_t soaTTL{0};
       {
         string fname = workdir + "/" + domain.toString() + "/" + std::to_string(serial);
         loadSOAFromDisk(domain, fname, soa, soaTTL);
@@ -464,7 +464,7 @@ static void updateThread(const string& workdir, const uint16_t& keep, const uint
         break;
       }
 
-      DNSName domain = domainConfig.first;
+      ZoneName domain = domainConfig.first;
       shared_ptr<const SOARecordContent> current_soa;
       const auto& zoneInfo = getCurrentZoneInfo(domain);
       if (zoneInfo != nullptr) {
@@ -498,11 +498,17 @@ static void updateThread(const string& workdir, const uint16_t& keep, const uint
       try {
         zoneLastCheck = now;
         g_stats.incrementSOAChecks(domain);
-        auto newSerial = getSerialFromPrimary(primary, domain, sr); // TODO TSIG
+        auto newSerial = getSerialFromPrimary(nullptr /* no structured logging */, primary, domain, sr); // TODO TSIG
         if(current_soa != nullptr) {
           g_log << Logger::Info << "Got SOA Serial for " << domain << " from " << primary.toStringWithPort() << ": " << newSerial << ", had Serial: " << current_soa->d_st.serial;
-          if (newSerial == current_soa->d_st.serial) {
-            g_log<<Logger::Info<<", not updating."<<endl;
+          if (rfc1982LessThanOrEqual(newSerial, current_soa->d_st.serial)) {
+            g_log<<Logger::Info<<", not updating"<<endl;
+            if (rfc1982LessThan(newSerial, current_soa->d_st.serial)) {
+              g_log<<Logger::Info<<", new serial is smaller than the existing serial."<<endl;
+            } else {
+              g_log<<Logger::Info<<", new serial is the same as the existing serial."<<endl;
+            }
+            g_log<<Logger::Info<<"."<<endl;
             continue;
           }
           g_log<<Logger::Info<<", will update."<<endl;
@@ -522,7 +528,7 @@ static void updateThread(const string& workdir, const uint16_t& keep, const uint
       uint32_t soaTTL = 0;
       records_t records;
       try {
-        AXFRRetriever axfr(primary, domain, tt, &local);
+        AXFRRetriever axfr(nullptr /* no structured logging */, primary, domain, tt, &local);
         uint32_t nrecords=0;
         Resolver::res_t nop;
         vector<DNSRecord> chunk;
@@ -538,7 +544,7 @@ static void updateThread(const string& workdir, const uint16_t& keep, const uint
             dr.d_name.makeUsRelative(domain);
             records.insert(dr);
             nrecords++;
-            if (dr.d_type == QType::SOA) {
+            if (dr.d_type == QType::SOA && dr.d_name.isRoot()) {
               soa = getRR<SOARecordContent>(dr);
               soaTTL = dr.d_ttl;
             }
@@ -598,7 +604,7 @@ static void updateThread(const string& workdir, const uint16_t& keep, const uint
       } catch (PDNSException &e) {
         g_stats.incrementAXFRFailures(domain);
         g_log<<Logger::Warning<<"Could not save zone '"<<domain<<"' to disk: "<<e.reason<<endl;
-      } catch (runtime_error &e) {
+      } catch (std::exception &e) {
         g_stats.incrementAXFRFailures(domain);
         g_log<<Logger::Warning<<"Could not save zone '"<<domain<<"' to disk: "<<e.what()<<endl;
       }
@@ -619,13 +625,12 @@ enum class ResponseType {
 };
 
 static ResponseType maybeHandleNotify(const MOADNSParser& mdp, const ComboAddress& saddr, const string& logPrefix="") {
-  if (mdp.d_header.opcode != Opcode::Notify) { // NOLINT(bugprone-narrowing-conversions, cppcoreguidelines-narrowing-conversions) opcode is 4 bits, this is not a dangerous conversion
-    return ResponseType::Unknown;
-  }
+  assert(mdp.d_header.opcode == Opcode::Notify);
 
   g_log<<Logger::Info<<logPrefix<<"NOTIFY for "<<mdp.d_qname<<"|"<<QType(mdp.d_qtype).toString()<<" "<< Opcode::to_s(mdp.d_header.opcode) <<" from "<<saddr.toStringWithPort()<<endl;
 
-  auto found = g_domainConfigs.find(mdp.d_qname);
+  ZoneName zonename(mdp.d_qname);
+  auto found = g_domainConfigs.find(zonename);
   if (found == g_domainConfigs.end()) {
     g_log<<Logger::Info<<("Domain name '" + mdp.d_qname.toLogString() + "' is not configured for notification")<<endl;
     return ResponseType::RefusedQuery;
@@ -643,12 +648,12 @@ static ResponseType maybeHandleNotify(const MOADNSParser& mdp, const ComboAddres
   }
 
   if (primaryFound) {
-    g_notifiesReceived.lock()->insert(mdp.d_qname);
+    g_notifiesReceived.lock()->insert(zonename);
 
     if (!found->second.notify.empty()) {
       for (const auto& address : found->second.notify) {
         g_log << Logger::Debug << logPrefix << "Queuing notification for " << mdp.d_qname << " to " << address.toStringWithPort() << std::endl;
-        g_notificationQueue.lock()->add(mdp.d_qname, address);
+        g_notificationQueue.lock()->add(zonename, address);
       }
     }
     return ResponseType::EmptyNoError;
@@ -680,12 +685,13 @@ static ResponseType checkQuery(const MOADNSParser& mdp, const ComboAddress& sadd
     }
 
     {
-      if (g_domainConfigs.find(mdp.d_qname) == g_domainConfigs.end()) {
+      ZoneName zonename(mdp.d_qname);
+      if (g_domainConfigs.find(zonename) == g_domainConfigs.end()) {
         info_msg.push_back("Domain name '" + mdp.d_qname.toLogString() + "' is not configured for distribution");
         ret = ResponseType::RefusedQuery;
       }
       else {
-        const auto zoneInfo = getCurrentZoneInfo(mdp.d_qname);
+        const auto zoneInfo = getCurrentZoneInfo(zonename);
         if (zoneInfo == nullptr) {
           info_msg.emplace_back("Domain has not been transferred yet");
           ret = ResponseType::RefusedQuery;
@@ -735,7 +741,7 @@ static bool makeEmptyNoErrorPacket(const MOADNSParser& mdp, vector<uint8_t>& pac
  */
 static bool makeSOAPacket(const MOADNSParser& mdp, vector<uint8_t>& packet) {
 
-  auto zoneInfo = getCurrentZoneInfo(mdp.d_qname);
+  auto zoneInfo = getCurrentZoneInfo(ZoneName(mdp.d_qname));
   if (zoneInfo == nullptr) {
     return false;
   }
@@ -809,12 +815,13 @@ static bool sendPacketOverTCP(int fd, const std::vector<uint8_t>& packet)
   return true;
 }
 
-static bool addRecordToWriter(DNSPacketWriter& pw, const DNSName& zoneName, const DNSRecord& record, bool compress)
+static bool addRecordToWriter(DNSPacketWriter& pwr, const DNSName& zoneName, const DNSRecord& record, bool compress, bool ignoreLimit=false)
 {
-  pw.startRecord(record.d_name + zoneName, record.d_type, record.d_ttl, QClass::IN, DNSResourceRecord::ANSWER, compress);
-  record.getContent()->toPacket(pw);
-  if (pw.size() > 16384) {
-    pw.rollback();
+  pwr.startRecord(record.d_name + zoneName, record.d_type, record.d_ttl, QClass::IN, DNSResourceRecord::ANSWER, compress);
+  record.getContent()->toPacket(pwr);
+  uint32_t maxsize = ignoreLimit ? 65535 : 16384;
+  if (pwr.size() > maxsize) {
+    pwr.rollback();
     return false;
   }
   return true;
@@ -824,6 +831,7 @@ template <typename T> static bool sendRecordsOverTCP(int fd, const MOADNSParser&
 {
   vector<uint8_t> packet;
 
+  bool wasRolledBack = false;
   for (auto it = records.cbegin(); it != records.cend();) {
     bool recordsAdded = false;
     packet.clear();
@@ -838,14 +846,21 @@ template <typename T> static bool sendRecordsOverTCP(int fd, const MOADNSParser&
         continue;
       }
 
-      if (addRecordToWriter(pw, mdp.d_qname, *it, g_compress)) {
+      if (addRecordToWriter(pw, mdp.d_qname, *it, g_compress, wasRolledBack && !recordsAdded)) {
         recordsAdded = true;
+        wasRolledBack = false;
         it++;
       }
       else {
+        if (wasRolledBack) {
+          // We did a rollback in the previous loop, and the large single record won't
+          // fit in the new packet by itself. Should be impossible, but here we are.
+          return false;
+        }
         if (recordsAdded) {
           pw.commit();
           sendPacketOverTCP(fd, packet);
+          wasRolledBack = true;
         }
         if (it == records.cbegin()) {
           /* something is wrong */
@@ -872,9 +887,10 @@ static bool handleAXFR(int fd, const MOADNSParser& mdp) {
      until we release it.
   */
 
-  g_stats.incrementAXFRinQueries(mdp.d_qname);
+  ZoneName zonename(mdp.d_qname);
+  g_stats.incrementAXFRinQueries(zonename);
 
-  auto zoneInfo = getCurrentZoneInfo(mdp.d_qname);
+  auto zoneInfo = getCurrentZoneInfo(zonename);
   if (zoneInfo == nullptr) {
     return false;
   }
@@ -912,16 +928,17 @@ static bool handleIXFR(int fd, const MOADNSParser& mdp, const shared_ptr<const S
      until we release it.
   */
 
-  g_stats.incrementIXFRinQueries(mdp.d_qname);
+  ZoneName zonename(mdp.d_qname);
+  g_stats.incrementIXFRinQueries(zonename);
 
-  auto zoneInfo = getCurrentZoneInfo(mdp.d_qname);
+  auto zoneInfo = getCurrentZoneInfo(zonename);
   if (zoneInfo == nullptr) {
     return false;
   }
 
   uint32_t ourLatestSerial = zoneInfo->soa->d_st.serial;
 
-  if (rfc1982LessThan(ourLatestSerial, clientSOA->d_st.serial) || ourLatestSerial == clientSOA->d_st.serial) {
+  if (rfc1982LessThanOrEqual(ourLatestSerial, clientSOA->d_st.serial)) {
     /* RFC 1995 Section 2
      *    If an IXFR query with the same or newer version number than that of
      *    the server is received, it is replied to with a single SOA record of
@@ -1051,7 +1068,7 @@ try
 
   ResponseType respt = ResponseType::Unknown;
 
-  if (allowedByACL(saddr, true)) {
+  if (mdp.d_header.opcode == Opcode::Notify && allowedByACL(saddr, true)) {
     respt = maybeHandleNotify(mdp, saddr);
   }
   else if (!allowedByACL(saddr)) {
@@ -1075,12 +1092,12 @@ try
      * Let's not complicate this with IXFR over UDP (and looking if we need to truncate etc).
      * Just send the current SOA and let the client try over TCP
      */
-    g_stats.incrementSOAinQueries(mdp.d_qname); // FIXME: this also counts IXFR queries (but the response is the same as to a SOA query)
+    g_stats.incrementSOAinQueries(ZoneName(mdp.d_qname)); // FIXME: this also counts IXFR queries (but the response is the same as to a SOA query)
     makeSOAPacket(mdp, packet);
   } else if (respt == ResponseType::EmptyNoError) {
     makeEmptyNoErrorPacket(mdp, packet);
   } else if (respt == ResponseType::RefusedQuery) {
-    g_stats.incrementUnknownDomainInQueries(mdp.d_qname);
+    g_stats.incrementUnknownDomainInQueries(ZoneName(mdp.d_qname));
     makeRefusedPacket(mdp, packet);
   } else if (respt == ResponseType::RefusedOpcode) {
     g_stats.incrementNotImplemented(mdp.d_header.opcode);
@@ -1125,7 +1142,7 @@ static void handleTCPRequest(int fd, boost::any&) {
   }
 
   {
-    std::lock_guard<std::mutex> lg(g_tcpRequestFDsMutex);
+    auto lock = std::scoped_lock(g_tcpRequestFDsMutex);
     g_tcpRequestFDs.push({cfd, saddr});
   }
   g_tcpHandlerCV.notify_one();
@@ -1173,7 +1190,7 @@ static void tcpWorker(int tid) {
       ResponseType respt = ResponseType::Unknown;
 
       // this code is duplicated from the UDP path
-      if (allowedByACL(saddr, true)) {
+      if (mdp.d_header.opcode == Opcode::Notify && allowedByACL(saddr, true)) {
         respt = maybeHandleNotify(mdp, saddr);
       }
       else if (!allowedByACL(saddr)) {
@@ -1391,7 +1408,7 @@ static bool parseAndCheckConfig(const string& configpath, YAML::Node& config) {
           retval = false;
           continue;
         }
-        domain["domain"].as<DNSName>();
+        domain["domain"].as<ZoneName>();
       } catch (const runtime_error &e) {
         g_log<<Logger::Error<<"Unable to read domain '"<<domain["domain"].as<string>()<<"': "<<e.what()<<endl;
       }
@@ -1556,12 +1573,12 @@ static std::optional<IXFRDistConfiguration> parseConfiguration(int argc, char** 
     for (auto const &domain : config["domains"]) {
       set<ComboAddress> s;
       s.insert(domain["master"].as<ComboAddress>());
-      g_domainConfigs[domain["domain"].as<DNSName>()].primaries = s;
+      g_domainConfigs[domain["domain"].as<ZoneName>()].primaries = s;
       if (domain["max-soa-refresh"].IsDefined()) {
-        g_domainConfigs[domain["domain"].as<DNSName>()].maxSOARefresh = domain["max-soa-refresh"].as<uint32_t>();
+        g_domainConfigs[domain["domain"].as<ZoneName>()].maxSOARefresh = domain["max-soa-refresh"].as<uint32_t>();
       }
       if (domain["notify"].IsDefined()) {
-        auto& listset = g_domainConfigs[domain["domain"].as<DNSName>()].notify;
+        auto& listset = g_domainConfigs[domain["domain"].as<ZoneName>()].notify;
         if (domain["notify"].IsScalar()) {
           auto remote = domain["notify"].as<std::string>();
           try {
@@ -1582,7 +1599,7 @@ static std::optional<IXFRDistConfiguration> parseConfiguration(int argc, char** 
           }
         }
       }
-      g_stats.registerDomain(domain["domain"].as<DNSName>());
+      g_stats.registerDomain(domain["domain"].as<ZoneName>());
     }
 
     for (const auto &addr : config["acl"].as<vector<string>>()) {

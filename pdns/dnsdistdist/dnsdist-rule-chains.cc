@@ -25,11 +25,12 @@
 namespace dnsdist::rules
 {
 static const std::vector<ResponseRuleChainDescription> s_responseRuleChains{
-  {"", "response-rules", ResponseRuleChain::ResponseRules},
-  {"CacheHit", "cache-hit-response-rules", ResponseRuleChain::CacheHitResponseRules},
-  {"CacheInserted", "cache-inserted-response-rules", ResponseRuleChain::CacheInsertedResponseRules},
-  {"SelfAnswered", "self-answered-response-rules", ResponseRuleChain::SelfAnsweredResponseRules},
-  {"XFR", "xfr-response-rules", ResponseRuleChain::XFRResponseRules},
+  {"", "response", "response-rules", ResponseRuleChain::ResponseRules},
+  {"CacheHit", "cache hit", "cache-hit-response-rules", ResponseRuleChain::CacheHitResponseRules},
+  {"CacheInserted", "cache inserted", "cache-inserted-response-rules", ResponseRuleChain::CacheInsertedResponseRules},
+  {"SelfAnswered", "self-answered", "self-answered-response-rules", ResponseRuleChain::SelfAnsweredResponseRules},
+  {"XFR", "xfr", "xfr-response-rules", ResponseRuleChain::XFRResponseRules},
+  {"Timeout", "timeout", "timeout-response-rules", ResponseRuleChain::TimeoutResponseRules},
 };
 
 const std::vector<ResponseRuleChainDescription>& getResponseRuleChainDescriptions()
@@ -38,8 +39,8 @@ const std::vector<ResponseRuleChainDescription>& getResponseRuleChainDescription
 }
 
 static const std::vector<RuleChainDescription> s_ruleChains{
-  {"", "rules", RuleChain::Rules},
-  {"CacheMiss", "cache-miss-rules", RuleChain::CacheMissRules},
+  {"", "", "rules", RuleChain::Rules},
+  {"CacheMiss", "cache-miss", "cache-miss-rules", RuleChain::CacheMissRules},
 };
 
 const std::vector<RuleChainDescription>& getRuleChainDescriptions()
@@ -94,6 +95,8 @@ std::vector<ResponseRuleAction>& getResponseRuleChain(RuleChains& chains, Respon
     return chains.d_selfansweredrespruleactions;
   case ResponseRuleChain::XFRResponseRules:
     return chains.d_XFRRespRuleActions;
+  case ResponseRuleChain::TimeoutResponseRules:
+    return chains.d_TimeoutRespRuleActions;
   }
 
   throw std::runtime_error("Trying to accept an invalid response rule chain");
@@ -112,6 +115,8 @@ const std::vector<ResponseRuleAction>& getResponseRuleChain(const RuleChains& ch
     return chains.d_selfansweredrespruleactions;
   case ResponseRuleChain::XFRResponseRules:
     return chains.d_XFRRespRuleActions;
+  case ResponseRuleChain::TimeoutResponseRules:
+    return chains.d_TimeoutRespRuleActions;
   }
 
   throw std::runtime_error("Trying to accept an invalid response rule chain");

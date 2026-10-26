@@ -39,23 +39,37 @@
 #include "lock.hh"
 #include "namespaces.hh"
 
+class ChunkedSigningPipe;
+
 class TCPNameserver
 {
 public:
-  TCPNameserver();
+  TCPNameserver(Logr::log_t slog);
   ~TCPNameserver();
   void go();
   unsigned int numTCPConnections();
 private:
 
+  class XFRContext;
+
   static void sendPacket(std::unique_ptr<DNSPacket>& p, int outsock, bool last=true);
-  static void getQuestion(int fd, char *mesg, int pktlen, const ComboAddress& remote, unsigned int totalTime);
-  static int doAXFR(const DNSName &target, std::unique_ptr<DNSPacket>& q, int outsock);
-  static int doIXFR(std::unique_ptr<DNSPacket>& q, int outsock);
-  static bool canDoAXFR(std::unique_ptr<DNSPacket>& q, bool isAXFR, std::unique_ptr<PacketHandler>& packetHandler);
-  static void doConnection(int fd);
+  static void getQuestion(int fd, char* mesg, int pktlen, const ComboAddress& remote, unsigned int totalTime);
+  static int doAXFR(std::unique_ptr<DNSPacket>& q, int outsock, Logr::log_t slog);
+  static int doAXFRinternal(XFRContext& ctx);
+  static int doIXFR(std::unique_ptr<DNSPacket>& q, int outsock, Logr::log_t slog);
+  static bool canDoAXFR(std::unique_ptr<DNSPacket>& q, XFRContext& ctx, std::unique_ptr<PacketHandler>& packetHandler);
+  static bool axfrCheckTSIG(XFRContext& ctx, UeberBackend& db, bool alwaysCheck);
+  static bool axfrProducerZone(XFRContext& ctx, vector<DNSZoneRecord>& zrrs);
+  static bool axfrRegularZone(XFRContext& ctx, vector<DNSZoneRecord>& zrrs);
+  static bool axfrAlias(XFRContext& ctx, vector<DNSZoneRecord>& zrrs, DNSZoneRecord& zrr);
+  static void axfrHints(XFRContext& ctx, vector<DNSZoneRecord>& zrrs);
+  static void axfrKeys(XFRContext& ctx, vector<DNSZoneRecord>& zrrs, DNSSECKeeper& dk);
+  static bool axfrRectify(XFRContext& ctx, vector<DNSZoneRecord>& zrrs, const set<DNSName>& qnames, const set<DNSName>& nsset);
+  static void axfrSubmitRecords(XFRContext& ctx, vector<DNSZoneRecord>& zrrs, ChunkedSigningPipe& csp);
+  static void doConnection(int fd, Logr::log_t slog);
   static void decrementClientCount(const ComboAddress& remote);
   void thread();
+
   static LockGuarded<std::map<ComboAddress,size_t,ComboAddress::addressOnlyLessThan>> s_clientsCount;
   static LockGuarded<std::unique_ptr<PacketHandler>> s_P;
   static std::unique_ptr<Semaphore> d_connectionroom_sem;
@@ -68,4 +82,5 @@ private:
 
   vector<int>d_sockets;
   vector<struct pollfd> d_prfds;
+  std::shared_ptr<Logr::Logger> d_slog;
 };

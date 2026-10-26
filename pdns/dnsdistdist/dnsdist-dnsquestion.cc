@@ -34,15 +34,16 @@ std::string DNSQuestion::getTrailingData() const
 
 bool DNSQuestion::setTrailingData(const std::string& tail)
 {
+  auto& mutableData = getMutableData();
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-  const char* message = reinterpret_cast<const char*>(this->data.data());
-  const uint16_t messageLen = getDNSPacketLength(message, this->data.size());
-  this->data.resize(messageLen);
+  const char* message = reinterpret_cast<const char*>(mutableData.data());
+  const uint16_t messageLen = getDNSPacketLength(message, mutableData.size());
+  mutableData.resize(messageLen);
   if (!tail.empty()) {
     if (!hasRoomFor(tail.size())) {
       return false;
     }
-    this->data.insert(this->data.end(), tail.begin(), tail.end());
+    mutableData.insert(mutableData.end(), tail.begin(), tail.end());
   }
   return true;
 }
@@ -58,4 +59,44 @@ bool DNSQuestion::editHeader(const std::function<bool(dnsheader&)>& editFunction
 DNSQuestion::DNSQuestion(InternalQueryState& ids_, PacketBuffer& data_) :
   data(data_), ids(ids_), ecsPrefixLength(ids.origRemote.sin4.sin_family == AF_INET ? dnsdist::configuration::getCurrentRuntimeConfiguration().d_ECSSourcePrefixV4 : dnsdist::configuration::getCurrentRuntimeConfiguration().d_ECSSourcePrefixV6), ecsOverride(dnsdist::configuration::getCurrentRuntimeConfiguration().d_ecsOverride)
 {
+}
+
+std::shared_ptr<const Logr::Logger> DNSQuestion::getThisLogger(std::shared_ptr<const Logr::Logger> parent) const
+{
+  if (d_logger) {
+    return d_logger;
+  }
+  return ids.getLogger(std::move(parent));
+}
+
+std::shared_ptr<const Logr::Logger> DNSResponse::getThisLogger(std::shared_ptr<const Logr::Logger> parent) const
+{
+  if (d_logger) {
+    return d_logger;
+  }
+  auto logger = DNSQuestion::getThisLogger(std::move(parent));
+  if (getData().size() >= sizeof(dnsheader)) {
+    const auto header = getHeader();
+    logger = logger->withValues("dns.response.rcode", Logging::Loggable(header->rcode));
+  }
+  if (d_downstream) {
+    logger = logger->withValues("backend.protocol", Logging::Loggable(d_downstream->getProtocol()), "backend.name", Logging::Loggable(d_downstream->getName()), "backend.address", Logging::Loggable(d_downstream->d_config.remote));
+  }
+  const double udiff = ids.queryRealTime.udiff();
+  logger = logger->withValues("dns.response.latency_us", Logging::Loggable(udiff), "dns.response.size", Logging::Loggable(getData().size()));
+  return logger;
+}
+
+std::shared_ptr<const Logr::Logger> DNSQuestion::getLogger(std::shared_ptr<const Logr::Logger> parent) const
+{
+  return getThisLogger(std::move(parent));
+}
+
+std::shared_ptr<const Logr::Logger> DNSQuestion::getLogger(std::shared_ptr<const Logr::Logger> parent)
+{
+  if (d_logger) {
+    return d_logger;
+  }
+  d_logger = getThisLogger(std::move(parent));
+  return d_logger;
 }

@@ -35,7 +35,7 @@ void pdns::shuffle(std::vector<DNSZoneRecord>& rrs)
   std::vector<DNSZoneRecord>::iterator first;
   std::vector<DNSZoneRecord>::iterator second;
 
-  // We assume the CNAMES are listed first in the ANSWER section and the the other records
+  // We assume the CNAMES are listed first in the ANSWER section and the other records
   // and we want to shuffle the other records only
 
   // First we scan for the first non-CNAME ANSWER record
@@ -139,4 +139,50 @@ void pdns::orderAndShuffle(vector<DNSRecord>& rrs, bool includingAdditionals)
     return std::tuple(lhs.d_place, mapTypesToOrder(lhs.d_type)) < std::tuple(rhs.d_place, mapTypesToOrder(rhs.d_type));
   });
   shuffle(rrs, includingAdditionals);
+}
+
+unsigned int pdns::dedupRecords(vector<DNSRecord>& rrs)
+{
+  // This function tries to avoid unnecessary work
+  // First a vector with zero or one element does not need dedupping
+  if (rrs.size() <= 1) {
+    return 0;
+  }
+
+  // If we have a larger vector, first check if we actually have duplicates.
+  // We assume the most common case is: no
+  std::unordered_set<std::string> seen;
+  std::vector<bool> dups(rrs.size(), false);
+
+  unsigned int counter = 0;
+  unsigned int numDups = 0;
+
+  seen.reserve(rrs.size());
+  for (const auto& rec : rrs) {
+    auto key = rec.getContent()->serialize(rec.d_name, true, true, true);
+    // This ignores class, ttl and place by using constants for those
+    if (!seen.emplace(std::move(key)).second) {
+      dups[counter] = true;
+      numDups++;
+    }
+    ++counter;
+  }
+
+  if (numDups == 0) {
+    // Original is fine as-is.
+    return 0;
+  }
+
+  // We avoid calling erase, as it calls a lot of move constructors. This can hurt, especially if
+  // you call it on a large vector multiple times.
+  // So we just take the elements that are unique
+  std::vector<DNSRecord> ret;
+  ret.reserve(rrs.size() - numDups);
+  for (counter = 0; counter < rrs.size(); ++counter) {
+    if (!dups[counter]) {
+      ret.emplace_back(std::move(rrs[counter]));
+    }
+  }
+  rrs = std::move(ret);
+  return numDups;
 }

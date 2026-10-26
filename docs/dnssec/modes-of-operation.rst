@@ -132,41 +132,45 @@ PowerDNS also serves the DNSKEY records in live-signing mode. Their TTL
 is derived from the SOA records *minimum* field. When using NSEC3, the
 TTL of the NSEC3PARAM record is also derived from that field.
 
+The :ref:`rrsig-expiry-extend <setting-rrsig-expiry-extend>` setting can be used to extend the expiry time to up to a year.
+This can be useful when secondaries are slow to update their zones, or when using :ref:`SOA Edit spreading <soa-edit-spread-info>`.
+
 .. _dnssec_presigned_records:
 
 Pre-signed records
 ------------------
 
 In this mode, PowerDNS serves zones that already contain DNSSEC records.
-Such zones can either be slaved from a remote master in online signing
-mode, or can be pre-signed using tools like OpenDNSSEC, ldns-signzone,
+Such zones can either be served as secondary from a remote primary in online
+signing mode, or can be pre-signed using tools like OpenDNSSEC, ldns-signzone,
 and dnssec-signzone.
 
-Even in this mode, PowerDNS will synthesize NSEC(3) records itself
-because of its architecture. RRSIGs of these NSEC(3) will still need to
+Even in this mode, PowerDNS will synthesize NSEC/NSEC3 records itself
+because of its architecture. RRSIGs of these records will still need to
 be imported. See the :ref:`Presigned migration guide <dnssec-migration-presigned>`.
 
 Front-signing
 -------------
 
 As a special feature, PowerDNS can operate as a signing server which
-operates as a slave to an unsigned master.
+operates as a secondary to an unsigned primary.
 
 In this way, if keying material is available for an unsigned zone that
-is retrieved from a master server, this keying material will be used
+is retrieved from a primary server, this keying material will be used
 when serving data from this zone.
 
 As part of the zone retrieval, the equivalent of
-``pdnsutil rectify-zone`` is run to make sure that all DNSSEC-related
-fields are set correctly in the backend.
+``pdnsutil zone rectify`` (``pdnsutil rectify-zone`` prior to version 5.0) is
+run to make sure that all DNSSEC-related fields are set correctly in the
+backend.
 
 Signed AXFR
 -----------
 
-An outgoing zone transfer from a signing master contains all information
+An outgoing zone transfer from a signing primary contains all information
 required for the receiving party to rectify the zone without knowing the
 keys, such as signed NSEC3 records for empty non-terminals. The zone is
-not required to be rectified on the master.
+not required to be rectified on the primary.
 
 The signing and hashing algorithms are described in :ref:`dnssec-online-signing`.
 
@@ -187,8 +191,9 @@ database. Then, restart PowerDNS.
 .. note::
   This SQLite database is different from the database used for the regular :doc:`SQLite 3 backend <../backends/generic-sqlite3>`.
 
-After this, you can use ``pdnsutil secure-zone`` and all other pdnsutil
-commands on your BIND zones without trouble.
+After this, you can use ``pdnsutil zone secure`` (``pdnsutil secure-zone`` prior
+to version 5.0) and all other :doc:`pdnsutil <../manpages/pdnsutil.1>` commands on
+your BIND zones without trouble.
 
 .. _dnssec-modes-hybrid-bind:
 

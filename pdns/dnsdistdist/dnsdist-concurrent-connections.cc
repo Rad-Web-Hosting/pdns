@@ -1,0 +1,381 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
+#include "dnsdist-concurrent-connections.hh"
+
+#include <boost/multi_index_container.hpp>
+#include <boost/multi_index/ordered_index.hpp>
+#include <boost/multi_index/hashed_index.hpp>
+#include <boost/multi_index/key_extractors.hpp>
+
+#include <utility>
+
+#include "circular_buffer.hh"
+#include "dnsdist-configuration.hh"
+#include "dolog.hh"
+#include "lock.hh"
+
+namespace dnsdist
+{
+
+static constexpr size_t NB_SHARDS = 16U;
+static constexpr time_t BUCKET_VALIDITY_SECONDS{60};
+
+struct ClientActivity
+{
+  [[nodiscard]] time_t getStartTime() const
+  {
+    return bucketEndTime - BUCKET_VALIDITY_SECONDS;
+  }
+  [[nodiscard]] bool isStillValid(time_t now) const
+  {
+    return bucketEndTime > now;
+  }
+
+  uint64_t tcpConnections{0};
+  uint64_t tlsNewSessions{0}; /* without resumption */
+  uint64_t tlsResumedSessions{0};
+  // the bucket is valid for BUCKET_VALIDITY_SECONDS seconds
+  time_t bucketEndTime{0};
+};
+
+struct ClientEntry
+{
+  // we have "interval" buckets, each holding up to 1 minute of traffic
+  mutable boost::circular_buffer<ClientActivity> d_activity;
+  AddressAndPortRange d_addr;
+  mutable uint64_t d_concurrentConnections{0};
+  mutable time_t d_bannedUntil{0};
+  time_t d_lastSeen{0};
+};
+
+struct TimeTag
+{
+};
+struct AddressTag
+{
+};
+
+using map_t = boost::multi_index_container<
+  ClientEntry,
+  boost::multi_index::indexed_by<
+    boost::multi_index::hashed_unique<boost::multi_index::tag<AddressTag>,
+                                      boost::multi_index::member<ClientEntry, AddressAndPortRange, &ClientEntry::d_addr>, AddressAndPortRange::hash>,
+    boost::multi_index::ordered_non_unique<boost::multi_index::tag<TimeTag>,
+                                           boost::multi_index::member<ClientEntry, time_t, &ClientEntry::d_lastSeen>>>>;
+
+static std::vector<LockGuarded<map_t>> s_tcpClientsConnectionMetrics{NB_SHARDS};
+static std::atomic<time_t> s_nextCleanup{0};
+
+static AddressAndPortRange getRange(const ComboAddress& from)
+{
+  const auto& immutable = dnsdist::configuration::getImmutableConfiguration();
+  return {from, from.isIPv4() ? immutable.d_tcpConnectionsMaskV4 : immutable.d_tcpConnectionsMaskV6, static_cast<uint8_t>(from.isIPv4() && immutable.d_tcpConnectionsMaskV4 == 32U ? immutable.d_tcpConnectionsMaskV4Port : 0U)};
+}
+
+static size_t getShardID(const AddressAndPortRange& from)
+{
+  auto hash = AddressAndPortRange::hash()(from);
+  return hash % NB_SHARDS;
+}
+
+static bool checkTCPConnectionsRate(const boost::circular_buffer<ClientActivity>& activity, time_t now, uint64_t maxTCPRate, uint64_t maxTLSNewRate, uint64_t maxTLSResumedRate, uint64_t interval, bool isTLS)
+{
+  if (maxTCPRate == 0 && (!isTLS || (maxTLSNewRate == 0 && maxTLSResumedRate == 0))) {
+    return true;
+  }
+  uint64_t connectionsSeen = 1U; /* the current one */
+  uint64_t tlsNewSeen = 0U;
+  uint64_t tlsResumedSeen = 0;
+  time_t firstSeen{};
+  const auto cutOff = static_cast<time_t>(now - (interval * 60U)); // interval is in minutes
+  for (const auto& entry : activity) {
+    if (entry.getStartTime() <= cutOff) {
+      continue;
+    }
+    if (firstSeen == 0 || entry.getStartTime() < firstSeen) {
+      firstSeen = entry.getStartTime();
+    }
+    connectionsSeen += entry.tcpConnections;
+    tlsNewSeen += entry.tlsNewSessions;
+    tlsResumedSeen += entry.tlsResumedSessions;
+  }
+
+  if (firstSeen == 0) {
+    return true;
+  }
+
+  auto period = 1U + (now - firstSeen);
+  if (period == 0) {
+    return true;
+  }
+  if (maxTCPRate > 0) {
+    auto rate = static_cast<double>(connectionsSeen) / static_cast<double>(period);
+    if (rate > static_cast<double>(maxTCPRate)) {
+      return false;
+    }
+  }
+  if (maxTLSNewRate > 0 && isTLS) {
+    auto rate = static_cast<double>(tlsNewSeen) / static_cast<double>(period);
+    if (rate > static_cast<double>(maxTLSNewRate)) {
+      return false;
+    }
+  }
+  if (maxTLSResumedRate > 0 && isTLS) {
+    auto rate = static_cast<double>(tlsResumedSeen) / static_cast<double>(period);
+    if (rate > (static_cast<double>(maxTLSResumedRate))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void IncomingConcurrentTCPConnectionsManager::cleanup(time_t now)
+{
+  if (s_nextCleanup.load() > now) {
+    return;
+  }
+  s_nextCleanup.store(now + 60U);
+
+  const auto& immutable = dnsdist::configuration::getImmutableConfiguration();
+  const auto interval = immutable.d_tcpConnectionsRatePerClientInterval;
+  const auto cutOff = static_cast<time_t>(now - (interval * 60U)); // interval in minutes
+  for (auto& shard : s_tcpClientsConnectionMetrics) {
+    auto clients = shard.lock();
+    auto& index = clients->get<TimeTag>();
+    for (auto entry = index.begin(); entry != index.end();) {
+      if (entry->d_concurrentConnections > 0) {
+        /* we need to keep this around as we still have open connections */
+        ++entry;
+        continue;
+      }
+      if (entry->d_lastSeen >= cutOff) {
+        /* this index is ordered on timestamps,
+           so the first valid entry we see means we are done */
+        break;
+      }
+
+      entry = index.erase(entry);
+    }
+  }
+}
+
+void IncomingConcurrentTCPConnectionsManager::clear()
+{
+  for (auto& shard : s_tcpClientsConnectionMetrics) {
+    auto clients = shard.lock();
+    clients->clear();
+  }
+  s_nextCleanup.store(0);
+}
+
+size_t IncomingConcurrentTCPConnectionsManager::getNumberOfEntries()
+{
+  size_t total = 0;
+  for (auto& shard : s_tcpClientsConnectionMetrics) {
+    auto clients = shard.lock();
+    total += clients->size();
+  }
+  return total;
+}
+
+static ClientActivity& getCurrentClientActivity(const ClientEntry& entry, time_t now)
+{
+  auto& activity = entry.d_activity;
+  if (activity.empty() || !activity.front().isStillValid(now)) {
+    activity.push_front(ClientActivity{0U, 0U, 0U, now + BUCKET_VALIDITY_SECONDS});
+  }
+  return activity.front();
+}
+
+IncomingConcurrentTCPConnectionsManager::NewConnectionResult IncomingConcurrentTCPConnectionsManager::accountNewTCPConnection(const ComboAddress& from, bool isTLS, bool isQUIC, time_t now)
+{
+  const auto& immutable = dnsdist::configuration::getImmutableConfiguration();
+  const auto maxConnsPerClient = immutable.d_maxTCPConnectionsPerClient;
+  const auto threshold = immutable.d_tcpConnectionsOverloadThreshold;
+  const auto tcpRate = immutable.d_maxTCPConnectionsRatePerClient;
+  const auto tlsNewRate = immutable.d_maxTLSNewSessionsRatePerClient;
+  const auto tlsResumedRate = immutable.d_maxTLSResumedSessionsRatePerClient;
+  const auto interval = immutable.d_tcpConnectionsRatePerClientInterval;
+  if (maxConnsPerClient == 0 && tcpRate == 0 && tlsResumedRate == 0 && tlsNewRate == 0 && immutable.d_maxTCPReadIOsPerQuery == 0) {
+    return NewConnectionResult::Allowed;
+  }
+
+  auto updateActivity = [now](ClientEntry& entry) {
+    ++entry.d_concurrentConnections;
+    entry.d_lastSeen = now;
+    auto& activity = getCurrentClientActivity(entry, now);
+    ++activity.tcpConnections;
+  };
+
+  auto getProtocol = [isQUIC]() -> std::string {
+    return isQUIC ? "QUIC" : "TCP";
+  };
+
+  auto checkConnectionAllowed = [now, from, maxConnsPerClient, threshold, tcpRate, tlsNewRate, tlsResumedRate, interval, isTLS, &immutable, &getProtocol](const ClientEntry& entry) {
+    if (entry.d_bannedUntil != 0 && entry.d_bannedUntil >= now) {
+      VERBOSESLOG(infolog("Refusing %s connection from %s: banned", getProtocol(), from.toStringWithPort()),
+                  dnsdist::logging::getTopLogger("concurrent-connections-manager")->info(Logr::Info, "Refusing connection", "reason", Logging::Loggable("banned"), "protocol", Logging::Loggable(getProtocol()), "client.address", Logging::Loggable(from)));
+      return NewConnectionResult::Denied;
+    }
+    if (maxConnsPerClient > 0 && entry.d_concurrentConnections >= maxConnsPerClient) {
+      VERBOSESLOG(infolog("Refusing %s connection from %s: too many connections", getProtocol(), from.toStringWithPort()),
+                  dnsdist::logging::getTopLogger("concurrent-tcp-connections-manager")->info(Logr::Info, "Refusing connection", "reason", Logging::Loggable("too many connections"), "protocol", Logging::Loggable(getProtocol()), "client.address", Logging::Loggable(from)));
+      return NewConnectionResult::Denied;
+    }
+    if (!checkTCPConnectionsRate(entry.d_activity, now, tcpRate, tlsNewRate, tlsResumedRate, interval, isTLS)) {
+      entry.d_bannedUntil = now + immutable.d_tcpBanDurationForExceedingTCPTLSRate;
+      VERBOSESLOG(infolog("Banning connections from %s for %d seconds: too many new QUIC/TCP/TLS connections per second", from.toStringWithPort(), immutable.d_tcpBanDurationForExceedingTCPTLSRate),
+                  dnsdist::logging::getTopLogger("concurrent-tcp-connections-manager")->info(Logr::Info, "Banning connections from this client", "reason", Logging::Loggable("too many new TCP/TLS connections per second"), "client.address", Logging::Loggable(from), "duration-seconds", Logging::Loggable(immutable.d_tcpBanDurationForExceedingTCPTLSRate)));
+      return NewConnectionResult::Denied;
+    }
+
+    if (maxConnsPerClient == 0 || threshold == 0) {
+      return NewConnectionResult::Allowed;
+    }
+
+    auto current = (100 * entry.d_concurrentConnections) / maxConnsPerClient;
+    if (current < threshold) {
+      return NewConnectionResult::Allowed;
+    }
+    VERBOSESLOG(infolog("Restricting %s connection from %s: nearly reaching the maximum number of concurrent TCP connections", getProtocol(), from.toStringWithPort()),
+                dnsdist::logging::getTopLogger("concurrent-tcp-connections-manager")->info(Logr::Info, "Restricting TCP connections from this client", "reason", Logging::Loggable("nearly reaching the maximum number of concurrent TCP connections"), "protocol", Logging::Loggable(getProtocol()), "client.address", Logging::Loggable(from)));
+    return NewConnectionResult::Restricted;
+  };
+
+  auto addr = getRange(from);
+  {
+    auto shardID = getShardID(addr);
+    auto clients = s_tcpClientsConnectionMetrics.at(shardID).lock();
+    const auto& entry = clients->find(addr);
+    if (entry == clients->end()) {
+      ClientEntry newEntry;
+      newEntry.d_activity.set_capacity(interval);
+      newEntry.d_addr = addr;
+      updateActivity(newEntry);
+      clients->insert(std::move(newEntry));
+      return NewConnectionResult::Allowed;
+    }
+    auto result = checkConnectionAllowed(*entry);
+    if (result != NewConnectionResult::Denied) {
+      clients->modify(entry, updateActivity);
+    }
+    return result;
+  }
+}
+
+bool IncomingConcurrentTCPConnectionsManager::isClientOverThreshold(const ComboAddress& from)
+{
+  const auto& immutable = dnsdist::configuration::getImmutableConfiguration();
+  const auto maxConnsPerClient = immutable.d_maxTCPConnectionsPerClient;
+  if (maxConnsPerClient == 0 || immutable.d_tcpConnectionsOverloadThreshold == 0) {
+    return false;
+  }
+
+  size_t count = 0;
+  auto addr = getRange(from);
+  auto shardID = getShardID(addr);
+  {
+    auto clients = s_tcpClientsConnectionMetrics.at(shardID).lock();
+    auto clientsIt = clients->find(addr);
+    if (clientsIt == clients->end()) {
+      return false;
+    }
+    count = clientsIt->d_concurrentConnections;
+  }
+
+  auto current = (100 * count) / maxConnsPerClient;
+  return current >= immutable.d_tcpConnectionsOverloadThreshold;
+}
+
+void IncomingConcurrentTCPConnectionsManager::banClientFor(const ComboAddress& from, time_t now, uint32_t seconds)
+{
+  auto addr = getRange(from);
+  auto shardID = getShardID(addr);
+  {
+    auto clients = s_tcpClientsConnectionMetrics.at(shardID).lock();
+    auto clientsIt = clients->find(addr);
+    if (clientsIt == clients->end()) {
+      return;
+    }
+    clients->modify(clientsIt, [now, seconds](ClientEntry& entry) {
+      entry.d_lastSeen = now;
+      entry.d_bannedUntil = now + seconds;
+    });
+  }
+  VERBOSESLOG(infolog("Banned TCP client %s for %d seconds", from.toStringWithPort(), seconds),
+              dnsdist::logging::getTopLogger("concurrent-tcp-connections-manager")->info(Logr::Info, "Banned TCP connections from this client", "client.address", Logging::Loggable(from), "duration-seconds", Logging::Loggable(seconds)));
+}
+
+static void editEntryIfPresent(const ComboAddress& from, const std::function<void(const ClientEntry& entry)>& callback)
+{
+  auto addr = getRange(from);
+  auto shardID = getShardID(addr);
+  {
+    auto clients = s_tcpClientsConnectionMetrics.at(shardID).lock();
+    auto clientsIt = clients->find(addr);
+    if (clientsIt == clients->end()) {
+      return;
+    }
+    callback(*clientsIt);
+  }
+}
+
+void IncomingConcurrentTCPConnectionsManager::accountClosedTCPConnection(const ComboAddress& from)
+{
+  const auto maxConnsPerClient = dnsdist::configuration::getImmutableConfiguration().d_maxTCPConnectionsPerClient;
+  if (maxConnsPerClient == 0) {
+    return;
+  }
+  editEntryIfPresent(from, [](const ClientEntry& entry) {
+    auto& count = entry.d_concurrentConnections;
+    if (count > 0) {
+      count--;
+    }
+  });
+}
+
+void IncomingConcurrentTCPConnectionsManager::accountTLSNewSession(const ComboAddress& from)
+{
+  const auto maxRate = dnsdist::configuration::getImmutableConfiguration().d_maxTLSNewSessionsRatePerClient;
+  if (maxRate == 0) {
+    return;
+  }
+  editEntryIfPresent(from, [](const ClientEntry& entry) {
+    auto& count = getCurrentClientActivity(entry, time(nullptr)).tlsNewSessions;
+    count++;
+  });
+}
+
+void IncomingConcurrentTCPConnectionsManager::accountTLSResumedSession(const ComboAddress& from)
+{
+  const auto maxRate = dnsdist::configuration::getImmutableConfiguration().d_maxTLSResumedSessionsRatePerClient;
+  if (maxRate == 0) {
+    return;
+  }
+  editEntryIfPresent(from, [](const ClientEntry& entry) {
+    auto& count = getCurrentClientActivity(entry, time(nullptr)).tlsResumedSessions;
+    count++;
+  });
+}
+
+}

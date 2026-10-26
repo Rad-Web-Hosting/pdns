@@ -16,7 +16,7 @@ This means that looking into the logs that are produced, `journalctl <https://ww
 
 Additionally, the Recursor *can* log to syslog on these systems.
 Logging to syslog is disabled in the unit file to prevent double logging.
-To enable this, create an drop in unit file at ``/etc/systemd/systemd/pdns-recursor.service.d/use-syslog.conf``::
+To enable this, create a drop in unit file at ``/etc/systemd/systemd/pdns-recursor.service.d/use-syslog.conf``::
 
     [Service]
     ExecStart=
@@ -28,14 +28,14 @@ This chapter assumes familiarity with syslog, the unix logging device.
 PowerDNS logs messages with different levels.
 The more urgent the message, the lower the 'priority'.
 
-By default, PowerDNS will only log messages with an urgency of 3 or lower, but this can be changed using the :ref:`setting-loglevel` setting in the configuration file.
+By default, PowerDNS will only log messages with an urgency of 3 or lower, but this can be changed using the :ref:`setting-yaml-logging.loglevel` setting in the configuration file.
 Setting it to 0 will eliminate all logging, 9 will log everything.
 
 By default, logging is performed under the 'DAEMON' facility which is shared with lots of other programs.
 If you regard nameserving as important, you may want to have it under a dedicated facility so PowerDNS can log to its own files, and not clutter generic files.
 
 For this purpose, syslog knows about 'local' facilities, numbered from LOCAL0 to LOCAL7.
-To move PowerDNS logging to LOCAL0, add :ref:`logging-facility=0 <setting-logging-facility>` to your configuration.
+To move PowerDNS logging to LOCAL0, set :ref:`setting-yaml-logging.facility` to 0 in your configuration.
 
 Furthermore, you may want to have separate files for the differing priorities - preventing lower priority messages from obscuring important ones.
 A sample ``syslog.conf`` might be::
@@ -83,7 +83,7 @@ Tracing Queries
 To investigate failures with resolving certain domain names, the PowerDNS :program:`Recursor` features a tracing infrastructure.
 This infrastructure will log every step the :program:`Recursor` takes to resolve a name and will log all DNSSEC related information as well.
 
-To enable tracing for all queries, enable the :ref:`setting-trace` setting.
+To enable tracing for all queries, enable the :ref:`setting-yaml-logging.trace` setting.
 Trace information will be written to the log.
 
 .. warning::

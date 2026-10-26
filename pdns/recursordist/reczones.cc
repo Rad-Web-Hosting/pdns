@@ -32,13 +32,9 @@
 #include "logger.hh"
 #include "syncres.hh"
 #include "zoneparser-tng.hh"
-#include "settings/cxxsettings.hh"
+#include "rec-rust-lib/cxxsettings.hh"
 #include "rec-system-resolve.hh"
-
-// XXX consider including rec-main.hh?
-extern int g_argc;
-extern char** g_argv;
-extern string g_yamlSettingsSuffix;
+#include "rec-main.hh"
 
 bool primeHints(time_t now)
 {
@@ -48,8 +44,7 @@ bool primeHints(time_t now)
 
   if (hintfile == "no" || hintfile == "no-refresh") {
     auto log = g_slog->withName("config");
-    SLOG(g_log << Logger::Debug << "Priming root disabled by hint-file setting" << endl,
-         log->info(Logr::Debug, "Priming root disabled by hint-file setting"));
+    log->info(Logr::Debug, "Priming root disabled by hint-file setting");
     return ret;
   }
 
@@ -61,69 +56,29 @@ bool primeHints(time_t now)
   }
 
   g_recCache->doWipeCache(g_rootdnsname, false, QType::NS);
-  g_recCache->replace(now, g_rootdnsname, QType::NS, nsvec, {}, {}, false, g_rootdnsname, boost::none, boost::none, vState::Insecure, ComboAddress("255.255.255.255")); // and stuff in the cache
+  g_recCache->replace(now, g_rootdnsname, QType::NS, nsvec, {}, {}, false, g_rootdnsname, std::nullopt, MemRecursorCache::NOTAG, vState::Insecure, MemRecursorCache::Extra{ComboAddress("255.255.255.255"), false}); // and stuff in the cache
   return ret;
-}
-
-static ComboAddress fromNameOrIP(const string& str, uint16_t defPort, Logr::log_t log)
-{
-  try {
-    ComboAddress addr = parseIPAndPort(str, defPort);
-    return addr;
-  }
-  catch (const PDNSException&) {
-    uint16_t port = defPort;
-    string::size_type pos = str.rfind(':');
-    if (pos != string::npos) {
-      port = pdns::checked_stoi<uint16_t>(str.substr(pos + 1));
-    }
-    auto& res = pdns::RecResolve::getInstance();
-    ComboAddress address = res.lookupAndRegister(str.substr(0, pos), time(nullptr));
-    if (address != ComboAddress()) {
-      address.setPort(port);
-      return address;
-    }
-    log->error(Logr::Error, "Could not resolve name", "name", Logging::Loggable(str));
-    throw PDNSException("Could not resolve " + str);
-  }
 }
 
 static void convertServersForAD(const std::string& zone, const std::string& input, SyncRes::AuthDomain& authDomain, const char* sepa, Logr::log_t log, bool verbose = true)
 {
   vector<string> servers;
   stringtok(servers, input, sepa);
+  if (servers.empty()) {
+    throw PDNSException("empty list of forwarders for domain '" + zone + '"');
+  }
   authDomain.d_servers.clear();
 
   vector<string> addresses;
   for (auto& server : servers) {
-    ComboAddress addr = fromNameOrIP(server, 53, log);
+    ComboAddress addr = pdns::fromNameOrIP(server, 53, log);
     authDomain.d_servers.push_back(addr);
     if (verbose) {
       addresses.push_back(addr.toStringWithPort());
     }
   }
   if (verbose) {
-    if (!g_slogStructured) {
-      g_log << Logger::Info << "Redirecting queries for zone '" << zone << "' ";
-      if (authDomain.d_rdForward) {
-        g_log << "with recursion ";
-      }
-      g_log << "to: ";
-      bool first = true;
-      for (const auto& address : addresses) {
-        if (!first) {
-          g_log << ", ";
-        }
-        else {
-          first = false;
-        }
-        g_log << address;
-      }
-      g_log << endl;
-    }
-    else {
-      log->info(Logr::Info, "Redirecting queries", "zone", Logging::Loggable(zone), "recursion", Logging::Loggable(authDomain.d_rdForward), "addresses", Logging::IterLoggable(addresses.begin(), addresses.end()));
-    }
+    log->info(Logr::Info, "Redirecting queries", "zone", Logging::Loggable(zone), "recursion", Logging::Loggable(authDomain.d_rdForward), "addresses", Logging::IterLoggable(addresses.begin(), addresses.end()));
   }
 }
 
@@ -135,7 +90,6 @@ static void* pleaseUseNewSDomainsMap(std::shared_ptr<SyncRes::domainmap_t> newma
 
 string reloadZoneConfiguration(bool yaml)
 {
-  std::shared_ptr<SyncRes::domainmap_t> original = SyncRes::getDomainMap();
   auto log = g_slog->withName("config");
 
   string configname = ::arg()["config-dir"] + "/recursor";
@@ -145,8 +99,7 @@ string reloadZoneConfiguration(bool yaml)
   cleanSlashes(configname);
 
   try {
-    SLOG(g_log << Logger::Warning << "Reloading zones, purging data from cache" << endl,
-         log->info(Logr::Notice, "Reloading zones, purging data from cache"));
+    log->info(Logr::Notice, "Reloading zones, purging data from cache");
 
     if (yaml) {
       configname += g_yamlSettingsSuffix;
@@ -181,6 +134,8 @@ string reloadZoneConfiguration(bool yaml)
       ::arg().preParseFile(configname, "allow-notify-for-file");
       ::arg().preParseFile(configname, "export-etc-hosts", "off");
       ::arg().preParseFile(configname, "serve-rfc1918");
+      ::arg().preParseFile(configname, "serve-rfc6303");
+      ::arg().preParseFile(configname, "serve-rfc6761");
       ::arg().preParseFile(configname, "include-dir");
       ::arg().preParse(g_argc, g_argv, "include-dir");
 
@@ -199,6 +154,8 @@ string reloadZoneConfiguration(bool yaml)
         ::arg().preParseFile(filename, "allow-notify-for-file", ::arg()["allow-notify-for-file"]);
         ::arg().preParseFile(filename, "export-etc-hosts", ::arg()["export-etc-hosts"]);
         ::arg().preParseFile(filename, "serve-rfc1918", ::arg()["serve-rfc1918"]);
+        ::arg().preParseFile(filename, "serve-rfc6303", ::arg()["serve-rfc6303"]);
+        ::arg().preParseFile(filename, "serve-rfc6761", ::arg()["serve-rfc6761"]);
       }
     }
     // Process command line args potentially overriding what we read from config files
@@ -210,6 +167,8 @@ string reloadZoneConfiguration(bool yaml)
     ::arg().preParse(g_argc, g_argv, "allow-notify-for-file");
     ::arg().preParse(g_argc, g_argv, "export-etc-hosts");
     ::arg().preParse(g_argc, g_argv, "serve-rfc1918");
+    ::arg().preParse(g_argc, g_argv, "serve-rfc6303");
+    ::arg().preParse(g_argc, g_argv, "serve-rfc6761");
 
     auto [newDomainMap, newNotifySet] = parseZoneConfiguration(yaml);
 
@@ -219,9 +178,12 @@ string reloadZoneConfiguration(bool yaml)
       oldAndNewDomains.insert(entry.first);
     }
 
-    if (original) {
-      for (const auto& entry : *original) {
-        oldAndNewDomains.insert(entry.first);
+    {
+      auto lock = g_initialDomainMap.lock();
+      if (*lock) {
+        for (const auto& entry : **lock) {
+          oldAndNewDomains.insert(entry.first);
+        }
       }
     }
 
@@ -237,30 +199,28 @@ string reloadZoneConfiguration(bool yaml)
     for (const auto& entry : oldAndNewDomains) {
       wipeCaches(entry, true, 0xffff);
     }
+    *g_initialDomainMap.lock() = std::move(newDomainMap);
+    *g_initialAllowNotifyFor.lock() = std::move(newNotifySet);
     return "ok\n";
   }
   catch (const std::exception& e) {
-    SLOG(g_log << Logger::Error << "Encountered error reloading zones, keeping original data: " << e.what() << endl,
-         log->error(Logr::Error, e.what(), "Encountered error reloading zones, keeping original data"));
+    log->error(Logr::Error, e.what(), "Encountered error reloading zones, keeping original data");
   }
   catch (const PDNSException& ae) {
-    SLOG(g_log << Logger::Error << "Encountered error reloading zones, keeping original data: " << ae.reason << endl,
-         log->error(Logr::Error, ae.reason, "Encountered error reloading zones, keeping original data"));
+    log->error(Logr::Error, ae.reason, "Encountered error reloading zones, keeping original data");
   }
   catch (...) {
-    SLOG(g_log << Logger::Error << "Encountered unknown error reloading zones, keeping original data" << endl,
-         log->error(Logr::Error, "Exception", "Encountered error reloading zones, keeping original data"));
+    log->error(Logr::Error, "Exception", "Encountered error reloading zones, keeping original data");
   }
   return "reloading failed, see log\n";
 }
 
 static void readAuthZoneData(SyncRes::AuthDomain& authDomain, const pair<string, string>& headers, Logr::log_t log)
 {
-  SLOG(g_log << Logger::Notice << "Parsing authoritative data for zone '" << headers.first << "' from file '" << headers.second << "'" << endl,
-       log->info(Logr::Notice, "Parsing authoritative data from file", "zone", Logging::Loggable(headers.first), "file", Logging::Loggable(headers.second)));
+  log->info(Logr::Notice, "Parsing authoritative data from file", "zone", Logging::Loggable(headers.first), "file", Logging::Loggable(headers.second));
   ZoneParserTNG zpt(headers.second, DNSName(headers.first));
-  zpt.setMaxGenerateSteps(::arg().asNum("max-generate-steps"));
-  zpt.setMaxIncludes(::arg().asNum("max-include-depth"));
+  zpt.setMaxGenerateSteps(::arg().asNum<size_t>("max-generate-steps"));
+  zpt.setMaxIncludes(::arg().asNum<size_t>("max-include-depth"));
   DNSResourceRecord resourceRecord;
   DNSRecord dnsrecord;
   while (zpt.get(resourceRecord)) {
@@ -310,22 +270,19 @@ static void processForwardZones(shared_ptr<SyncRes::domainmap_t>& newMap, Logr::
   }
 }
 
-static void processApiZonesFile(shared_ptr<SyncRes::domainmap_t>& newMap, shared_ptr<notifyset_t>& newSet, Logr::log_t log)
+static void processApiZonesFile(const string& file, shared_ptr<SyncRes::domainmap_t>& newMap, shared_ptr<notifyset_t>& newSet, Logr::log_t log)
 {
   if (::arg()["api-config-dir"].empty()) {
     return;
   }
-  const auto filename = ::arg()["api-config-dir"] + "/apizones";
-  struct stat statStruct
-  {
-  };
+  const auto filename = ::arg()["api-config-dir"] + "/" + file;
+  struct stat statStruct{};
   // It's a TOCTU, but a harmless one
   if (stat(filename.c_str(), &statStruct) != 0) {
     return;
   }
 
-  SLOG(g_log << Logger::Notice << "Processing ApiZones YAML settings from " << filename << endl,
-       log->info(Logr::Notice, "Processing ApiZones YAML settings", "path", Logging::Loggable(filename)));
+  log->info(Logr::Notice, "Processing ApiZones YAML settings", "path", Logging::Loggable(filename));
 
   const uint64_t before = newMap->size();
 
@@ -337,7 +294,7 @@ static void processApiZonesFile(shared_ptr<SyncRes::domainmap_t>& newMap, shared
     authDomain.d_name = DNSName(string(forward.zone));
     authDomain.d_rdForward = forward.recurse;
     for (const auto& forwarder : forward.forwarders) {
-      ComboAddress addr = parseIPAndPort(string(forwarder), 53);
+      ComboAddress addr = pdns::fromNameOrIP(string(forwarder), 53, log);
       authDomain.d_servers.emplace_back(addr);
     }
     (*newMap)[authDomain.d_name] = authDomain;
@@ -351,12 +308,9 @@ static void processApiZonesFile(shared_ptr<SyncRes::domainmap_t>& newMap, shared
     readAuthZoneData(authDomain, {string(auth.zone), string(auth.file)}, log);
     (*newMap)[authDomain.d_name] = authDomain;
   }
-  SLOG(g_log << Logger::Warning << "Done parsing " << newMap->size() - before
-             << " ApiZones YAML settings from file '"
-             << filename << "'" << endl,
-       log->info(Logr::Notice, "Done parsing ApiZones YAML from file", "file",
-                 Logging::Loggable(filename), "count",
-                 Logging::Loggable(newMap->size() - before)));
+  log->info(Logr::Notice, "Done parsing ApiZones YAML from file", "file",
+            Logging::Loggable(filename), "count",
+            Logging::Loggable(newMap->size() - before));
 }
 
 static void processForwardZonesFile(shared_ptr<SyncRes::domainmap_t>& newMap, shared_ptr<notifyset_t>& newSet, Logr::log_t log)
@@ -375,7 +329,7 @@ static void processForwardZonesFile(shared_ptr<SyncRes::domainmap_t>& newMap, sh
       authDomain.d_name = DNSName(string(forward.zone));
       authDomain.d_rdForward = forward.recurse;
       for (const auto& forwarder : forward.forwarders) {
-        ComboAddress addr = parseIPAndPort(string(forwarder), 53);
+        ComboAddress addr = pdns::fromNameOrIP(string(forwarder), 53, log);
         authDomain.d_servers.emplace_back(addr);
       }
       (*newMap)[authDomain.d_name] = authDomain;
@@ -385,8 +339,7 @@ static void processForwardZonesFile(shared_ptr<SyncRes::domainmap_t>& newMap, sh
     }
   }
   else {
-    SLOG(g_log << Logger::Warning << "Reading zone forwarding information from '" << filename << "'" << endl,
-         log->info(Logr::Notice, "Reading zone forwarding information", "file", Logging::Loggable(filename)));
+    log->info(Logr::Notice, "Reading zone forwarding information", "file", Logging::Loggable(filename));
     auto filePtr = pdns::UniqueFilePtr(fopen(filename.c_str(), "r"));
     if (!filePtr) {
       int err = errno;
@@ -435,6 +388,9 @@ static void processForwardZonesFile(shared_ptr<SyncRes::domainmap_t>& newMap, sh
       try {
         convertServersForAD(domain, instructions, authDomain, ",; ", log, false);
       }
+      catch (const PDNSException& e) {
+        throw PDNSException(e.reason + "on line " + std::to_string(linenum) + " of " + filename);
+      }
       catch (...) {
         throw PDNSException("Conversion error parsing line " + std::to_string(linenum) + " of " + filename);
       }
@@ -446,12 +402,9 @@ static void processForwardZonesFile(shared_ptr<SyncRes::domainmap_t>& newMap, sh
       }
     }
   }
-  SLOG(g_log << Logger::Warning << "Done parsing " << newMap->size() - before
-             << " forwarding instructions from file '"
-             << filename << "'" << endl,
-       log->info(Logr::Notice, "Done parsing forwarding instructions from file", "file",
-                 Logging::Loggable(filename), "count",
-                 Logging::Loggable(newMap->size() - before)));
+  log->info(Logr::Notice, "Done parsing forwarding instructions from file", "file",
+            Logging::Loggable(filename), "count",
+            Logging::Loggable(newMap->size() - before));
 }
 
 static void processExportEtcHosts(std::shared_ptr<SyncRes::domainmap_t>& newMap, Logr::log_t log)
@@ -462,8 +415,7 @@ static void processExportEtcHosts(std::shared_ptr<SyncRes::domainmap_t>& newMap,
   string fname = ::arg()["etc-hosts-file"];
   ifstream ifs(fname);
   if (!ifs) {
-    SLOG(g_log << Logger::Warning << "Could not open " << fname << " for reading" << endl,
-         log->error(Logr::Warning, "Could not open file for reading", "file", Logging::Loggable(fname)));
+    log->info(Logr::Warning, "Could not open file for reading", "file", Logging::Loggable(fname));
     return;
   }
   vector<string> parts;
@@ -478,15 +430,10 @@ static void processExportEtcHosts(std::shared_ptr<SyncRes::domainmap_t>& newMap,
       addForwardAndReverseLookupEntries(*newMap, searchSuffix, parts, log);
     }
     catch (const PDNSException& ex) {
-      SLOG(g_log << Logger::Warning
-                 << "The line `" << line << "` "
-                 << "in the provided etc-hosts file `" << fname << "` "
-                 << "could not be added: " << ex.reason << ". Going to skip it."
-                 << endl,
-           log->info(Logr::Notice, "Skipping line in etc-hosts file",
-                     "line", Logging::Loggable(line),
-                     "hosts-file", Logging::Loggable(fname),
-                     "reason", Logging::Loggable(ex.reason)));
+      log->info(Logr::Notice, "Skipping line in etc-hosts file",
+                "line", Logging::Loggable(line),
+                "hosts-file", Logging::Loggable(fname),
+                "reason", Logging::Loggable(ex.reason));
     }
   }
 }
@@ -496,8 +443,7 @@ static void processServeRFC1918(std::shared_ptr<SyncRes::domainmap_t>& newMap, L
   if (!::arg().mustDo("serve-rfc1918")) {
     return;
   }
-  SLOG(g_log << Logger::Warning << "Inserting rfc 1918 private space zones" << endl,
-       log->info(Logr::Notice, "Inserting rfc 1918 private space zones"));
+  log->info(Logr::Notice, "Inserting rfc 1918 private space zones");
 
   makePartialIPZone(*newMap, {"127"}, log);
   makePartialIPZone(*newMap, {"10"}, log);
@@ -506,6 +452,50 @@ static void processServeRFC1918(std::shared_ptr<SyncRes::domainmap_t>& newMap, L
   for (int count = 16; count < 32; count++) {
     makePartialIPZone(*newMap, {"172", std::to_string(count).c_str()}, log);
   }
+}
+
+static void processServeRFC6303(std::shared_ptr<SyncRes::domainmap_t>& newMap, Logr::log_t log)
+{
+  if (!::arg().mustDo("serve-rfc6303")) {
+    return;
+  }
+  if (!::arg().mustDo("serve-rfc1918")) {
+    return;
+  }
+  log->info(Logr::Notice, "Inserting rfc 6303 private space zones");
+  // Section 4.2
+  makePartialIPZone(*newMap, {"0"}, log);
+  // makePartialIPZone(*newMap, { "127" }, log) already done in processServeRFC1918
+  makePartialIPZone(*newMap, {"169", "254"}, log);
+  makePartialIPZone(*newMap, {"192", "0", "2"}, log);
+  makePartialIPZone(*newMap, {"198", "51", "100"}, log);
+  makePartialIPZone(*newMap, {"203", "0", "113"}, log);
+  makePartialIPZone(*newMap, {"255", "255", "255", "255"}, log); // actually produces NODATA instead of the RFC's NXDOMAIN
+
+  // Note v6 names are not reversed
+  // Section 4.3
+  // makePartialIP6Zone(*newMap, "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa", log) already handled by SyncRes::doSpecialNamesResolve, in accordance with section 4.2
+  makePartialIP6Zone(*newMap, "0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa", log); // actually produces NODATA instead of the RFC's NXDOMAIN
+  // Section 4.4
+  makePartialIP6Zone(*newMap, "d.f.ip6.arpa", log);
+  // Section 4.5
+  makePartialIP6Zone(*newMap, "8.e.f.ip6.arpa", log);
+  makePartialIP6Zone(*newMap, "9.e.f.ip6.arpa", log);
+  makePartialIP6Zone(*newMap, "a.e.f.ip6.arpa", log);
+  makePartialIP6Zone(*newMap, "b.e.f.ip6.arpa", log);
+  // Section 4.6
+  makePartialIP6Zone(*newMap, "8.b.d.0.1.0.0.2.ip6.arpa", log);
+}
+
+static void processServeRFC6761(std::shared_ptr<SyncRes::domainmap_t>& newMap, Logr::log_t log)
+{
+  if (!::arg().mustDo("serve-rfc6761")) {
+    return;
+  }
+  log->info(Logr::Notice, "Inserting rfc 6761 private space zones");
+
+  makeEmptyZone(*newMap, "test.", log);
+  makeEmptyZone(*newMap, "invalid.", log);
 }
 
 static void processAllowNotifyFor(shared_ptr<notifyset_t>& newSet)
@@ -532,8 +522,7 @@ static void processAllowNotifyForFile(shared_ptr<notifyset_t>& newSet, Logr::log
     }
   }
   else {
-    SLOG(g_log << Logger::Warning << "Reading NOTIFY-allowed zones from '" << filename << "'" << endl,
-         log->info(Logr::Notice, "Reading NOTIFY-allowed zones from file", "file", Logging::Loggable(filename)));
+    log->info(Logr::Notice, "Reading NOTIFY-allowed zones from file", "file", Logging::Loggable(filename));
     auto filePtr = pdns::UniqueFilePtr(fopen(filename.c_str(), "r"));
     if (!filePtr) {
       throw PDNSException("Error opening allow-notify-for-file '" + filename + "': " + stringerror());
@@ -548,16 +537,12 @@ static void processAllowNotifyForFile(shared_ptr<notifyset_t>& newSet, Logr::log
       newSet->insert(DNSName(line));
     }
   }
-  SLOG(g_log << Logger::Warning << "Done parsing " << newSet->size() - before << " NOTIFY-allowed zones from file '" << filename << "'" << endl,
-       log->info(Logr::Notice, "Done parsing NOTIFY-allowed zones from file", "file", Logging::Loggable(filename), "count", Logging::Loggable(newSet->size() - before)));
+  log->info(Logr::Notice, "Done parsing NOTIFY-allowed zones from file", "file", Logging::Loggable(filename), "count", Logging::Loggable(newSet->size() - before));
 }
 
 std::tuple<std::shared_ptr<SyncRes::domainmap_t>, std::shared_ptr<notifyset_t>> parseZoneConfiguration(bool yaml)
 {
   auto log = g_slog->withName("config");
-
-  TXTRecordContent::report();
-  OPTRecordContent::report();
 
   auto newMap = std::make_shared<SyncRes::domainmap_t>();
   auto newSet = std::make_shared<notifyset_t>();
@@ -565,12 +550,30 @@ std::tuple<std::shared_ptr<SyncRes::domainmap_t>, std::shared_ptr<notifyset_t>> 
   processForwardZones(newMap, log);
   processForwardZonesFile(newMap, newSet, log);
   if (yaml) {
-    processApiZonesFile(newMap, newSet, log);
+    auto lci = g_luaconfs.getLocal();
+    processApiZonesFile("apizones", newMap, newSet, log);
+    for (const auto& catz : lci->catalogzones) {
+      processApiZonesFile("catzone." + catz.d_catz->getName().toString(), newMap, newSet, log);
+    }
   }
   processExportEtcHosts(newMap, log);
   processServeRFC1918(newMap, log);
+  processServeRFC6303(newMap, log);
+  processServeRFC6761(newMap, log);
   processAllowNotifyFor(newSet);
   processAllowNotifyForFile(newSet, log);
+
+  // Add Special Use domains, unless already forwarded
+  for (const auto& domain : {
+         "onion.", // RFC 7686
+         "home.arpa.", // RFC 8375
+         "resolver.arpa", // RFC 9462
+         "service.arpa", // RFC 9665
+       }) {
+    if (newMap->count(DNSName(domain)) == 0) {
+      makeEmptyZone(*newMap, domain, log);
+    }
+  }
 
   return {newMap, newSet};
 }

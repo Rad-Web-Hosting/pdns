@@ -1,6 +1,88 @@
 Upgrade Guide
 =============
 
+2.1.x to 2.2.0
+--------------
+
+Queries received from clients that have the truncated bit (TC) set are now dropped.
+
+The internal web server now binds listening sockets with ``IPV6_V6ONLY`` set, which means that ``[::]`` no longer accepts IPv4 connections. If you want to listen on both IPv4 and IPv6, you need to add a second line with ``0.0.0.0`` to your existing configuration.
+
+:attr:`DNSQuestion.dh` has been removed, :meth:`DNSQuestion.getHeader` and :meth:`DNSQuestion.setHeader` should be used instead.
+
+Lua FFI API's ``dnsdist_ffi_dnspacket_parse_a_record``, ``dnsdist_ffi_dnspacket_parse_aaaa_record``, ``dnsdist_ffi_dnspacket_parse_address_record`` and ``dnsdist_ffi_dnspacket_parse_cname_record`` used to rely on the caller providing a large enough buffer, but this was the source of many AI-assisted bogus reports, so their ``addrSize`` and ``cnameSize`` parameters are no longer "out" parameters but "in and out" parameters, meaning they have to be set to the size of the buffer before calling these methods or the call will fail. They will still be updated to hold the number of bytes actually written on success.
+
+AXFR and IXFR queries received over UDP are immediately discarded with a "Not Implemented" response instead of being forwarded to the backend, as it could have introduced issues for TCP-only and DoT backends.
+
+The :attr:`ClientState.muted` attribute has been removed. To drop responses to clients, use a :func:`DropResponseAction` rule.
+
+2.1.0-beta2 to 2.1.0
+--------------------
+
+The :doc:`reference/ottrace` YAML configuration has changed.
+It is now a structure with a single ``enabled`` field.
+
+Old:
+
+.. code-block:: yaml
+
+  logging:
+    open_telemetry_tracing: true
+
+New:
+
+.. code-block:: yaml
+
+  logging:
+    open_telemetry_tracing:
+      enabled: true
+
+The use of :attr:`DNSQuestion.dh` is now deprecated and strongly discouraged as it has proven to be error-prone. :meth:`DNSQuestion.getHeader` and :meth:`DNSQuestion.setHeader` should be used instead.
+
+2.0.x to 2.1.0
+--------------
+
+Custom load-balancing policies written in Lua now need to return the index in the servers array of the backend they intend to select, instead of returning a reference to the backend itself.
+
+dnsdist no longer supports ``h2o`` for incoming DNS over HTTPS, as it is unfortunately no longer maintained in a way that is suitable for use as a library
+(see https://github.com/h2o/h2o/issues/3230). This means that only ``nghttp2`` is supported from now on.
+Note that ``nghttp2`` only supports HTTP/2, and not HTTP/1, while ``h2o`` supported both. This is not an issue for actual DNS over HTTPS clients that
+support HTTP/2, but might be one in setups running dnsdist behind a reverse-proxy that does not support HTTP/2. See :doc:`guides/dns-over-https` for some work-around.
+
+Structured logging is now enabled by default, and can be disabled via :func:`setStructuredLogging` or the ``--structured-logging`` command-line switch.
+
+:program:`dnsdist` now looks by default for a configuration file named ``dnsdist.yml`` in the system configuration directory (determined by the ``SYSCONFDIR`` variable during compilation), instead of ``dnsdist.conf``. If ``dnsdist.yml`` does not exist, it will automatically fall back to ``dnsdist.conf``. That means that if you are upgrading an existing setup using the ``Lua`` configuration format in a ``dnsdist.conf`` file, you should not have to edit your configuration as long as you don't have a ``dnsdist.yml`` file in the system configuration directory.
+
+Please be aware that after loading a ``dnsdist.yml`` file, :program:`dnsdist` will check whether a file named ``dnsdist.lua`` is present in the system configuration directory, and if so that file will also be loaded but without the ability to use configuration directives. Please see :doc:`the YAML settings reference <reference/yaml-settings>` for more information.
+
+The webserver no longer allows cross-origin HTTP requests by default, please have a look at ``webserver.allow_cross_origin_requests`` (:func:`setWebserverConfig`'s ``allowCrossOriginRequests`` for Lua-based configurations) if your setup requires them.
+
+1.9.x to 2.0.0
+--------------
+
+Since 2.0.0, a Python 3 interpreter with the ``YAML`` module is required to build :program:`dnsdist`.
+:program:`dnsdist` 2.0.0 also supports a new, optional ``yaml`` :doc:`configuration format <reference/yaml-settings>`. To build with this feature enabled, a Rust development environment, including ``rustc`` and ``cargo`` is needed.
+
+:func:`showTLSContexts` has been renamed to :func:`showTLSFrontends`.
+:func:`getTLSContext` and the associated :class:`TLSContext` have been removed, please use :func:`getTLSFrontend` and the associated :class:`TLSFrontend` instead.
+
+Our eBPF filtering code no longer treats the ``255``/``ANY`` qtype as a special value intended to block queries for all types, and will only block ``ANY`` queries instead. The reserved ``65535`` value now can be used to block queries for all qtypes.
+
+XPF support has been removed.
+
+:meth:`Server:setAuto` used to reset the health-check mode to ``active`` even if it had previously been set to ``lazy`` via :meth:`Server:setLazyAuto`. This is no longer the case, and :meth:`Server:setActiveAuto` should be used instead to set the health-check mode to ``Active``.
+
+The ``options`` parameter of :func:`HTTPStatusAction` has been deprecated because it had unexpected side-effects, and should thus no longer be used.
+
+In some cases, :program:`dnsdist` turns an incoming query into a response, setting the response code in the process. When doing so, it was not properly cleaning up records present in the answer, authority or additional sections, which could have been surprising to clients and wasted bandwidth. This has now been fixed. The cases in question are:
+
+* :func:`RCodeAction`
+* :func:`ERCodeAction`
+* returning ``DNSAction.Nxdomain``, ``DNSAction.Refused`` or ``DNSAction.ServFail`` from ``Lua``
+* using the ``DNSAction.Nxdomain``, ``DNSAction.Refused`` or ``DNSAction.ServFail`` dynamic block actions
+* sending ``Server Failure`` when no downstream servers are usable
+* receiving a zone transfer request over DoQ, DoH or DoH3
+
 1.8.x to 1.9.0
 --------------
 
@@ -61,7 +143,7 @@ Plain-text API keys and passwords for web server authentication are now strongly
 1.5.x to 1.6.0
 --------------
 
-The packet cache no longer hashes EDNS Cookies by default, which means that two queries that are identical except for the content of their cookie will now be served the same answer. This only works if the backend is not returning any answer containing EDNS Cookies, otherwise the wrong cookie might be returned to a client. To prevent this, the ``cookieHashing=true`` parameter might be passed to :func:`newPacketCache` so that cookies are hashed, resulting in separate entries in the packet cache.
+The packet cache no longer hashes EDNS Cookies by default, which means that two queries that are identical except for the content of their cookie will now be served the same answer. This only works if the backend is not returning any answer containing EDNS Cookies; otherwise, the wrong cookie might be returned to a client. To prevent this, the ``cookieHashing=true`` parameter might be passed to :func:`newPacketCache` so that cookies are hashed, resulting in separate entries in the packet cache.
 
 All TCP worker threads are now created at startup, instead of being created on-demand. The existing behaviour was useful for very small setups but did not scale quickly to a large amount of TCP connections.
 The new behaviour can cause a noticeable increase of TCP connections between dnsdist and its backends, as the TCP connections are not shared between TCP worker threads.

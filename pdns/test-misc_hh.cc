@@ -1,5 +1,7 @@
 #ifndef BOOST_TEST_DYN_LINK
 #define BOOST_TEST_DYN_LINK
+#include <boost/test/tools/old/interface.hpp>
+#include <stdexcept>
 #endif
 
 #define BOOST_TEST_NO_MAIN
@@ -9,8 +11,6 @@
 #endif
 #include <boost/test/unit_test.hpp>
 #include <boost/assign/list_of.hpp>
-
-#include <boost/tuple/tuple.hpp>
 
 #include <arpa/inet.h>
 
@@ -59,52 +59,6 @@ BOOST_AUTO_TEST_CASE(test_CIStringPairCompare) {
                 s<<"("<<i->first<<"|"<<i->second<<")";
         }
         BOOST_CHECK_EQUAL(s.str(), "(|1)(abc|1)(abc|2)(def|1)(ns.example.com|0)(ns.example.com|1)");
-}
-
-BOOST_AUTO_TEST_CASE(test_pdns_ilexicographical_compare) {
-  typedef boost::tuple<const std::string, const std::string, bool> case_t;
-  typedef std::list<case_t> cases_t;
-
-  cases_t cases = boost::assign::list_of
-    (case_t(std::string(""), std::string(""), false))
-    (case_t(std::string(""), std::string("abc"), true))
-    (case_t(std::string("abc"), std::string(""), false))
-    (case_t(std::string("abc"), std::string("abcd"), true))
-    (case_t(std::string("abcd"), std::string("abc"), false))
-    (case_t(std::string("abd"), std::string("abc"), false))
-    (case_t(std::string("abc"), std::string("abd"), true))
-    (case_t(std::string("abc"), std::string("Abc"), false))
-    (case_t(std::string("Abc"), std::string("abc"), false))
-  ;
-
-  for(const case_t& val :  cases) {
-    bool res;
-    res = pdns_ilexicographical_compare(val.get<0>(), val.get<1>());
-    BOOST_CHECK_EQUAL(res, val.get<2>());
-  }
-}
-
-BOOST_AUTO_TEST_CASE(test_pdns_iequals) {
-  typedef boost::tuple<const std::string, const std::string, bool> case_t;
-  typedef std::list<case_t> cases_t;
-
-  cases_t cases = boost::assign::list_of
-    (case_t(std::string(""), std::string(""), true))
-    (case_t(std::string(""), std::string("abc"), false))
-    (case_t(std::string("abc"), std::string(""), false))
-    (case_t(std::string("abc"), std::string("abcd"), false))
-    (case_t(std::string("abcd"), std::string("abc"), false))
-    (case_t(std::string("abd"), std::string("abc"), false))
-    (case_t(std::string("abc"), std::string("abd"), false))
-    (case_t(std::string("abc"), std::string("Abc"), true))
-    (case_t(std::string("Abc"), std::string("abc"), true))
-  ;
-
-  for(const case_t& val :  cases) {
-    bool res;
-    res = pdns_iequals(val.get<0>(), val.get<1>());
-    BOOST_CHECK_EQUAL(res, val.get<2>());
-  }
 }
 
 BOOST_AUTO_TEST_CASE(test_stripDot) {
@@ -213,7 +167,7 @@ BOOST_AUTO_TEST_CASE(test_getCarbonHostName)
 
   BOOST_CHECK_EQUAL(gethostname(buffer, sizeof buffer), 0);
   std::string my_hostname(buffer);
-  boost::replace_all(my_hostname, ".", "_");
+  std::replace(my_hostname.begin(), my_hostname.end(), '.', '_');
 
   std::string hostname = getCarbonHostName();
   // ensure it matches what we get
@@ -292,6 +246,96 @@ BOOST_AUTO_TEST_CASE(test_parseRFC1035CharString)
   in = R"FOO(part1\,\p\a\r\t2\044part3\092,part4\092\\)FOO";
   amount = parseRFC1035CharString(in, out);
   BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, expected);
+}
+
+BOOST_AUTO_TEST_CASE(test_parseRFC1035CharStringRelaxed)
+{
+  string in; // NOLINT(readability-identifier-length)
+  string out;
+  string expected;
+  size_t amount{0};
+
+  // Same tests as for parseRFC1035CharString
+
+  in = "foobar123";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, "foobar123");
+
+  in = "foobar123\\,bazquux456";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, "foobar123,bazquux456");
+
+  in = string("\"")+string(16262, 'A')+string("\"");
+  expected = string(16262, 'A');
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, expected);
+
+  in = "hello\\044world\\002";
+  expected = "hello,world\x02";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, expected);
+
+  in = R"("hello\044world")";
+  expected = "hello,world";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, expected);
+
+  // Here we'll only read until the space
+  in = "hello world";
+  expected = "hello";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, 5U);
+  BOOST_CHECK_EQUAL(out, expected);
+
+  // \032 is a space, but it is read because it is escaped
+  in = "hello\\032world";
+  expected = "hello world";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, expected);
+
+  in = R"("hello\032world")";
+  expected = "hello world";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, expected);
+
+  in = R"("hello\032world XXXX")";
+  expected = "hello world XXXX";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, expected);
+
+  // From draft-ietf-dnsop-svcb-https-03
+  expected = R"FOO(part1,part2,part3\,part4\\)FOO";
+  in = R"FOO("part1,part2,part3\\,part4\\\\)FOO";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, expected);
+
+  in = R"FOO(part1\,\p\a\r\t2\044part3\092,part4\092\\)FOO";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, expected);
+
+  // Specific checks for ( ) ;
+
+  in = "\"();etc\"";
+  expected = "();etc";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, in.size());
+  BOOST_CHECK_EQUAL(out, expected);
+
+  in = ";login";
+  expected = "";
+  amount = parseRFC1035CharStringRelaxed(in, out);
+  BOOST_CHECK_EQUAL(amount, 0U);
   BOOST_CHECK_EQUAL(out, expected);
 }
 
@@ -417,6 +461,26 @@ BOOST_AUTO_TEST_CASE(test_CleanSlashes) {
   BOOST_CHECK_EQUAL(cleanSlashesWrapper("//test//"), "/test/");
   BOOST_CHECK_EQUAL(cleanSlashesWrapper("///test//"), "/test/");
   BOOST_CHECK_EQUAL(cleanSlashesWrapper("test///"), "test/");
+}
+
+BOOST_AUTO_TEST_CASE(test_checked_stoi)
+{
+  BOOST_CHECK_EQUAL(pdns::checked_stoi<uint8_t>("0"), 0);
+
+  BOOST_CHECK_EQUAL(pdns::checked_stoi<uint8_t>("15"), 15);
+  BOOST_CHECK_EQUAL(pdns::checked_stoi<uint8_t>("255"), 255);
+  BOOST_CHECK_THROW(pdns::checked_stoi<uint8_t>("256"), std::out_of_range);
+  BOOST_CHECK_THROW(pdns::checked_stoi<uint8_t>("-1"), std::out_of_range);
+
+  BOOST_CHECK_EQUAL(pdns::checked_stoi<int8_t>("-15"), -15);
+  BOOST_CHECK_EQUAL(pdns::checked_stoi<int8_t>("-128"), -128);
+  BOOST_CHECK_THROW(pdns::checked_stoi<int8_t>("-129"), std::out_of_range);
+  BOOST_CHECK_THROW(pdns::checked_stoi<int8_t>("128"), std::out_of_range);
+}
+
+BOOST_AUTO_TEST_CASE(test_checked_stoi_nonzero)
+{
+  BOOST_CHECK_THROW(pdns::checked_stoi_nonzero<int8_t>("0"), std::out_of_range);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

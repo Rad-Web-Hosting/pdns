@@ -2,18 +2,22 @@ LMDB backend
 ============
 
 * Native: Yes
-* Master: Yes
-* Slave: Yes
-* Superslave: No
-* Case: All lower
+* Primary: Yes
+* Secondary: Yes
+* Producer: Yes
+* Consumer: Yes
+* Autosecondary: No
+* DNS Update: since version 5.0.0
 * DNSSEC: Yes
 * Disabled data: Yes
-* Comments: No
+* Comments: since version 5.1.0
+* Search: since version 5.0.0
+* Views: Yes
+* API: Read-Write
 * Multiple instances: No
 * Zone caching: Yes
 * Module name: lmdb
 * Launch name: ``lmdb``
-
 
 .. warning::
   The LMDB backend is considered stable as of 4.4.0. Version 4.3.0 was stable but had an important `known bug <https://github.com/PowerDNS/pdns/issues/8012>`__, that affects anybody with big records such as long TXT content.
@@ -36,14 +40,14 @@ Path to the LMDB file (e.g. */var/lib/powerdns/pdns.lmdb*)
 
 .. warning::
   On systemd systems,
-  When running PowerDNS via the provided systemd service file, `ProtectSystem <http://www.freedesktop.org/software/systemd/man/systemd.exec.html#ProtectSystem=>`_ is set to ``full``, this means PowerDNS is unable to write to e.g. ``/etc`` and ``/home``, possibly being unable to write to the LMDB database.
+  When running PowerDNS via the provided systemd service file, `ProtectSystem <https://www.freedesktop.org/software/systemd/man/systemd.exec.html#ProtectSystem=>`_ is set to ``full``, this means PowerDNS is unable to write to e.g. ``/etc`` and ``/home``, possibly being unable to write to the LMDB database.
 
 .. _setting-lmdb-shards:
 
 ``lmdb-shards``
 ^^^^^^^^^^^^^^^^^
 
-Records database will be split into this number of shards e.g. lmdb-shards=64
+Records database will be split into this number of shards e.g. lmdb-shards=64.
 Default is 2 on 32 bits systems, and 64 on 64 bits systems.
 
 .. _setting-lmdb-sync-mode:
@@ -55,11 +59,10 @@ Default is 2 on 32 bits systems, and 64 on 64 bits systems.
 
   ``mapasync`` choice removed
 
-* Synchronisation mode: sync, nosync, nometasync
-* Default: sync
+Synchronisation mode: one of sync, nosync, nometasync (default: sync).
 
 ``sync`` (default since 4.9.0)
-  LMDB synchronous mode. Safest option, but also slightly slower. Can  also be enabled with ``lmdb-sync-mode=``
+  LMDB synchronous mode. Safest option, but also slightly slower. Can also be enabled with ``lmdb-sync-mode=``
 
 ``nosync``
   don't flush systems buffers to disk when committing a transaction.
@@ -77,9 +80,9 @@ Default is 2 on 32 bits systems, and 64 on 64 bits systems.
 ``lmdb-schema-version``
 ^^^^^^^^^^^^^^^^^^^^^^^
 
-Determines the maximum schema version LMDB is allowed to upgrade to. If the on disk LMDB database has a lower version than the current version of the LMDB schema the backend will not start, unless this setting allows it to upgrade the schema. If the version of the DB is already the same as the current schema version this setting is not checked and the backend starts normally.
+Determines the maximum schema version LMDB is allowed to upgrade to. If the on disk LMDB database has a lower version than the current version of the LMDB schema the backend will not start, unless this setting allows it to upgrade the schema. If the version of the DB is already the same as the current schema version this setting is not checked and the backend will start normally.
 
-The default value for this setting is the highest supported schema version for the version of PowerDNS you are starting. if you want to prevent automatic schema upgrades, explicitly set this setting to the current default before upgrading PowerDNS.
+The default value for this setting is the highest supported schema version for the version of PowerDNS you are starting. If you want to prevent automatic schema upgrades, explicitly set this setting to the current default before upgrading PowerDNS.
 
 ================  ===================
 PowerDNS Version  LMDB Schema version
@@ -89,7 +92,13 @@ PowerDNS Version  LMDB Schema version
 4.4.x to 4.6.x    3
 4.7.x and up      4
 4.8.x and up      5
+5.0.x and up      6
+5.1.x and up      6 [#]_
 ================  ===================
+
+.. [#] 5.1.x and up add two sub-databases tied to new features in 5.1 (one for ``lmdb-split-domains-table``, if enabled, and one for RRset comments).
+       Downgrading back to 5.0.x is supported, but those sub-databases will be invisible to 5.0.x as the older version doesn't have these features.
+       See :ref:`setting-lmdb-split-domains-table` for an explanation of pdns behavior when toggling that feature in particular.
 
 .. _settings-lmdb-random-ids:
 
@@ -116,6 +125,24 @@ Size, in megabytes, of each LMDB database.
 This number can be increased later, but never decreased.
 Defaults to 100 on 32 bit systems, and 16000 on 64 bit systems.
 
+  .. versionchanged:: 5.1.0
+
+From version 5.1.0 onwards, the size of the main database and the
+size of the shard databases can be set independently.
+In order to set a different size for the shard databases, use :ref:`settings-lmdb-shards-map-size`.
+
+.. _settings-lmdb-shards-map-size:
+
+``lmdb-shards-map-size``
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+  .. versionadded:: 5.1.0
+
+Size, in megabytes, of each LMDB shard database.
+This number can be increased later, but never decreased.
+If set to zero (which is its default value), the same value as
+:ref:`settings-lmdb-map-size` will be used.
+
 .. _settings-lmdb-flag-deleted:
 
 ``lmdb-flag-deleted``
@@ -128,6 +155,58 @@ Defaults to 100 on 32 bit systems, and 16000 on 64 bit systems.
 
 Instead of deleting items from the database, flag them as deleted in the item's `Lightning Stream <https://doc.powerdns.com/lightningstream>`_ header.
 Only enable this if you are using Lightning Stream.
+
+.. _setting-lmdb-write-notification-update:
+
+``lmdb-write-notification-update``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+  .. versionadded:: 5.0.1
+
+-  Boolean
+-  Default: yes
+
+Always update the domains table in the database when the last notification
+or the freshness check timestamp are modified.
+If disabled, these timestamps will only be written back to the database when
+other changes to the domain (such as accounts) occur.
+This setting is also available in version 4.9.9.
+
+**Warning**: Running with this flag disabled will cause spurious notifications
+to be sent upon startup, unless a ``flush`` command is sent using
+:doc:`pdns_control <../manpages/pdns_control.1>` before stopping the
+PowerDNS Authoritative Server.
+
+.. _setting-lmdb-split-domains-table:
+
+``lmdb-split-domains-table``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+  .. versionadded:: 5.1.0
+
+-  Boolean
+-  Default: no
+
+Split the domains table in two, with the last notification timestamp and
+last freshness check timestamp in a separate table.
+This lowers the I/O bandwidth requirements on setups with many zones.
+
+Except for the first time this feature gets enabled, after changing the value
+of this option, the next time the authoritative server starts, it will operate
+on out-of-date data and may send unnecessary notifications, as well as
+perform unnecessary freshness checks. This however allows this feature to work
+without requiring a database schema upgrade.
+
+.. _settings-lmdb-page-size:
+
+``lmdb-page-size``
+^^^^^^^^^^^^^^^^^^
+
+  .. versionadded:: 5.2.0
+
+Size, in bytes, of the database page size. Must be a power of two, ranging from 256 to 65536, included, or zero (default), which uses the default value of the LMDB library, which is currently (as of LMDB 1.0) the system's page size.
+
+This setting is only available with LMDB 1.0 and up, and will be silently ignored if the authoritative server is built against an older LMDB library.
 
 ``lmdb-lightning-stream``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -148,4 +227,4 @@ LMDB Structure
 --------------
 
 PowerDNS will create the database structure, no need to manually create the database schema.
-Also, it is not possible to directly query the LMDB DB, so recommendation is to use either the API, or pdnsutil.
+Also, it is not possible to directly query the LMDB DB, so recommendation is to use either the API, or :doc:`pdnsutil <../manpages/pdnsutil.1>`.

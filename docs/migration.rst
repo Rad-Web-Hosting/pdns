@@ -5,42 +5,42 @@ Before migrating to PowerDNS a few things should be considered.
 
 PowerDNS does not operate as a :ref:`secondary <secondary-operation>` or
 :ref:`primary <primary-operation>` server with all backends. The :doc:`Generic SQL <backends/generic-sql>` and
-:doc:`BIND <backends/bind>` backends have the ability to act as master or
-slave. See the :doc:`table of backends <backends/index>`
+:doc:`BIND <backends/bind>` backends have the ability to act as primary or
+secondary. See the :doc:`table of backends <backends/index>`
 which other backends support these modes.
 
-Using AXFR to a Slave-Capable Backend
--------------------------------------
+Using AXFR to a Secondary-Capable Backend
+-----------------------------------------
 
 The easiest way to migrate all your zones from your old infrastructure
-to PowerDNS is to add all your domains as a slave domain with your
-current master as the master, wait for the zones to be transferred and
-change the zones to master. Make sure :ref:`setting-slave` is set to "yes"
+to PowerDNS is to add all your domains as a secondary domain with your
+current primary as the primary, wait for the zones to be transferred and
+change the zones to primary. Make sure :ref:`setting-secondary` is set to "yes"
 in your pdns.conf.
 
 To A Generic SQL Backend
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. note::
-  This assumes the schema provided with PowerDNS is in place
+  This assumes the schema provided with PowerDNS is in place.
 
 In order to migrate to a Generic SQL backend, add all your domains to
-the 'domains' table with the IP of your current master. On your current
-master, make sure that this master allows AXFRs to this new slave.
+the 'domains' table with the IP of your current primary. On your current
+primary, make sure that this primary allows AXFRs to this new secondary.
 
 .. code-block:: SQL
 
     INSERT INTO domains (name,type,master) VALUES ('example.net', 'SLAVE', '198.51.100.101');
 
 Then start PowerDNS and wait for all the zones to be transferred. If
-this server is the new :ref:`master <master-operation>`, change the type of
+this server is the new :ref:`primary <primary-operation>`, change the type of
 domain in the database:
 
 .. code-block:: SQL
 
     UPDATE domains set type='MASTER' where type='SLAVE';
 
-And set :ref:`setting-master` to "yes" in your pdns.conf
+And set :ref:`setting-primary` to "yes" in your pdns.conf
 and restart PowerDNS.
 
 Or, if you want to use :ref:`native <native-operation>`:
@@ -76,7 +76,7 @@ transferred. Now you can change the zone type to master:
       file "/var/lib/powerdns/zones/example.net.zone";
     };
 
-Don't forget to enable :ref:`setting-master` in your
+Don't forget to enable :ref:`setting-primary` in your
 pdns.conf and restart, or if this setting was already set, use
 ``pdns_control rediscover`` to load these zones as master zones.
 
@@ -103,7 +103,7 @@ Using ``zone2sql``
 ^^^^^^^^^^^^^^^^^^
 
 To migrate, the ``zone2sql`` tool is provided. This tool parses a BIND
-``named.conf`` file and zone files and outputs SQL on standard out,
+``named.conf`` file and zone files and outputs SQL on standard output,
 which can then be fed to your database. It understands the BIND master
 file extension ``$GENERATE`` and will also honour ``$ORIGIN`` and
 ``$TTL``.
@@ -123,15 +123,16 @@ An example call to ``zone2sql`` could be:
 This will generate the SQL statements for the :doc:`Generic MySQL <backends/generic-mysql>` and pipe them into the pdns-db
 database in MySQL.
 
-Using ``pdnsutil load-zone``
+Using ``pdnsutil zone load``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The :doc:`pdnsutil <manpages/pdnsutil.1>` tool has a
-``load-zone`` command that ingests a zone file and imports it into the
+``zone load`` command that ingests a zone file and imports it into the
 first backend that is capable of hosting it.
 
 To import, configure the backend and run
-``pdnsutil load-zone example.com /tmp/example.com.zone`` to import
+``pdnsutil zone load example.com /tmp/example.com.zone`` (``pdnsutil load-zone
+example.com /tmp/example.com.zone`` prior to version 5.0) to import
 the ``example.com`` domain from the ``/tmp/example.com.zone`` file. The
 zone is imported atomically (i.e. it is fully imported, or not) and any
 existing records for that zone are overwritten. This include the SOA record too.
@@ -157,7 +158,7 @@ Prerequisites
 -  Target backend must support same features as source from set of
    domains, zones, metadata, DNSSEC and TSIG. See :doc:`Backend
    Capabilities <backends/index>`
--  There must be no data in the target backend, otherwise the migration
+-  There must be no data in the target backend; otherwise, the migration
    will fail. This is checked.
 
 You can perform live upgrade with this tool, provided you follow the
@@ -175,7 +176,8 @@ Moving from source to target
    sure you properly clear **ALL** data from target backend before
    retrying.
 -  Remove (or comment out) old backend from pdns.conf, and run
-   ``pdnsutil rectify-all-zones`` and ``pdnsutil check-all-zones`` to
-   make sure everything is OK.
+   ``pdnsutil zone rectify-all`` and ``pdnsutil zone check-all`` (respectively
+   ``pdnsutil rectify-all-zones`` and ``pdnsutil check-all-zones`` prior to
+   version 5.0) to make sure everything is OK.
 -  If everything is OK, then go ahead to restart your PowerDNS service.
    Check logs to make sure everything went ok.

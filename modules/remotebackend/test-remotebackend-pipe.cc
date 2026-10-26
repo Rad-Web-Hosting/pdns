@@ -75,14 +75,11 @@ struct RemotebackendSetup
       ::arg().set("module-dir") = "./.libs";
       auto loader = std::make_unique<RemoteLoader>();
       BackendMakers().launch("remote");
-      // then get us a instance of it
+      // then get us an instance of it
       ::arg().set("remote-connection-string") = "pipe:command=unittest_pipe.py";
       ::arg().set("remote-dnssec") = "yes";
       backendUnderTest = std::move(BackendMakers().all()[0]);
-      // load few record types to help out
-      SOARecordContent::report();
-      NSRecordContent::report();
-      ARecordContent::report();
+      reportAllTypes();
     }
     catch (PDNSException& ex) {
       BOOST_TEST_MESSAGE("Cannot start remotebackend: " << ex.reason);

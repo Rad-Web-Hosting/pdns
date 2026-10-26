@@ -26,13 +26,12 @@
 #include <map>
 #include <optional>
 #include <vector>
-#include <inttypes.h>
 #include <sys/un.h>
-#include <signal.h>
 #include <pthread.h>
 #include "iputils.hh"
 #include "dnsname.hh"
 #include "sholder.hh"
+#include "rec_metrics.hh"
 #include <atomic>
 
 extern GlobalStateHolder<SuffixMatchNode> g_dontThrottleNames;
@@ -44,6 +43,10 @@ class RecursorControlChannel
 public:
   RecursorControlChannel();
 
+  RecursorControlChannel(const RecursorControlChannel&) = delete;
+  RecursorControlChannel(RecursorControlChannel&&) = delete;
+  RecursorControlChannel& operator=(const RecursorControlChannel&) = delete;
+  RecursorControlChannel& operator=(RecursorControlChannel&&) = delete;
   ~RecursorControlChannel();
 
   int listen(const std::string& filename);
@@ -65,14 +68,19 @@ public:
     std::string d_str;
   };
 
-  void send(int remote, const Answer&, unsigned int timeout = 5, int fd_to_pass = -1);
-  RecursorControlChannel::Answer recv(int fd, unsigned int timeout = 5);
+  static void send(int fileDesc, const Answer&, unsigned int timeout = 5, int fd_to_pass = -1);
+  static RecursorControlChannel::Answer recv(int fileDesc, unsigned int timeout = 5);
 
-  int d_fd;
   static std::atomic<bool> stop;
 
+  [[nodiscard]] int getDescriptor() const
+  {
+    return d_fd;
+  }
+
 private:
-  struct sockaddr_un d_local;
+  int d_fd;
+  struct sockaddr_un d_local{};
 };
 
 class RecursorControlParser
@@ -85,7 +93,7 @@ public:
   static RecursorControlChannel::Answer getAnswer(int socket, const std::string& question, func_t** command);
 };
 
-enum class StatComponent
+enum class StatComponent : uint8_t
 {
   API,
   Carbon,
@@ -97,18 +105,20 @@ struct StatsMapEntry
 {
   std::string d_prometheusName;
   std::string d_value;
+  std::optional<PrometheusMetricType> d_prometheusType = std::nullopt;
+  std::optional<std::string> d_prometheusDescr = std::nullopt;
 };
 
 class PrefixDashNumberCompare
 {
 private:
-  static std::pair<std::string, std::string> prefixAndTrailingNum(const std::string& a);
+  static std::pair<std::string, std::string> prefixAndTrailingNum(const std::string& arg);
 
 public:
-  bool operator()(const std::string& a, const std::string& b) const;
+  bool operator()(const std::string& lhs, const std::string& rhs) const;
 };
 
-typedef std::map<std::string, StatsMapEntry, PrefixDashNumberCompare> StatsMap;
+using StatsMap = std::map<std::string, StatsMapEntry, PrefixDashNumberCompare>;
 
 StatsMap getAllStatsMap(StatComponent component);
 
@@ -131,7 +141,7 @@ std::vector<ComboAddress>* pleaseGetBogusRemotes();
 std::vector<ComboAddress>* pleaseGetLargeAnswerRemotes();
 std::vector<ComboAddress>* pleaseGetTimeouts();
 DNSName getRegisteredName(const DNSName& dom);
-std::atomic<unsigned long>* getDynMetric(const std::string& str, const std::string& prometheusName);
+std::atomic<unsigned long>* getDynMetric(const std::string& str, const std::string& prometheusName, const std::string& prometheusTypeName, const std::string& prometheusDescr);
 std::optional<uint64_t> getStatByName(const std::string& name);
 bool isStatDisabled(StatComponent component, const std::string& name);
 void disableStat(StatComponent component, const string& name);
@@ -139,8 +149,8 @@ void disableStats(StatComponent component, const string& stats);
 
 void registerAllStats();
 
-void doExitGeneric(bool nicely);
-void doExit();
 void doExitNicely();
 RecursorControlChannel::Answer doQueueReloadLuaScript(vector<string>::const_iterator begin, vector<string>::const_iterator end);
 RecursorControlChannel::Answer luaconfig(bool broadcast);
+struct OpenTelemetryTraceCondition;
+void updateOTConditions(const NetmaskTree<OpenTelemetryTraceCondition>& conditions);

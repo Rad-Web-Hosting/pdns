@@ -5,8 +5,9 @@
 		echo "drop table $table" | $ISQL -b
 	done
 	$ISQL < ../modules/godbcbackend/schema.mssql.sql
+	backend=godbc2
 	cat > pdns-godbc2.conf << __EOF__
-module-dir=./modules
+module-dir=$PDNS_MODULE_PATH
 launch=godbc
 godbc-datasource=$GODBC_MSSQL2_DSN
 godbc-username=$GODBC_MSSQL2_USERNAME
@@ -52,7 +53,7 @@ __EOF__
 	done
 	if [ $todo -ne 0 ]
 	then
-		echo "AXFR FAILED" >> failed_tests
+		echo "AXFR FAILED" | tee -a failed_tests
 		exit
 	fi
 	set -e

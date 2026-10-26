@@ -1,6 +1,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+#include "arguments.hh"
 #include "base64.hh"
 #include "dnsparser.hh"
 #include "sstuff.hh"
@@ -13,6 +14,14 @@
 
 #include "dns_random.hh"
 #include "gss_context.hh"
+
+bool g_slogStructured{false};
+
+ArgvMap &arg()
+{
+  static ArgvMap theArg;
+  return theArg;
+}
 
 StatBag S;
 
@@ -105,7 +114,7 @@ try
       input="";
       DNSPacketWriter pwtkey(packet, gssctx.getLabel(), QType::TKEY, QClass::ANY);
       TKEYRecordContent tkrc;
-      tkrc.d_algo = DNSName("gss-tsig.");
+      tkrc.d_algo = g_gsstsigdnsname;
       // coverity[store_truncates_time_t]
       tkrc.d_inception = time((time_t*)NULL);
       tkrc.d_expiration = tkrc.d_inception+15;
@@ -174,7 +183,7 @@ try
     trc.d_fudge = 300;
     trc.d_origID=ntohs(pw.getHeader()->id);
     trc.d_eRcode=0;
-    addTSIG(pw, trc, tsig_key, tsig_secret, "", false);
+    addTSIG(nullptr /* no structured logging */, pw, trc, tsig_key, tsig_secret, "", false);
   }
 
   len = htons(packet.size());

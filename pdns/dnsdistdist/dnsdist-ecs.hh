@@ -23,6 +23,7 @@
 
 #include <string>
 
+#include "ednsoptions.hh"
 #include "iputils.hh"
 #include "noinitvector.hh"
 
@@ -32,8 +33,7 @@ struct DNSQuestion;
 static const size_t optRecordMinimumSize = 11;
 
 int rewriteResponseWithoutEDNS(const PacketBuffer& initialPacket, PacketBuffer& newContent);
-bool slowRewriteEDNSOptionInQueryWithRecords(const PacketBuffer& initialPacket, PacketBuffer& newContent, bool& ednsAdded, uint16_t optionToReplace, bool& optionAdded, bool overrideExisting, const string& newOptionContent);
-int locateEDNSOptRR(const PacketBuffer& packet, uint16_t* optStart, size_t* optLen, bool* last);
+bool slowRewriteEDNSOptionInQueryWithRecords(const PacketBuffer& initialPacket, PacketBuffer& newContent, bool& ednsAdded, uint16_t optionToReplace, bool& optionAdded, bool overrideExisting, bool allowMultiple, const string& newOptionContent);
 bool generateOptRR(const std::string& optRData, PacketBuffer& res, size_t maximumSize, uint16_t udpPayloadSize, uint8_t ednsrcode, bool dnssecOK);
 void generateECSOption(const ComboAddress& source, string& res, uint16_t ECSPrefixLength);
 int removeEDNSOptionFromOPT(char* optStart, size_t* optLen, const uint16_t optionCodeToRemove);
@@ -46,12 +46,13 @@ bool setNegativeAndAdditionalSOA(DNSQuestion& dnsQuestion, bool nxd, const DNSNa
 bool handleEDNSClientSubnet(DNSQuestion& dnsQuestion, bool& ednsAdded, bool& ecsAdded);
 bool handleEDNSClientSubnet(PacketBuffer& packet, size_t maximumSize, size_t qnameWireLength, bool& ednsAdded, bool& ecsAdded, bool overrideExisting, const string& newECSOption);
 
-bool parseEDNSOptions(const DNSQuestion& dnsQuestion);
+std::optional<EDNSOptionViewMap> parseEDNSOptions(const DNSQuestion& dnsQuestion);
 
 bool queryHasEDNS(const DNSQuestion& dnsQuestion);
 bool getEDNS0Record(const PacketBuffer& packet, EDNS0Record& edns0);
 
-bool setEDNSOption(DNSQuestion& dnsQuestion, uint16_t ednsCode, const std::string& data);
+bool setEDNSOption(PacketBuffer& buf, uint16_t ednsCode, const std::string& ednsData, size_t maximumSize, bool& ednsAdded, bool& optionAdded);
+bool setEDNSOption(DNSQuestion& dnsQuestion, uint16_t ednsCode, const std::string& data, bool isQuery = true);
 
 struct InternalQueryState;
 namespace dnsdist

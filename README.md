@@ -30,9 +30,7 @@ git clone https://github.com/PowerDNS/pdns.git
 ```
 
 This repository contains the sources for the PowerDNS Recursor, the PowerDNS
-Authoritative Server, and dnsdist (a powerful DNS loadbalancer). All three can
-be built from this repository. However, all three released separately as .tar.bz2,
-.deb and .rpm.
+Authoritative Server, and dnsdist (a powerful DNS loadbalancer). All three can be built from this repository. However, they are also released separately as .tar.bz2, .deb, and .rpm packages.
 
 The different releases can be built by the help of pdns-builder, which uses a
 docker-based build process. To get started with this, run these commands in the root
@@ -118,12 +116,12 @@ See [README.md](pdns/recursordist/README.md) in `pdns/recursordist/`.
 
 Compiling dnsdist
 -----------------
-See [README-dnsdist.md](pdns/README-dnsdist.md) in `pdns/`.
+See [README.md](pdns/dnsdistdist/README.md) in `pdns/dnsdistdist`.
 
 Building the HTML documentation
 -------------------------------
 
-The HTML documentation (as seen [on the PowerDNS docs site](https://doc.powerdns.com/authoritative/)) is built from ReStructured Text (rst) files located in `docs`. They are compiled into HTML files using [Sphinx](http://www.sphinx-doc.org/en/master/index.html), a documentation generator tool which is built in Python.
+The HTML documentation (as seen [on the PowerDNS docs site](https://doc.powerdns.com/authoritative/)) is built from ReStructured Text (rst) files located in `docs`. They are compiled into HTML files using [Sphinx](https://www.sphinx-doc.org/en/master/index.html), a documentation generator tool which is built in Python.
 
 Install the dependencies under "COMPILING", and run autoreconf if you haven't already:
 

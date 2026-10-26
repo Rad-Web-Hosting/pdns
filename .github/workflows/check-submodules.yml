@@ -1,0 +1,19 @@
+name: Check if the builder submodule is modified
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'builder'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    name: Builder submodule check
+    steps:
+      - run: |
+          echo "The builder/ submodule was modified in this PR" >> "${GITHUB_STEP_SUMMARY}"
+          exit 1

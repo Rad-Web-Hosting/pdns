@@ -20,11 +20,14 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #include "config.h"
+#include "protozero-trace.hh"
+#include <vector>
 
 #ifndef DISABLE_PROTOBUF
 #include "base64.hh"
 #include "dnsdist.hh"
 #include "dnsdist-protobuf.hh"
+#include "dolog.hh"
 #include "protozero.hh"
 
 DNSDistProtoBufMessage::DNSDistProtoBufMessage(const DNSQuestion& dnsquestion) :
@@ -122,7 +125,7 @@ void DNSDistProtoBufMessage::addRR(DNSName&& qname, uint16_t uType, uint16_t uCl
   d_additionalRRs.push_back({std::move(qname), strBlob, uTTL, uType, uClass});
 }
 
-void DNSDistProtoBufMessage::serialize(std::string& data) const
+void DNSDistProtoBufMessage::serialize(std::string& data, bool withOpenTelemetryTraceData) const
 {
   if ((data.capacity() - data.size()) < 128) {
     data.reserve(data.size() + 128);
@@ -169,6 +172,14 @@ void DNSDistProtoBufMessage::serialize(std::string& data) const
 
   msg.setRequest(d_dq.ids.d_protoBufData && d_dq.ids.d_protoBufData->uniqueId ? *d_dq.ids.d_protoBufData->uniqueId : getUniqueID(), d_requestor ? *d_requestor : d_dq.ids.origRemote, d_responder ? *d_responder : d_dq.ids.origDest, d_question ? d_question->d_name : d_dq.ids.qname, d_question ? d_question->d_type : d_dq.ids.qtype, d_question ? d_question->d_class : d_dq.ids.qclass, d_dq.getHeader()->id, protocol, d_bytes ? *d_bytes : d_dq.getData().size());
 
+  try {
+    msg.setHeaderFlags(*getFlagsFromDNSHeader(d_dq.getHeader().get()));
+  }
+  catch (const std::exception& exp) {
+    VERBOSESLOG(infolog("Error while getting the flags from the DNS header of a packet to add them to the protobuf message: %s", exp.what()),
+                dnsdist::logging::getTopLogger("protobuf")->error(Logr::Info, exp.what(), "Error while getting the flags from the DNS header of a packet to add them to the protobuf message"));
+  }
+
   if (d_serverIdentity) {
     msg.setServerIdentity(*d_serverIdentity);
   }
@@ -180,6 +191,10 @@ void DNSDistProtoBufMessage::serialize(std::string& data) const
     msg.setEDNSSubnet(*d_ednsSubnet, 128);
   }
 
+  if (d_dr != nullptr) {
+    msg.setPacketCacheHit(d_dr->ids.cacheHit);
+    msg.setOutgoingQueries((d_dr->ids.cacheHit || d_dr->ids.selfGenerated) ? 0 : 1);
+  }
   msg.startResponse();
   if (d_queryTime) {
     // coverity[store_truncates_time_t]
@@ -191,8 +206,14 @@ void DNSDistProtoBufMessage::serialize(std::string& data) const
 
   if (d_dr != nullptr) {
     msg.setResponseCode(d_rcode ? *d_rcode : d_dr->getHeader()->rcode);
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    msg.addRRsFromPacket(reinterpret_cast<const char*>(d_dr->getData().data()), d_dr->getData().size(), d_includeCNAME);
+    try {
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+      msg.addRRsFromPacket(reinterpret_cast<const char*>(d_dr->getData().data()), d_dr->getData().size(), d_includeCNAME);
+    }
+    catch (const std::exception& exp) {
+      VERBOSESLOG(infolog("Error while parsing the RRs from a response packet to add them to the protobuf message: %s", exp.what()),
+                  dnsdist::logging::getTopLogger("protobuf")->error(Logr::Info, exp.what(), "Error while parsing the RRs from a response packet to add them to the protobuf message"));
+    }
   }
   else {
     if (d_rcode) {
@@ -232,6 +253,13 @@ void DNSDistProtoBufMessage::serialize(std::string& data) const
       msg.setMeta(key, {std::string()}, {});
     }
   }
+
+  if (auto& tracer = d_dq.ids.getTracer(); tracer != nullptr && d_dq.ids.tracingEnabled) {
+    msg.setOpenTelemetryTraceID(tracer->getTraceID());
+    if (withOpenTelemetryTraceData) {
+      msg.setOpenTelemetryData(tracer->getOTProtobuf());
+    }
+  }
 }
 
 ProtoBufMetaKey::ProtoBufMetaKey(const std::string& key)
@@ -260,7 +288,7 @@ ProtoBufMetaKey::ProtoBufMetaKey(const std::string& key)
           if (!typeIt->d_caseSensitive) {
             boost::algorithm::to_lower(variable);
           }
-          d_subKey = variable;
+          d_subKey = std::move(variable);
         }
         return;
       }
@@ -383,7 +411,7 @@ const ProtoBufMetaKey::TypeContainer ProtoBufMetaKey::s_types = {
                                             auto tag = key;
                                             tag.append(":");
                                             tag.append(value);
-                                            result.push_back(tag);
+                                            result.push_back(std::move(tag));
                                           }
                                         }
                                         return result;

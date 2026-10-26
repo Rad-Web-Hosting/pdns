@@ -22,8 +22,13 @@
 
 #include "dnsdist-idstate.hh"
 #include "dnsdist-doh-common.hh"
+#include "dnsdist-opentelemetry.hh"
+#include "dnsdist-protobuf.hh"
 #include "doh3.hh"
 #include "doq.hh"
+#include "protozero.hh"
+#include <string>
+#include <string_view>
 
 InternalQueryState InternalQueryState::partialCloneForXFR() const
 {
@@ -52,5 +57,116 @@ InternalQueryState InternalQueryState::partialCloneForXFR() const
   ids.cs = cs;
   /* in case we want to support XFR over DoH, or the stream ID becomes used for QUIC */
   ids.d_streamID = d_streamID;
+#if !defined(DISABLE_PROTOBUF)
+  ids.d_rawProtobufContent = d_rawProtobufContent;
+#endif
   return ids;
+}
+
+InternalQueryState::~InternalQueryState()
+{
+#ifndef DISABLE_PROTOBUF
+  try {
+    if (delayedResponseMsgs.empty() && ottraceLoggers.empty()) {
+      return;
+    }
+
+    std::string OTData;
+    static thread_local string pbBuf;
+    pbBuf.clear();
+
+    if (tracingEnabled && d_OTTracer != nullptr) {
+      pdns::ProtoZero::Message msg{pbBuf};
+      OTData = d_OTTracer->getOTProtobuf();
+      msg.setOpenTelemetryData(OTData);
+    }
+
+    if (!delayedResponseMsgs.empty()) {
+      for (auto const& msg_logger : delayedResponseMsgs) {
+        // TODO: we should probably do something with the return value of queueData
+        if (!tracingEnabled) {
+          msg_logger.second->queueData(msg_logger.first);
+          continue;
+        }
+        // Protobuf wireformat allows us to simply append the second "message"
+        // that only contains the OTTrace data as a single bytes field
+        msg_logger.second->queueData(msg_logger.first + pbBuf);
+      }
+    }
+
+    pdns::trace::dnsdist::sendTracesToRemoteLoggers(d_OTTracer, ottraceLoggers);
+  }
+  catch (...) {
+    /* We don't want any uncaught exceptions in a dtor and
+       in theory the protozero code can throw */
+  }
+#endif
+}
+
+std::optional<pdns::trace::dnsdist::Tracer::Closer> InternalQueryState::getCloser([[maybe_unused]] const std::string_view& name, [[maybe_unused]] const SpanID& parentSpanID)
+{
+  std::optional<pdns::trace::dnsdist::Tracer::Closer> ret{std::nullopt};
+#ifndef DISABLE_PROTOBUF
+  // getTracer returns a Tracer when tracing is globally enabled
+  // tracingEnabled tells us whether or not tracing is enabled for this query
+  // Should tracing be disabled, *but* we have not processed query rules, we will still return a closer if tracing is globally enabled
+  if (auto& tracer = getTracer(); tracer != nullptr && (tracingEnabled || !rulesAppliedToQuery)) {
+    ret = d_OTTracer->openSpan(std::string(name), parentSpanID);
+  }
+#endif
+  return ret;
+}
+
+std::optional<pdns::trace::dnsdist::Tracer::Closer> InternalQueryState::getCloser([[maybe_unused]] const std::string_view& name, [[maybe_unused]] const std::string_view& parentSpanName)
+{
+  std::optional<pdns::trace::dnsdist::Tracer::Closer> ret{std::nullopt};
+#ifndef DISABLE_PROTOBUF
+  if (auto& tracer = getTracer(); tracer != nullptr) {
+    auto parentSpanID = d_OTTracer->getLastSpanIDForName(std::string(parentSpanName));
+    ret = getCloser(name, parentSpanID);
+  }
+#endif
+  return ret;
+}
+
+std::optional<pdns::trace::dnsdist::Tracer::Closer> InternalQueryState::getCloser([[maybe_unused]] const std::string_view& name)
+{
+  std::optional<pdns::trace::dnsdist::Tracer::Closer> ret{std::nullopt};
+#ifndef DISABLE_PROTOBUF
+  if (auto& tracer = getTracer(); tracer != nullptr) {
+    ret = getCloser(std::string(name), tracer->getLastSpanID());
+  }
+#endif
+  return ret;
+}
+
+std::optional<pdns::trace::dnsdist::Tracer::Closer> InternalQueryState::getRulesCloser([[maybe_unused]] const std::string_view& ruleName, [[maybe_unused]] const std::string& ruleType)
+{
+  std::optional<pdns::trace::dnsdist::Tracer::Closer> ret{std::nullopt};
+#ifndef DISABLE_PROTOBUF
+  static const std::string prefix = "Rule: ";
+  // getTracer returns a Tracer when tracing is globally enabled
+  // tracingEnabled tells us whether or not tracing is enabled for this query
+  // Should tracing be disabled, *but* we have not processed query rules, we will still return a closer if tracing is globally enabled
+  if (auto& tracer = getTracer(); tracer != nullptr && (tracingEnabled || !rulesAppliedToQuery)) {
+    auto parentSpanID = tracer->getLastSpanID();
+    auto name = ruleType + prefix + std::string(ruleName);
+    ret = tracer->openSpan(name, parentSpanID);
+  }
+#endif
+  return ret;
+}
+
+std::shared_ptr<const Logr::Logger> InternalQueryState::getLogger(std::shared_ptr<const Logr::Logger> parent) const
+{
+  if (!parent) {
+    parent = dnsdist::logging::getTopLogger("query-processing");
+  }
+  auto logger = parent->withValues("dns.question.name", Logging::Loggable(this->qname), "dns.question.type", Logging::Loggable(this->qtype), "dns.question.class", Logging::Loggable(this->qclass), "source.address", Logging::Loggable(this->origRemote), "destination.address", Logging::Loggable(this->origDest), "proto", Logging::Loggable(this->protocol), "dns.question.id", Logging::Loggable(ntohs(this->origID)), "dns.question.flags", Logging::Loggable(this->origFlags));
+#ifndef DISABLE_PROTOBUF
+  if (d_OTTracer != nullptr) {
+    logger = logger->withValues("traceID", Logging::Loggable{d_OTTracer->getTraceID().toLogString()});
+  }
+#endif
+  return logger;
 }

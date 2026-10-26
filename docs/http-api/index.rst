@@ -3,6 +3,7 @@ Built-in Webserver and HTTP API
 
 The PowerDNS Authoritative Server features a built-in webserver that exposes a JSON/REST API.
 This API allows for controlling several functions, reading statistics and modifying zone content, metadata and DNSSEC key material.
+The API has an `OpenAPI definition <redoc.html>`__.
 
 Webserver
 ---------
@@ -15,12 +16,19 @@ The webserver does not allow remote management of the daemon, but allows control
 The following webserver related configuration items are available:
 
 * :ref:`setting-webserver`: If set to anything but 'no', a webserver is launched.
-* :ref:`setting-webserver-address`: Address to bind the webserver to. Defaults to 127.0.0.1, which implies that only the local computer is able to connect to the nameserver! To allow remote hosts to connect, change to 0.0.0.0 or the physical IP address of your nameserver.
-* :ref:`setting-webserver-password`: If set, viewers will have to enter this password in order to gain access to the statistics, in addition to entering the configured API key on the index page.
-* :ref:`setting-webserver-port`: Port to bind the webserver to.
-* :ref:`setting-webserver-allow-from`: Netmasks that are allowed to connect to the webserver
+* :ref:`setting-webserver-address`: IP address (or UNIX domain socket path, from version 5.0.0 onward) to bind the webserver to. Defaults to 127.0.0.1, which implies that only the local computer is able to connect to the nameserver! To allow remote hosts to connect, change to 0.0.0.0 or the physical IP address of your nameserver.
+* :ref:`setting-webserver-password`: If set, viewers will have to enter this password in order to gain access to the statistics, in addition to entering the configured API key on the index page. HTTP Basic authentication only validates the password; the username field is ignored.
+* :ref:`setting-webserver-port`: Port to bind the webserver to (not relevant if :ref:`setting-webserver-address` is set to a UNIX domain socket).
+* :ref:`setting-webserver-allow-from`: Netmasks that are allowed to connect to the webserver (not relevant if :ref:`setting-webserver-address` is set to a UNIX domain socket).
 * :ref:`setting-webserver-max-bodysize`: Maximum request/response body size in megabytes
 * :ref:`setting-webserver-connection-timeout`: Request/response timeout in seconds
+* :ref:`setting-webserver-max-concurrent-connections`: Maximum number of allowed concurrent connections to the web server.
+
+.. warning::
+
+   To achieve defense-in-depth, expose the webserver only to client addresses that have a real need for access, and configure a webserver password.
+   Network access is configured by setting :ref:`setting-webserver-address` and :ref:`setting-webserver-allow-from`.
+   Password protection is configured by setting :ref:`setting-webserver-password`.
 
 
 Metrics Endpoint
@@ -283,9 +291,7 @@ A simple ``GET`` request will return a response similar to the following:
   pdns_auth_user_msec 48
 
 
-Prometheus can then be configured to scrape metrics from this endpoint using a simple job description like the following:
-
-.. prometheus scrape-job::
+Prometheus can then be configured to scrape metrics from this endpoint using a simple job description like the following::
 
   scrape_configs:
     - job_name: 'pdns_auth'
@@ -300,7 +306,7 @@ Enabling the API
 ----------------
 
 To enable the API, the webserver and the HTTP API need to be enabled.
-Add these lines to the ``pdns.conf``::
+Add these lines to ``pdns.conf``::
 
   api=yes
   api-key=changeme
@@ -315,8 +321,8 @@ Working with the API
 
 This chapter describes the PowerDNS Authoritative API.
 When creating an API wrapper (for instance when fronting multiple API's), it is recommended to stick to this API specification.
-The API is described in the `OpenAPI format <https://www.openapis.org/>`_, also known as "Swagger", and this description is `available <https://raw.githubusercontent.com/PowerDNS/pdns/master/docs/http-api/swagger/authoritative-api-swagger.yaml>`_. It can also be obtained from a running server if the administrator of that server has enabled the API; it
-is available at the  `/api/docs` endpoint in both YAML and JSON formats (the 'Accept' header can be used to indicate the
+The API is described in the `OpenAPI 3.1 format <https://www.openapis.org/>`_, and this description is `available <https://raw.githubusercontent.com/PowerDNS/pdns/master/docs/http-api/openapi/authoritative-api-openapi.yaml>`_. It can also be obtained from a running server if the administrator of that server has enabled the API; it
+is available at the `/api/docs` endpoint in both YAML and JSON formats (the 'Accept' header can be used to indicate the
 desired format).
 
 Authentication
@@ -331,12 +337,11 @@ Response code ``4xx`` or ``5xx``, depending on the situation.
 
 -  Invalid JSON body from client: ``400 Bad Request``
 -  Input validation failed: ``422 Unprocessable Entity``
--  JSON body from client not a hash: ``400 Bad Request``
+-  JSON body from client is not a hash: ``400 Bad Request``
 
 Error responses have a JSON body of this format:
 
-.. openapi:: swagger/authoritative-api-swagger.yaml
-  :definitions: Error
+.. json:schema:: Error
 
 Data format
 ~~~~~~~~~~~
@@ -345,7 +350,7 @@ The API accepts and emits :rfc:`JSON <7159>`.
 The ``Accept:`` header determines the output format.
 An unknown value or ``*/*`` will cause a ``400 Bad Request``.
 
-All text is UTF-8 and HTTP headers will reflect this.
+All text is encoded in UTF-8 and HTTP headers will reflect this.
 
 Data types:
 
@@ -365,6 +370,8 @@ The API exposes several endpoints and objects:
 
   server
   zone
+  views
+  networks
   cryptokey
   metadata
   tsigkey

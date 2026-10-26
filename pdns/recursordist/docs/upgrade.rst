@@ -4,16 +4,178 @@ Upgrade Guide
 Before upgrading, it is advised to read the :doc:`changelog/index`.
 When upgrading several versions, please read **all** notes applying to the upgrade.
 
-5.1.0 to master
-----------------
+
+5.4.0 to 5.5.0 and master
+-------------------------
+
+Building
+^^^^^^^^
+Building using autotools is no longer possible, use meson. See :doc:`appendices/compiling`.
+
+Changed Behaviour
+^^^^^^^^^^^^^^^^^
+- A (re)load of an RPZ will wipe relevant packet cache entries. For a large RPZ, this can take some time. See :ref:`wipePacketCache`.
+
+Changed Settings
+^^^^^^^^^^^^^^^^
+- The :ref:`incoming-ws-config` YAML struct has been extended to be able to specify an encrypted PKCS12 file to configure TLS key and certificate chain for the embedded web server.
+
+- The :ref:`outgoing-tls-configuration` YAML struct has been extended to be able to specify an TLS client certificate to be used for outgoing DoT connections.
+
+New Settings
+^^^^^^^^^^^^
+- The :ref:`setting-yaml-recordcache.keepwarm` setting has been introduced to allow names in the record cache to be kept up to date (even when not queried).
+- The :ref:`setting-yaml-recursor.taskthreads` setting has been introduced to allow for more asynchronous task threads to be spawned.
+- The :ref:`setting-yaml-webservice.max_request_size` setting has been introduced to limit the maximum size of web requests.
+- The :ref:`setting-yaml-dnssec.nta_extended_error` setting has been introduced, disabled by default.
+  When enabled and a Negative Trust Anchor is in effect, the recursor adds an EDNS Extended Error (:rfc:`8914`) with info-code 33 ("Negative Trust Anchor") to insecure responses covered by the NTA as a diagnostic signal.
+  It does not change validation or the AD bit.
+  Because responses are packet-cached, adding or removing an NTA only affects the presence of this Extended Error once the relevant cache entries expire or are flushed.
+  See :ref:`ntas`.
+- The :ref:`setting-yaml-recursor.serve_rfc6761` setting has been introduced to NXDomain .test and .invalid by default, unless any subdomains are forwarded.
+
+Special-Use Domain Names
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Several special use domains have been added. These domains (and names under them) should not be sent to authoritatives on the Internet, and will be responded to with an NXDOMAIN response.
+However, these domains and names under them can still be forwarded or served locally by :program:`PowerDNS Recursor`.
+This is the case for the following domains:
+
+* .onion, specified in :rfc:`7686`.
+* .test, specified in :rfc:`6761`
+* .invalid, specified in :rfc:`6761`
+* home.arpa, specified in :rfc:`8375`
+* resolver.arpa, specified in :rfc:`9462`
+* service.arpa, specified in :rfc:`9665`
+
+5.1.10, 5.2.8, 5.3.5 and 5.5.0
+------------------------------
+
+New settings
+^^^^^^^^^^^^
+- The :ref:`setting-yaml-outgoing.max_bytesperq` setting has been introduced to limit the amount of incoming bytes per client query.
+- The :ref:`setting-yaml-recordcache.max_entry_size` setting has been introduced to limit the maximum size of a stored record set.
+- The :ref:`setting-yaml-packetcache.max_entry_size` setting has been introduced to limit the maximum size of a packet cache entry.
+- The :ref:`setting-yaml-webservice.cross_origin_request_header` setting has been introduced, default is not set. This is a change of behaviour, as older versions do set the access-control-allow-origin header.
+
+
+5.3.0 to 5.4.0
+---------------
+
+New Settings
+^^^^^^^^^^^^
+
+- The :ref:`setting-yaml-outgoing.cookies` setting has been introduced to implement cookie support for contacting authoritative servers and forwarders. See :rfc:`7873` and :rfc:`9018`.
+- The :ref:`setting-yaml-outgoing.cookies_unsupported` setting has been introduced to permanently mark authoritative servers as not supporting cookies.
+- The :ref:`setting-yaml-outgoing.tls_configurations` setting has been introduced to be able to force certificate validation and other properties of outgoing DoT connections.
+- The :ref:`setting-yaml-outgoing.any_to_tcp` setting has been introduced to force outgoing ANY queries to TCP.
+- The :ref:`setting-yaml-logging.opentelemetry_trace_conditions` setting has been introduced to only generate OpenTelemetry Trace data for specific queries from specific clients.
+  See :ref:`opentelemetry-trace-conditions` for details.
+
+Changed Settings
+^^^^^^^^^^^^^^^^
+
+- The default value of :ref:`setting-yaml-recursor.any_to_tcp` has been changed to ``true``.
+- It is no longer necessary to set :ref:`setting-yaml-webservice.api_key` to enable the web service.
+  When no API key is set, usage is limited to (potentially password based) access of the frontpage and related statistics calls.
+  If you have a configuration where the webservice is enabled but no api key is set, the webservice will now become available where it was not before.
+
+:program:`rec_control`
+^^^^^^^^^^^^^^^^^^^^^^
+
+- The ``dump-cookies`` subcommand has been added to dump a table showing cookie support for each authoritative server contacted recently.
+- The ``clear-cookies`` subcommand has been added to clear entries from the cookie support table.
+- The ``add-cookies-unsupported`` subcommand has been added to mark an authoritative server as not supporting cookies.
+
+5.2.0 to 5.3.0
+--------------
 
 Changed behaviour
------------------
+^^^^^^^^^^^^^^^^^
+
+Reloading ACLs using ``rec_control reload-acls`` now also reloads the proxy-protocol related settings.
+
+The :program:`Recursor` now listens on ``::1`` in addition to ``127.0.0.1`` by default.
+It is not an error if listening on ``::1`` fails.
+
+New Settings
+^^^^^^^^^^^^
+The embedded webserver implementation used to process REST calls and display the status page has been rewritten in Rust.
+The ``webservice`` YAML section gained a new field: :ref:`setting-yaml-webservice.listen`, which has two fields: ``addresses`` and ``tls``, allowing multiple listen addresses and incoming TLS.
+If the :ref:`setting-yaml-webservice.listen` field is set, the  :ref:`setting-yaml-webservice.address` and  :ref:`setting-yaml-webservice.port` fields will be ignored.
+Existing configurations remain working as before. See :ref:`incoming-ws-config`.
+
+The fieldnames of YAML configuration items corresponding to the old-style Lua configuration items have gained aliases following the YAML naming conventions used elsewhere.
+For example ``protobuf_servers.exportTypes`` now has an alias ``protobuf_servers.export_types``.
+
+Changed Settings
+^^^^^^^^^^^^^^^^
+
+The :ref:`setting-yaml-recursor.event_trace_enabled` setting has gained a value to allow openTelemetry Trace data to be included in the Protobuf log stream.
+
+5.0.12, 5.1.6, 5.2.4 and 5.3.0
+------------------------------
+
+New settings
+^^^^^^^^^^^^
+- The :ref:`setting-yaml-outgoing.edns_subnet_harden` setting has been introduced to allow for more strict checking of ECS enabled answers.
+
+5.1.0 to 5.2.0
+--------------
+
+Changed behaviour
+^^^^^^^^^^^^^^^^^
+
+.. warning::
+
+  **Parsing of old-style settings is no longer enabled by default.**
+
+  This means that after upgrading an existing installation using old-style settings to 5.2.0 the updated install will fail to start.
+  Convert your settings file to YAML (see :doc:`appendices/yamlconversion`) or pass ``--enable-old-settings`` on the command line.
+
 The way :ref:`setting-yaml-incoming.max_tcp_clients` is enforced has changed.
 If there are too many incoming TCP connections, new connections will be accepted but then closed immediately.
 Previously, excess connections would linger in the OS listen queue until timeout or until processing of incoming TCP connections resumed due to the number of connections being processed dropping below the limit.
 There is a new metric ``tcp-overflow`` that counts the connections closed immediately.
 
+The ``outqueries-per-query`` value reported in the log by the periodic statistics function is now reported as ``outqueries-per-query-perc`` as it is a percentage.
+A value of 1 means that on average each 100 incoming queries lead to a single query to an authoritative server.
+
+A new ``rec_control reload-yaml`` command has been introduced as an alias for ``reload-lua-config``.
+Both commands will (if YAML settings are active), reload the runtime reloadable parts of the YAML settings.
+These are the YAML settings that correspond to Lua configuration items, plus a few new settings that have no Lua equivalent.
+The documentation has been updated to state more clearly which settings can be modified at runtime.
+
+The built-in trust anchors now include the DS record for the new Key Signing Key (KSK-2024) which will be used by the root zone starting October 11th 2026. See `IANA's information page <https://www.iana.org/dnssec/files>`__.
+
+Changed settings
+^^^^^^^^^^^^^^^^
+
+- The :ref:`setting-yaml-incoming.max_tcp_clients` default value has been raised 1024.
+- The :ref:`setting-yaml-outgoing.udp_source_port_avoid` default value now includes port 4791.
+
+New Settings
+^^^^^^^^^^^^
+
+- The :ref:`setting-yaml-recursor.serve_rfc6303` settings has been introduced to implement :rfc:`6303`. By default this setting is enabled so this potentially changes behaviour for names inside the ``ip6.arpa`` domain.
+- The :ref:`setting-yaml-recursor.lua_start_stop_script` settings has been introduced to specify Lua scripts to run on startup and shutdown.
+- The :ref:`setting-yaml-recursor.forwarding_catalog_zones` settings has been introduced to populate forwarding zones using catalog zones.
+
+5.1.2 to 5.1.3
+--------------
+
+New Settings
+^^^^^^^^^^^^
+
+- The :ref:`setting-serve-rfc6303` settings has been introduced to implement :rfc:`6303`. By default this setting is enabled so this potentially changes behaviour for names inside the ``ip6.arpa`` domain.
+
+5.1.1 to 5.1.2, 5.0.8 to 5.0.9 and 4.9.8 to 4.9.9
+-------------------------------------------------
+
+New settings
+^^^^^^^^^^^^
+- The :ref:`setting-yaml-recordcache.max_rrset_size` setting has been introduced to limit the number of records in a result set.
+- The :ref:`setting-yaml-recordcache.limit_qtype_any` setting has been introduced to limit the number of records in answers to ANY queries.
 
 5.0.6 to 5.1.0
 --------------
@@ -135,7 +297,7 @@ Changed settings
 Metrics
 ^^^^^^^
 The way metrics are collected has been changed to increase performance, especially when many thread are used.
-This allows for solving a long standing issue that some statistics were not updated on packet cache hits.
+This allows for solving a long-standing issue that some statistics were not updated on packet cache hits.
 This is now resolved, but has the consequence that some metrics (in particular response related ones) changed behaviour as they now also reflect packet cache hits, while they did not before.
 This affects the results shown by ``rec_control get-qtypelist`` and the ``response-by-qtype``, ``response-sizes`` and ``response-by-rcode`` items returned by the ``/api/v1/servers/localhost/statistics`` API endpoint.
 Additionally, most ``RCodes`` and ``QTypes`` that are marked ``Unassigned``, ``Reserved`` or ``Obsolete`` by IANA are not accounted, to reduce the memory consumed by these metrics.
@@ -154,7 +316,7 @@ New settings
 
 Changed settings
 ^^^^^^^^^^^^^^^^
-The first two settings below have effect on the way the recursor distributes queries over threads.
+The first two settings below have effect on the way that the recursor distributes queries over threads.
 In some cases, this can lead to imbalance of the number of queries process per thread.
 See :doc:`performance`, in particular the :ref:`worker_imbalance` section.
 
@@ -286,7 +448,7 @@ New settings
 - The :ref:`setting-ignore-unknown-settings` setting has been introduced to make it easier to switch between recursor versions supporting different settings.
 - The :ref:`setting-webserver-hash-plaintext-credentials` has been introduced to avoid keeping cleartext sensitive information in memory.
 - The :ref:`setting-tcp-out-max-idle-ms`, :ref:`setting-tcp-out-max-idle-per-auth`, :ref:`setting-tcp-out-max-queries` and :ref:`setting-tcp-out-max-idle-per-thread` settings have been introduced to control the new TCP/DoT outgoing connections pooling. This mechanism keeps connections to authoritative servers or forwarders open for later re-use.
-- The :ref:`setting-structured-logging` setting has been introduced to prefer structured logging (the default) when both an old style and a structured log messages is available.
+- The :ref:`setting-structured-logging` setting has been introduced to prefer structured logging (the default) when both an old style and a structured log message are available.
 - The :ref:`setting-max-include-depth` setting has been introduced to limit the number of nested ``$include`` directives while processing a zone file.
 - The :ref:`setting-allow-notify-for`, :ref:`setting-allow-notify-for-file`, :ref:`setting-allow-notify-from` and :ref:`setting-allow-notify-from-file` settings have been introduced, allowing incoming notify queries to clear cache entries.
 
@@ -324,14 +486,14 @@ Offensive language
 Synonyms for various settings names containing ``master``, ``slave``,
 ``whitelist`` and ``blacklist`` have been introduced.
 
-- For :ref:`setting-stats-api-blacklist` use :ref:`setting-stats-api-disabled-list`.
-- For :ref:`setting-stats-carbon-blacklist` use :ref:`setting-stats-carbon-disabled-list`.
-- For :ref:`setting-stats-rec-control-blacklist` use :ref:`setting-stats-rec-control-disabled-list`.
-- For :ref:`setting-stats-snmp-blacklist` use :ref:`setting-stats-snmp-disabled-list`.
-- For :ref:`setting-edns-subnet-whitelist` use :ref:`setting-edns-subnet-allow-list`.
-- For :ref:`setting-new-domain-whitelist` use  :ref:`setting-new-domain-ignore-list`.
-- For :ref:`setting-snmp-master-socket` use :ref:`setting-snmp-daemon-socket`.
-- For the LUA config function :func:`rpzMaster` use :func:`rpzPrimary`.
+- For ``setting-stats-api-blacklist`` use :ref:`setting-stats-api-disabled-list`.
+- For ``setting-stats-carbon-blacklist`` use :ref:`setting-stats-carbon-disabled-list`.
+- For ``setting-stats-rec-control-blacklist`` use :ref:`setting-stats-rec-control-disabled-list`.
+- For ``setting-stats-snmp-blacklist`` use :ref:`setting-stats-snmp-disabled-list`.
+- For ``setting-edns-subnet-whitelist`` use :ref:`setting-edns-subnet-allow-list`.
+- For ``setting-new-domain-whitelist`` use  :ref:`setting-new-domain-ignore-list`.
+- For ``setting-snmp-master-socket`` use :ref:`setting-snmp-daemon-socket`.
+- For the LUA config function ``rpzMaster`` use :func:`rpzPrimary`.
 
 Currently, the older setting names are also accepted and used.
 The next release will start deprecating them.

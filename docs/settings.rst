@@ -77,7 +77,7 @@ will drop all incoming notifies.
 -  Default: yes
 
 Turning this off requires all autoprimary notifications to be signed by
-valid TSIG signature. It will accept any existing key on slave.
+valid TSIG signature. It will accept any existing key on secondaries.
 
 .. _setting-allow-unsigned-notify:
 
@@ -181,7 +181,7 @@ Maximum time in seconds for inbound AXFR to start or be idle after starting.
 -  Boolean
 -  Default: no
 
-Also AXFR a zone from a master with a lower serial.
+Also AXFR a zone from a primary with a lower serial.
 
 .. _setting-cache-ttl:
 
@@ -392,8 +392,10 @@ When a primary zone is created via the API, and the request does not specify a c
 -  String
 -  Default: ecdsa256
 
-The algorithm that should be used for the KSK when running
-:doc:`pdnsutil secure-zone <manpages/pdnsutil.1>` or using the :doc:`Zone API endpoint <http-api/cryptokey>`
+The default algorithm for creating zone keys when running
+:doc:`pdnsutil zone add-key <manpages/pdnsutil.1>` if no algorithm is specified,
+and also the algorithm that should be used for the KSK when running
+:doc:`pdnsutil zone secure <manpages/pdnsutil.1>` or using the :doc:`Zone API endpoint <http-api/cryptokey>`
 to enable DNSSEC. Must be one of:
 
 * rsasha1
@@ -417,7 +419,7 @@ to enable DNSSEC. Must be one of:
 -  Integer
 -  Default: whichever is default for `default-ksk-algorithm`_
 
-The default keysize for the KSK generated with :doc:`pdnsutil secure-zone <dnssec/pdnsutil>`.
+The default keysize for the KSK generated with :doc:`pdnsutil zone secure <dnssec/pdnsutil>`.
 Only relevant for algorithms with non-fixed keysizes (like RSA).
 
 .. _setting-default-publish-cdnskey:
@@ -467,6 +469,7 @@ This value is used when a zone is created without providing a SOA record. @ is r
 
 Use this soa-edit value for all zones if no
 :ref:`metadata-soa-edit` metadata value is set.
+This is used by :doc:`pdnsutil zone increase-serial <manpages/pdnsutil.1>`.
 
 .. _setting-default-soa-edit-signed:
 
@@ -480,6 +483,22 @@ Use this soa-edit value for all signed zones if no
 :ref:`metadata-soa-edit` metadata value is set.
 Overrides :ref:`setting-default-soa-edit`
 
+.. _setting-default-soa-edit-api:
+
+``default-soa-edit-api``
+------------------------
+
+-  String
+-  Default: DEFAULT
+
+.. versionadded:: 5.1.0
+
+The default :ref:`metadata-soa-edit-api` metadata value for zones created via
+the API when the zone creation request does not include the ``soa_edit_api`` field.
+Set to empty string to disable automatic SOA serial updates via the API.
+
+See :ref:`metadata-soa-edit-api` for the list of possible values.
+
 .. _setting-default-soa-mail:
 
 ``default-soa-mail``
@@ -488,7 +507,7 @@ Overrides :ref:`setting-default-soa-edit`
 -  String
 
 .. deprecated:: 4.2.0
-  This setting has been removed in 4.4.0
+  This setting was removed in 4.4.0
 
 Mail address to insert in the SOA record if none set in the backend.
 
@@ -501,7 +520,7 @@ Mail address to insert in the SOA record if none set in the backend.
 -  Default: a.misconfigured.dns.server.invalid
 
 .. deprecated:: 4.2.0
-  This setting has been removed in 4.4.0
+  This setting was removed in 4.4.0
 
 Name to insert in the SOA record if none set in the backend.
 
@@ -524,8 +543,10 @@ TTL to use when none is provided.
 -  String
 -  Default: (empty)
 
-The algorithm that should be used for the ZSK when running
-:doc:`pdnsutil secure-zone <manpages/pdnsutil.1>` or using the :doc:`Zone API endpoint <http-api/cryptokey>`
+The default algorithm for creating zone keys when running
+:doc:`pdnsutil zone add-key <manpages/pdnsutil.1>` if no algorithm is specified,
+and also the algorithm that should be used for the ZSK when running
+:doc:`pdnsutil zone secure <manpages/pdnsutil.1>` or using the :doc:`Zone API endpoint <http-api/cryptokey>`
 to enable DNSSEC. Must be one of:
 
 * rsasha1
@@ -549,7 +570,7 @@ to enable DNSSEC. Must be one of:
 -  Integer
 -  Default: 0 (automatic default for `default-zsk-algorithm`_)
 
-The default keysize for the ZSK generated with :doc:`pdnsutil secure-zone <dnssec/pdnsutil>`.
+The default keysize for the ZSK generated with :doc:`pdnsutil zone secure <dnssec/pdnsutil>`.
 Only relevant for algorithms with non-fixed keysizes (like RSA).
 
 .. _setting-delay-notifications:
@@ -570,8 +591,26 @@ Configure a delay to send out notifications, no delay by default.
 -  Boolean
 -  Default: no
 
-Read additional DNSKEY, CDS and CDNSKEY records from the records table/your BIND zonefile. If not
-set, DNSKEY, CDS and CDNSKEY records in the zonefiles are ignored.
+Read additional DNSKEY records from the records table/your BIND zonefile and use both when
+preparing responses. If not set, such records in the zonefiles are ignored.
+
+When automatic CDS and CDNSKEY publication (see :ref:`metadata-publish-cdnskey-publish-cds`)
+is enabled, this also applies to those types. If not set, such records are only considered
+when automatic publication is turned off.
+
+.. _setting-direct-dnskey-signature:
+
+``direct-dnskey-signature``
+---------------------------
+
+-  Boolean
+-  Default: no
+
+.. versionadded:: 5.0.0
+
+Read signatures of DNSKEY records directly from the backend.
+If not set and the record is not presigned, DNSKEY records will be signed directly by PDNS Authoritative.
+Please only use this if you are sure that you need it.
 
 .. _setting-disable-axfr:
 
@@ -713,13 +752,20 @@ disables caching.
 
 .. versionadded:: 4.6.0
 
--  String
+.. versionchanged:: 5.2.0
+  This setting now accepts a list
+
+-  Strings, separated by commas
 -  Default: (empty)
 
 When set, PowerDNS will respond with :rfc:`9018` EDNS Cookies to queries that have the EDNS0 Cookie option.
 PowerDNS will also respond with BADCOOKIE to clients that have sent only a client cookie, or a bad server cookie (section 5.2.3 and 5.2.4 of :rfc:`7873`).
+The first secret is used to create new Cookies, all secrets are used to validate Cookies.
 
-This setting MUST be 32 hexadecimal characters, as the siphash algorithm's key used to create the cookie requires a 128-bit key.
+Each secret MUST be 32 hexadecimal characters, as the siphash algorithm's key used to create the cookie requires a 128-bit key.
+
+Alternatively, starting with version 5.0.0, the first secret can be set to
+``random``, in which case a random cookie value will be generated upon startup.
 
 .. _setting-edns-subnet-processing:
 
@@ -754,10 +800,27 @@ Globally enable the :doc:`LUA records <lua-records/index>` feature.
 
 To use shared LUA states, set this to ``shared``, see :ref:`lua-records-shared-state`.
 
+.. _setting-enable-lua-record-updates:
+
+``enable-lua-record-updates``
+-----------------------------
+
+.. versionadded:: 5.1.0
+
+-  Boolean
+-  Default: no
+
+Allow updating :doc:`LUA records <lua-records/index>` as part of AXFR/IXFR,
+DNS Update or API operations.
+
 .. _setting-entropy-source:
 
 ``entropy-source``
 ------------------
+
+.. versionchanged:: 4.9.0
+
+This setting is no longer used from 4.9.0 onwards.
 
 -  Path
 -  Default: /dev/urandom
@@ -785,15 +848,32 @@ the server will return NODATA for A/AAAA queries for such names.
   In PowerDNS Authoritative Server 4.0.x, this setting did not exist and
   ALIAS was always expanded.
 
+.. _setting-resolve-across-zones:
+
+``resolve-across-zones``
+------------------------
+
+.. versionadded:: 5.0.0
+
+-  Boolean
+-  Default: yes
+
+If this is enabled, CNAME records and other referrals will be resolved as long as their targets exist in any local backend.
+Can be disabled to allow for different authorities managing zones in the same server instance.
+
+Referrals not available in local backends are never resolved.
+SVCB referrals are never resolved across zones.
+ALIAS is not impacted by this setting.
+
 .. _setting-forward-dnsupdate:
 
 ``forward-dnsupdate``
 ---------------------
 
 -  Boolean
--  Default: no
+-  Default: yes
 
-Forward DNS updates sent to a slave to the master.
+Forward DNS updates sent to a secondary to the primary.
 
 .. _setting-forward-notify:
 
@@ -801,9 +881,10 @@ Forward DNS updates sent to a slave to the master.
 ------------------
 
 -  IP addresses, separated by commas
+-  Default: empty
 
-IP addresses to forward received notifications to regardless of master
-or slave settings.
+IP addresses to forward received notifications to regardless of primary
+or secondary settings.
 
 .. note::
   The intended use is in anycast environments where it might be
@@ -1002,6 +1083,19 @@ Disable this if the process supervisor timestamps these lines already.
 If set to a digit, logging is performed under this LOCAL facility. See :ref:`logging-to-syslog`.
 Do not pass names like 'local0'!
 
+.. _setting-logging-structured:
+
+``logging-structured``
+----------------------
+
+- Bool
+- Default: no
+
+.. versionadded:: 5.1.0
+
+When enabled, log messages are formatted as structured logs, to help software
+analysis.
+
 .. _setting-loglevel:
 
 ``loglevel``
@@ -1069,6 +1163,8 @@ Amount of time (in seconds) a pre-computed hash entry will be considered as expi
 -  String
 -  Default: empty
 -  Example: ``/etc/pdns/lua-global/``
+
+.. versionadded:: 5.0.0
 
 When creating a Lua context, scan this directory for additional lua files. All files that end with
 .lua are loaded in order using ``POSIX`` as locale with Lua scripts.
@@ -1145,7 +1241,7 @@ When combining the ``"`` delimited chunks of a LUA record, whether to insert whi
 -  Boolean
 -  Default: no
 
-Turn on master support. See :ref:`master-operation`.
+Turn on primary support. See :ref:`primary-operation`.
 
 .. _setting-max-cache-entries:
 
@@ -1206,6 +1302,51 @@ For more information see :ref:`dnssec-operational-nsec-modes-params`.
 
 .. note::
   Pre 4.5.0 the default was 500.
+
+.. _setting-max-pointers-per-name:
+
+``max-pointers-per-name``
+-------------------------
+
+-  Integer
+-  Default: 10
+
+Maximum number of name pointers followed per name.
+DNS packets needing more than the limit will fail to parse and be rejected.
+
+.. versionadded:: 5.1.5
+.. versionadded:: 5.0.8
+.. versionadded:: 4.9.18
+
+.. _setting-max-pointers-per-packet-byte:
+
+``max-pointers-per-packet-byte``
+--------------------------------
+
+-  Integer
+-  Default: 4
+
+Maximum number of name pointers per DNS packet byte followed.
+DNS packets needing more than the limit will fail to parse and be rejected.
+
+.. versionadded:: 5.1.5
+.. versionadded:: 5.0.8
+.. versionadded:: 4.9.18
+
+.. _setting-max-pointers-to-pointers:
+
+``max-pointers-to-pointers``
+----------------------------
+
+-  Integer
+-  Default: 4
+
+Maximum number of name pointers pointing to directly another pointer per name.
+DNS packets needing more than the limit will fail to parse and be rejected.
+
+.. versionadded:: 5.1.5
+.. versionadded:: 5.0.8
+.. versionadded:: 4.9.18
 
 .. _setting-max-packet-cache-entries:
 
@@ -1287,6 +1428,18 @@ Allow this many DNS queries in a single TCP transaction. 0 means
 unlimited. Note that exchanges related to an AXFR or IXFR are not
 affected by this setting.
 
+.. _setting-member-catalog-group:
+
+``member-catalog-group``
+------------------------
+
+-  String
+-  Default: pdns-member-catalog
+
+.. versionadded:: 5.1.0
+
+Catalog group used to signal that a member zone is a catalog.
+
 .. _setting-module-dir:
 
 ``module-dir``
@@ -1296,6 +1449,18 @@ affected by this setting.
 
 Directory for modules. Default depends on ``PKGLIBDIR`` during
 compile-time.
+
+.. _setting-naptr-additional-processing:
+
+``naptr-additional-processing``
+-------------------------------
+
+-  Boolean
+-  Default: yes
+
+.. versionadded:: 5.1.4
+
+Add NAPTR `a` and `s` records to the additional answer section.
 
 .. _setting-negquery-cache-ttl:
 
@@ -1351,7 +1516,7 @@ this reason it is disabled by default.
 -  IP Ranges, separated by commas or whitespace
 -  Default: 0.0.0.0/0, ::/0
 
-For type=MASTER zones (or SLAVE zones with slave-renotify enabled)
+For type=MASTER zones (or SLAVE zones with :ref:`setting-secondary-do-renotify` enabled)
 PowerDNS automatically sends NOTIFYs to the name servers specified in
 the NS records. By specifying networks/mask as whitelist, the targets
 can be limited. The default is to notify the world. To completely
@@ -1377,11 +1542,11 @@ To notify all IP addresses apart from the 192.168.0.0/24 subnet use the followin
   :ref:`metadata-also-notify` zone metadata to avoid this potential bottleneck.
 
 .. note::
-  If your slaves support an Internet Protocol version, which your master does not,
+  If your secondaries support an Internet Protocol version, which your primary does not,
   then set ``only-notify`` to include only supported protocol version.
-  Otherwise there will be error trying to resolve address.
+  Otherwise, there will be error trying to resolve address.
 
-  For example, slaves support both IPv4 and IPv6, but PowerDNS master have only IPv4,
+  For example, secondaries support both IPv4 and IPv6, but PowerDNS primary have only IPv4,
   so allow only IPv4 with ``only-notify``:
 
   .. code-block:: ini
@@ -1434,9 +1599,22 @@ be dropped, and :ref:`stat-overload-drops` will be incremented.
 -  Default: yes
 
 PowerDNS Authoritative Server attempts to not send out notifications to
-itself in master mode. In very complicated situations we could guess
+itself in primary mode. In very complicated situations we could guess
 wrong and not notify a server that should be notified. In that case, set
 prevent-self-notification to "no".
+
+.. _setting-pkcs11:
+
+``pkcs11``
+----------
+
+.. versionadded:: 5.2.0
+
+- Boolean
+- Default: no
+
+When the PowerDNS Authoritative server is built with support for :doc:`PKCS#11 <dnssec/pkcs11>`,
+this switch enables the PKCS#11 engine.
 
 .. _setting-primary:
 
@@ -1450,6 +1628,19 @@ prevent-self-notification to "no".
 -  Default: no
 
 Turn on operating as a primary. See :ref:`primary-operation`.
+
+.. _setting-protobuf-servers:
+
+``protobuf-servers``
+--------------------
+
+.. versionadded:: 5.1.0
+
+-  IP addresses with ports, separated by commas
+-  Default: empty
+
+Servers to send Protobuf logging to.
+This currently sends both questions and responses, but without answer data.
 
 .. _setting-proxy-protocol-from:
 
@@ -1565,6 +1756,10 @@ Examples::
   resolver=127.0.0.1
   resolver=[::1]:5300
 
+.. warning::
+  You should make sure that the :ref:`setting-resolver` does not point to
+  PowerDNS itself, to prevent infinite query loops.
+
 .. _setting-retrieval-threads:
 
 ``retrieval-threads``
@@ -1573,7 +1768,7 @@ Examples::
 -  Integer
 -  Default: 2
 
-Number of AXFR slave threads to start.
+Number of AXFR secondary threads to start.
 
 .. _setting-reuseport:
 
@@ -1598,6 +1793,10 @@ it is disabled by default.
 ``rng``
 -------
 
+.. versionchanged:: 4.9.0
+
+This setting is no longer used from 4.9.0 onwards.
+
 - String
 - Default: auto
 
@@ -1613,6 +1812,21 @@ Specify which random number generator to use. Permissible choices are:
 
 .. note::
   Not all choices are available on all systems.
+
+.. _setting-rrsig-expiry-extend:
+
+``rrsig-expiry-extend``
+-----------------------
+
+.. versionadded:: 5.1.3
+
+- Integer (seconds)
+- Default: ``soa-edit-spread``
+- Valid range: 0..31536000 (zero seconds to one year), or special value ``soa-edit-spread``
+
+Seconds to extend RRSIG expiry by.
+This is added to the default 3 week span described in :ref:`dnssec-signatures`.
+If set to ``soa-edit-spread`` (the default), this copies the value of :ref:`setting-soa-edit-spread`, extending all RRSIG expiries by that full number.
 
 .. _setting-secondary:
 
@@ -1666,7 +1880,7 @@ this to an empty string disables secpoll.
 If yes, outgoing NOTIFYs will be signed if a TSIG key is configured for the zone.
 If there are multiple TSIG keys configured for a zone, PowerDNS will use the
 first one retrieved from the backend, which may not be the correct one for the
-respective slave. Hence, in setups with multiple slaves with different TSIG keys
+respective secondary. Hence, in setups with multiple slaves with different TSIG keys
 it may be required to send NOTIFYs unsigned.
 
 .. _setting-server-id:
@@ -1738,11 +1952,25 @@ signing speed by changing this number.
 -  Boolean
 -  Default: no
 
-This setting will make PowerDNS renotify the slaves after an AXFR is
-*received* from a master. This is useful when running a
-signing-slave.
+This setting will make PowerDNS renotify the secondaries after an AXFR is
+*received* from a primary. This is useful when running a
+signing-secondary.
 
 See :ref:`metadata-slave-renotify` to set this per-zone.
+
+.. _setting-soa-edit-spread:
+
+``soa-edit-spread``
+-------------------
+
+.. versionadded:: 5.1.3
+
+-  Integer (seconds)
+-  Default: 0
+-  Valid range: 0..604800
+
+If set to a non-zero value, SOA-EDIT will apply serial increases to different zones at different times.
+Over the configured spread time, a time will be chosen for each zone based on a hash over the zone name (including variant).
 
 .. _setting-soa-expire-default:
 
@@ -1753,7 +1981,7 @@ See :ref:`metadata-slave-renotify` to set this per-zone.
 -  Default: 604800
 
 .. deprecated:: 4.2.0
-  This setting has been removed in 4.4.0
+  This setting was removed in 4.4.0
 
 Default :ref:`types-soa` expire.
 
@@ -1766,7 +1994,7 @@ Default :ref:`types-soa` expire.
 -  Default: 3600
 
 .. deprecated:: 4.2.0
-  This setting has been removed in 4.4.0
+  This setting was removed in 4.4.0
 
 Default :ref:`types-soa` minimum ttl.
 
@@ -1779,7 +2007,7 @@ Default :ref:`types-soa` minimum ttl.
 -  Default: 10800
 
 .. deprecated:: 4.2.0
-  This setting has been removed in 4.4.0
+  This setting was removed in 4.4.0
 
 Default :ref:`types-soa` refresh.
 
@@ -1792,7 +2020,7 @@ Default :ref:`types-soa` refresh.
 -  Default: 3600
 
 .. deprecated:: 4.2.0
-  This setting has been removed in 4.4.0
+  This setting was removed in 4.4.0
 
 Default :ref:`types-soa` retry.
 
@@ -1823,7 +2051,7 @@ and :doc:`Virtual Hosting <guides/virtual-instances>` how this can differ.
 -  Boolean
 -  Default: no
 
-Turn on supermaster support. See :ref:`supermaster-operation`.
+Turn on autosecondary support. See :ref:`autoprimary-operation`.
 
 .. _setting-svc-autohints:
 
@@ -1980,6 +2208,18 @@ behaviour, to ``powerdns`` to just make it state
 setting will return a ServFail, much like Microsoft nameservers do. You
 can set this response to a custom value as well.
 
+.. _setting-views:
+
+``views``
+---------
+
+-  Boolean
+-  Default: no
+
+.. versionadded:: 5.0.0
+
+Enable :doc:`views`.
+
 .. _setting-webserver:
 
 ``webserver``
@@ -2000,6 +2240,9 @@ Start a webserver for monitoring. See :doc:`performance`".
 
 IP Address for webserver/API to listen on.
 
+.. versionchanged:: 5.0.0
+  A path to a UNIX domain socket may be used instead of an IP address.
+
 .. _setting-webserver-allow-from:
 
 ``webserver-allow-from``
@@ -2009,6 +2252,29 @@ IP Address for webserver/API to listen on.
 -  Default: 127.0.0.1,::1
 
 Webserver/API access is only allowed from these subnets.
+Ignored if ``webserver-address`` is set to a UNIX domain socket.
+
+.. _setting-webserver-connection-timeout:
+
+``webserver-connection-timeout``
+--------------------------------
+.. versionadded:: 4.8.5
+
+-  Integer
+-  Default: 5
+
+Request/response timeout in seconds.
+
+.. _setting-webserver-cross-origin-request-header:
+
+``webserver-cross-origin-request-header``
+-----------------------------------------
+.. versionadded:: 5.1.0
+
+-  String
+-  Default: empty
+
+The value if the access-control-allow-origin HTTP header to include. This header is not included if the value is empty.
 
 .. _setting-webserver-hash-plaintext-credentials:
 
@@ -2073,16 +2339,16 @@ The value between the hooks is a UUID that is generated for each request. This c
 
 Maximum request/response body size in megabytes.
 
-.. _setting-webserver-connection-timeout:
+.. _setting-webserver-max-concurrent-connections:
 
-``webserver-connection-timeout``
---------------------------------
-.. versionadded:: 4.8.5
+``webserver-max-concurrent-connections``
+----------------------------------------
+.. versionadded:: 5.1.0
 
 -  Integer
--  Default: 5
+-  Default: 100
 
-Request/response timeout in seconds.
+Maximum number of allowed concurrent connections to the web server.
 
 .. _setting-webserver-password:
 
@@ -2095,6 +2361,9 @@ Request/response timeout in seconds.
 
 Password required to access the webserver. Since 4.6.0 the password can be hashed and salted using ``pdnsutil hash-password`` instead of being present in the configuration in plaintext, but the plaintext version is still supported.
 
+When clients use HTTP Basic authentication, only the password is checked;
+the username is ignored (any username may be supplied).
+
 .. _setting-webserver-port:
 
 ``webserver-port``
@@ -2104,6 +2373,7 @@ Password required to access the webserver. Since 4.6.0 the password can be hashe
 -  Default: 8081
 
 The port where webserver/API will listen on.
+Ignored if ``webserver-address`` is set to a UNIX domain socket.
 
 .. _setting-webserver-print-arguments:
 
@@ -2152,8 +2422,9 @@ If enabled, only a single RR will be put into each AXFR chunk, making some zones
 
 On a primary, this is the amount of seconds between the primary checking
 the SOA serials in its database to determine to send out NOTIFYs to the
-secondaries. On secondaries, this is the number of seconds between the secondary
-checking for updates to zones.
+secondaries. On secondaries, this is the number of seconds between the
+check for zones where the REFRESH period has expired. For zones where
+that is the case, secondaries will request updates from the primary.
 
 .. _setting-xfr-max-received-mbytes:
 
@@ -2178,6 +2449,8 @@ means no restriction.
 Seconds to cache a list of all known zones. A value of 0 will disable the cache.
 
 If your backends do not respond to unknown or dynamically generated zones, it is suggested to enable :ref:`setting-consistent-backends` (default since 4.5) and leave this option at its default of `300`.
+
+If :ref:`setting-views` are enabled, the zone cache **must** be enabled.
 
 .. _setting-zone-metadata-cache-ttl:
 

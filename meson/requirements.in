@@ -1,0 +1,10 @@
+# To generate requirements.txt, install pip-tools and run:
+#  pip-compile --allow-unsafe --generate-hashes-U requirements.in
+
+pyyaml==6.0.3
+meson
+ninja
+invoke
+requests==2.33.0
+cython>=3.0.0
+setuptools<82

@@ -20,23 +20,39 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #pragma once
-#include<string>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
-#include "namespaces.hh"
+#ifdef DNSDIST
+//! Generic Exception thrown
+class PDNSException : public std::runtime_error
+{
+public:
+  PDNSException() : std::runtime_error("Unspecified"), reason("Unspecified")
+  {
+  }
+  PDNSException(std::string why) : std::runtime_error(why), reason(std::move(why))
+  {
+  }
 
-//! Generic Exception thrown 
+  std::string reason; //! Print this to tell the user what went wrong
+};
+#else /* DNSDIST */
 class PDNSException
 {
 public:
   PDNSException() : reason("Unspecified") {};
-  PDNSException(const string& r) : reason(r) {};
-  
-  string reason; //! Print this to tell the user what went wrong
+  PDNSException(std::string r) :
+    reason(std::move(r)) {};
+
+  std::string reason; //! Print this to tell the user what went wrong
 };
+#endif /* DNSDIST */
 
 class TimeoutException : public PDNSException
 {
 public:
   TimeoutException() : PDNSException() {}
-  TimeoutException(const string& r) : PDNSException(r) {}
+  TimeoutException(const std::string& r) : PDNSException(r) {}
 };

@@ -20,16 +20,14 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #pragma once
-#ifdef HAVE_CONFIG_H
+
 #include "config.h"
-#endif
 
 #include <atomic>
-#include <queue>
 #include <thread>
 
 #include "iputils.hh"
-#include "circular_buffer.hh"
+#include "circular_buffer.hh" // Keep, despite what clang-tidy days
 #include "lock.hh"
 #include "sstuff.hh"
 
@@ -46,33 +44,50 @@
 class CircularWriteBuffer
 {
 public:
-  explicit CircularWriteBuffer(size_t size) : d_buffer(size)
+  explicit CircularWriteBuffer(size_t size, uint8_t frame) :
+    d_buffer(size), d_framesize(frame)
   {
   }
 
-  bool hasRoomFor(const std::string& str) const;
+  [[nodiscard]] bool hasRoomFor(const std::string& str) const;
+  [[nodiscard]] bool tooBig(const std::string& str) const;
+  [[nodiscard]] bool isEmpty() const;
   bool write(const std::string& str);
-  bool flush(int fd);
+  bool flush(int fileDesc);
+  void clear();
+
 private:
   boost::circular_buffer<char> d_buffer;
+  uint8_t d_framesize;
 };
 
 class RemoteLoggerInterface
 {
 public:
-  enum class Result : uint8_t { Queued, PipeFull, TooLarge, OtherError };
-  static const std::string& toErrorString(Result r);
+  enum class Result : uint8_t
+  {
+    Queued,
+    PipeFull,
+    TooLarge,
+    OtherError
+  };
+  static const std::string& toErrorString(Result result);
 
+  RemoteLoggerInterface() = default;
+  RemoteLoggerInterface(const RemoteLoggerInterface&) = delete;
+  RemoteLoggerInterface(RemoteLoggerInterface&&) = delete;
+  RemoteLoggerInterface& operator=(const RemoteLoggerInterface&) = delete;
+  RemoteLoggerInterface& operator=(RemoteLoggerInterface&&) = delete;
+  virtual ~RemoteLoggerInterface() = default;
 
-  virtual ~RemoteLoggerInterface() {};
   virtual Result queueData(const std::string& data) = 0;
   [[nodiscard]] virtual std::string address() const = 0;
   [[nodiscard]] virtual std::string toString() = 0;
   [[nodiscard]] virtual std::string name() const = 0;
-  bool logQueries(void) const { return d_logQueries; }
-  bool logResponses(void) const { return d_logResponses; }
-  bool logNODs(void) const { return d_logNODs; }
-  bool logUDRs(void) const { return d_logUDRs; }
+  [[nodiscard]] bool logQueries() const { return d_logQueries; }
+  [[nodiscard]] bool logResponses() const { return d_logResponses; }
+  [[nodiscard]] bool logNODs() const { return d_logNODs; }
+  [[nodiscard]] bool logUDRs() const { return d_logUDRs; }
   void setLogQueries(bool flag) { d_logQueries = flag; }
   void setLogResponses(bool flag) { d_logResponses = flag; }
   void setLogNODs(bool flag) { d_logNODs = flag; }
@@ -85,7 +100,7 @@ public:
     uint64_t d_tooLarge{};
     uint64_t d_otherError{};
 
-    Stats& operator += (const Stats& rhs)
+    Stats& operator+=(const Stats& rhs)
     {
       d_queued += rhs.d_queued;
       d_pipeFull += rhs.d_pipeFull;
@@ -112,11 +127,23 @@ private:
 class RemoteLogger : public RemoteLoggerInterface
 {
 public:
-  RemoteLogger(const ComboAddress& remote, uint16_t timeout=2,
-               uint64_t maxQueuedBytes=100000,
-               uint8_t reconnectWaitTime=1,
-               bool asyncConnect=false);
-  ~RemoteLogger();
+  enum class FrameSize : uint8_t
+  {
+    Two,
+    Four,
+  };
+  RemoteLogger(const RemoteLogger&) = delete;
+  RemoteLogger(RemoteLogger&&) = delete;
+  RemoteLogger& operator=(const RemoteLogger&) = delete;
+  RemoteLogger& operator=(RemoteLogger&&) = delete;
+  RemoteLogger(const ComboAddress& remote,
+               uint16_t timeout, // typically 2
+               uint64_t maxQueuedBytes, // typically 100 * maxQueuedEntries
+               uint8_t reconnectWaitTime, // typically 1
+               bool asyncConnect, // typically false
+               FrameSize frame, // typically FrameSize::Two
+               time_t stalledWriteTimeoutSeconds); // typically 5
+  ~RemoteLogger() override;
 
   std::string address() const override
   {
@@ -124,6 +151,10 @@ public:
   }
 
   [[nodiscard]] Result queueData(const std::string& data) override;
+  [[nodiscard]] size_t maxSize() const
+  {
+    return d_framesize == FrameSize::Two ? std::numeric_limits<uint16_t>::max() : std::numeric_limits<uint32_t>::max();
+  }
   [[nodiscard]] std::string name() const override
   {
     return "protobuf";
@@ -147,6 +178,7 @@ public:
 private:
   bool reconnect();
   void maintenanceThread();
+  [[nodiscard]] bool connectionStalled();
 
   struct RuntimeData
   {
@@ -156,12 +188,16 @@ private:
   };
 
   ComboAddress d_remote;
-  uint16_t d_timeout;
-  uint8_t d_reconnectWaitTime;
+  // if we have been trying to write for that long without any progress,
+  // the connection is dead
+  time_t d_stalledWriteTimeoutSeconds{};
+  time_t d_tryingToWriteSince{};
+  uint16_t d_timeout{};
+  uint8_t d_reconnectWaitTime{};
   std::atomic<bool> d_exiting{false};
   bool d_asyncConnect{false};
 
   LockGuarded<RuntimeData> d_runtime;
   std::thread d_thread;
+  FrameSize d_framesize{};
 };
-

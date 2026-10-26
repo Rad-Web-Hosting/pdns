@@ -30,16 +30,22 @@ public:
 
   std::unique_ptr<TLSConnection> getConnection(int socket, const struct timeval& timeout, time_t now) override
   {
+    (void)timeout;
+    (void)now;
     return std::make_unique<MockupTLSConnection>(socket);
   }
 
   std::unique_ptr<TLSConnection> getClientConnection(const std::string& host, bool hostIsAddr, int socket, const struct timeval& timeout) override
   {
+    (void)host;
+    (void)hostIsAddr;
+    (void)timeout;
     return std::make_unique<MockupTLSConnection>(socket, true, d_needProxyProtocol);
   }
 
   void rotateTicketsKey(time_t now) override
   {
+    (void)now;
   }
 
   size_t getTicketsKeysCount() override
@@ -68,6 +74,7 @@ public:
 
   int run(struct timeval* tv, int timeout = 500) override
   {
+    (void)timeout;
     int ret = 0;
 
     gettimeofday(tv, nullptr); // MANDATORY
@@ -97,14 +104,19 @@ public:
 
   void getAvailableFDs(std::vector<int>& fds, int timeout) override
   {
+    (void)fds;
+    (void)timeout;
   }
 
   void addFD(int fd, FDMultiplexer::EventKind kind) override
   {
+    (void)fd;
+    (void)kind;
   }
 
   void removeFD(int fd, FDMultiplexer::EventKind) override
   {
+    (void)fd;
   }
 
   string getName() const override
@@ -132,7 +144,7 @@ static bool isIPv6Supported()
     ComboAddress addr("[2001:db8:53::1]:53");
     auto socket = std::make_unique<Socket>(addr.sin4.sin_family, SOCK_STREAM, 0);
     socket->setNonBlocking();
-    int res = SConnectWithTimeout(socket->getHandle(), addr, timeval{0, 0});
+    int res = SConnectWithTimeout(socket->getHandle(), false, addr, timeval{0, 0});
     if (res == 0 || res == EINPROGRESS) {
       return true;
     }

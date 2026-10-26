@@ -22,18 +22,22 @@
 #pragma once
 
 #include <functional>
-#include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "config.h"
 #include "credentials.hh"
 #include "dnsdist-actions.hh"
 #include "dnsdist-carbon.hh"
+#include "dnsdist-lua-types.hh"
 #include "dnsdist-query-count.hh"
 #include "dnsdist-rule-chains.hh"
+#include "dnsdist-server-pool.hh"
 #include "iputils.hh"
+#include "remote_logger.hh"
 
 class ServerPolicy;
 struct ServerPool;
@@ -52,6 +56,12 @@ static constexpr uint16_t s_defaultPayloadSizeSelfGenAnswers = 1232;
 static constexpr uint16_t s_udpIncomingBufferSize{1500}; // don't accept UDP queries larger than this value
 static_assert(s_defaultPayloadSizeSelfGenAnswers < s_udpIncomingBufferSize, "The UDP responder's payload size should be smaller or equal to our incoming buffer size");
 
+enum class TimeFormat : uint8_t
+{
+  Numeric,
+  ISO8601
+};
+
 /* this part of the configuration can only be updated at configuration
    time, and is immutable once the configuration phase is over */
 struct ImmutableConfiguration
@@ -59,6 +69,8 @@ struct ImmutableConfiguration
   std::set<std::string> d_capabilitiesToRetain;
   std::vector<uint32_t> d_tcpFastOpenKey;
   std::vector<std::shared_ptr<ClientState>> d_frontends;
+  std::string d_snmpDaemonSocketPath;
+  std::string d_loggingBackend;
 #ifdef __linux__
   // On Linux this gives us 128k pending queries (default is 8192 queries),
   // which should be enough to deal with huge spikes
@@ -78,21 +90,38 @@ struct ImmutableConfiguration
   uint64_t d_outgoingTCPCleanupInterval{60};
   uint64_t d_outgoingDoHMaxIdlePerBackend{10};
   uint64_t d_outgoingTCPMaxIdlePerBackend{10};
-  uint64_t d_maxTCPClientThreads{0};
+  uint64_t d_maxTCPClientThreads{10};
+  uint64_t d_maxTCPConnectionsRatePerClient{0};
+  uint64_t d_maxTLSResumedSessionsRatePerClient{0};
+  uint64_t d_maxTLSNewSessionsRatePerClient{0};
+  uint64_t d_tcpConnectionsRatePerClientInterval{5};
   size_t d_maxTCPConnectionsPerClient{0};
   size_t d_udpVectorSize{1};
   size_t d_ringsCapacity{10000};
   size_t d_ringsNumberOfShards{10};
   size_t d_ringsNbLockTries{5};
+  size_t d_ringsSamplingRate{0};
   uint32_t d_socketUDPSendBuffer{0};
   uint32_t d_socketUDPRecvBuffer{0};
   uint32_t d_hashPerturbation{0};
-  uint16_t d_maxUDPOutstanding{std::numeric_limits<uint16_t>::max()};
+  uint32_t d_maxTCPReadIOsPerQuery{50};
+  uint32_t d_tcpBanDurationForExceedingMaxReadIOsPerQuery{60};
+  uint32_t d_tcpBanDurationForExceedingTCPTLSRate{10};
+  uint32_t d_maxUDPOutstanding{65536U};
+  TimeFormat d_structuredLoggingTimeFormat{TimeFormat::Numeric};
   uint8_t d_udpTimeout{2};
+  uint8_t d_tcpConnectionsOverloadThreshold{90};
+  uint8_t d_tcpConnectionsMaskV4{32};
+  uint8_t d_tcpConnectionsMaskV6{128};
+  uint8_t d_tcpConnectionsMaskV4Port{0};
   bool d_randomizeUDPSocketsToBackend{false};
   bool d_randomizeIDsToBackend{false};
   bool d_ringsRecordQueries{true};
   bool d_ringsRecordResponses{true};
+  bool d_snmpEnabled{false};
+  bool d_snmpTrapsEnabled{false};
+  bool d_structuredLogging{true};
+  bool d_structuredLoggingUseServerID{false};
 };
 
 /* this part of the configuration can be updated at runtime via
@@ -104,25 +133,30 @@ struct RuntimeConfiguration
 #ifndef DISABLE_CARBON
   std::vector<dnsdist::Carbon::Endpoint> d_carbonEndpoints;
 #endif /* DISABLE_CARBON */
-  std::map<std::string, std::shared_ptr<ServerPool>> d_pools;
+  std::unordered_map<std::string, ServerPool> d_pools;
   std::shared_ptr<const CredentialsHolder> d_webPassword;
   std::shared_ptr<const CredentialsHolder> d_webAPIKey;
   std::optional<std::unordered_map<std::string, std::string>> d_webCustomHeaders;
   std::shared_ptr<ServerPolicy> d_lbPolicy;
+#ifndef DISABLE_PROTOBUF
+  std::vector<std::shared_ptr<RemoteLoggerInterface>> d_maintenanceRemoteLoggers;
+#endif
   NetmaskGroup d_ACL;
   NetmaskGroup d_proxyProtocolACL;
   NetmaskGroup d_consoleACL;
   NetmaskGroup d_webServerACL;
-  std::optional<ComboAddress> d_webServerAddress{std::nullopt};
+  std::set<ComboAddress> d_webServerAddresses;
   dnsdist::QueryCount::Configuration d_queryCountConfig;
   ComboAddress d_consoleServerAddress{"127.0.0.1:5199"};
   std::string d_consoleKey;
   std::string d_secPollSuffix{"secpoll.powerdns.com."};
   std::string d_apiConfigDirectory;
+  std::string d_server_id{getHostname().value_or("localhost")};
   uint64_t d_dynBlocksPurgeInterval{60};
   size_t d_maxTCPQueriesPerConn{0};
   size_t d_maxTCPConnectionDuration{0};
   size_t d_proxyProtocolMaximumSize{512};
+  size_t d_opentelemetryMaintenanceInterval{0}; // Sample interval for the maintenance function, 0 means disabled
   uint32_t d_staleCacheEntriesTTL{0};
   uint32_t d_secPollInterval{3600};
   uint32_t d_consoleOutputMsgMaxSize{10000000};
@@ -141,6 +175,7 @@ struct RuntimeConfiguration
   bool d_apiRequiresAuthentication{true};
   bool d_dashboardRequiresAuthentication{true};
   bool d_statsRequireAuthentication{true};
+  bool d_prometheusAddInstanceLabel{false};
   bool d_truncateTC{false};
   bool d_fixupCase{false};
   bool d_queryCountEnabled{false};
@@ -152,21 +187,25 @@ struct RuntimeConfiguration
   bool d_servFailOnNoPolicy{false};
   bool d_allowEmptyResponse{false};
   bool d_dropEmptyQueries{false};
-  bool d_snmpEnabled{false};
-  bool d_snmpTrapsEnabled{false};
   bool d_consoleEnabled{false};
+  bool d_consoleBindFatal{false};
+  bool d_webserverBindFatal{false};
   bool d_logConsoleConnections{true};
   bool d_addEDNSToSelfGeneratedResponses{true};
   bool d_applyACLToProxiedClients{false};
+  bool d_openTelemetryTracing{false}; // XXX: It would be nice to #ifndef DISABLE_PROTOBUF, but as this is defined in dnsdist-settings-definitions.yml, we can't
+  bool d_webServerAllowCrossOriginRequests{false}; // Whether the webserver / API allows cross-origin requests
 };
 
 /* Be careful not to hold on this for too long, it can be invalidated
-   by the next call to getCurrentRuntimeConfiguration() from the
+   by the next call to refreshLocalRuntimeConfiguration() from the
    same thread, so better be sure that any function you are not calling
-   while holding to this reference does not call getCurrentRuntimeConfiguration()
+   while holding to this reference does not call refreshLocalRuntimeConfiguration
    itself. When in doubt, better call getCurrentRuntimeConfiguration() twice.
 */
 const RuntimeConfiguration& getCurrentRuntimeConfiguration();
+const RuntimeConfiguration& refreshLocalRuntimeConfiguration();
+
 /* Get the runtime-immutable configuration */
 const ImmutableConfiguration& getImmutableConfiguration();
 /* Update the runtime-immutable part of the configuration. This function can only be called

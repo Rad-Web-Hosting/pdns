@@ -20,11 +20,13 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #pragma once
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
 
-#include "namespaces.hh"
+#include "config.h"
+
+#include <cstdint>
+#include <map>
+#include <set>
+#include <string>
 
 /** The QType class is meant to deal easily with the different kind of resource types, like 'A', 'NS',
  *  'CNAME' etcetera. These types have both a name and a number. This class can seamlessly move between
@@ -43,16 +45,18 @@
 class QType
 {
 public:
-  QType(uint16_t qtype = 0) : code(qtype) {}
-  QType &operator=(const char *);
-  QType &operator=(const string &);
+  QType(uint16_t qtype = 0) :
+    code(qtype) {}
+  QType& operator=(const char*);
+  QType& operator=(const std::string&);
 
-  operator uint16_t() const {
+  operator uint16_t() const
+  {
     return code;
   }
 
-  const string toString() const;
-  uint16_t getCode() const
+  [[nodiscard]] std::string toString() const;
+  [[nodiscard]] uint16_t getCode() const
   {
     return code;
   }
@@ -60,20 +64,21 @@ public:
   /**
    * \brief Return whether we know the name of this type.
    *
-   * This does not presume that we have an implemented a content representation for this type,
+   * This does not presume that we have implemented a content representation for this type,
    * for that please see DNSRecordContent::isRegisteredType().
    */
-  bool isSupportedType() const;
+  [[nodiscard]] bool isSupportedType() const;
   /**
    * \brief Whether the type is either a QTYPE or Meta-Type as defined by rfc6895 section 3.1.
    *
    * Note that ANY is 255 and falls outside the range.
    */
-  bool isMetadataType() const;
+  [[nodiscard]] bool isMetadataType() const;
 
-  static uint16_t chartocode(const char* p);
+  static uint16_t chartocode(const char* ptr);
 
-  enum typeenum : uint16_t {
+  enum typeenum : uint16_t
+  {
     ENT = 0,
     A = 1,
     NS = 2,
@@ -120,6 +125,8 @@ public:
     ZONEMD = 63,
     SVCB = 64,
     HTTPS = 65,
+    HHIT = 67,
+    BRID = 68,
     SPF = 99,
     NID = 104,
     L32 = 105,
@@ -136,6 +143,8 @@ public:
     ANY = 255,
     URI = 256,
     CAA = 257,
+    RESINFO = 261,
+    WALLET = 262,
     DLV = 32769,
     ADDR = 65400,
 #if !defined(RECURSOR)
@@ -148,21 +157,27 @@ public:
   const static uint16_t rfc6895MetaUpperBound = 254; // Note 255: ANY is not included
   const static uint16_t rfc6895Reserved = 65535;
 
-  const static map<const string, uint16_t> names;
-  const static map<uint16_t, const string> numbers;
+  const static std::map<const std::string, uint16_t> names;
+  const static std::map<uint16_t, const std::string> numbers;
+
+  // QTypes that MUST NOT be used with any other QType on the same name.
+  const static std::set<uint16_t> exclusiveEntryTypes;
 
 private:
-
   uint16_t code;
 };
 
 // Define hash function on QType. See https://en.cppreference.com/w/cpp/utility/hash
-namespace std {
-  template<> struct hash<QType> {
-    std::size_t operator()(QType qtype) const noexcept {
-      return std::hash<uint16_t>{}(qtype.getCode());
-    }
-  };
+namespace std
+{
+template <>
+struct hash<QType>
+{
+  std::size_t operator()(QType qtype) const noexcept
+  {
+    return std::hash<uint16_t>{}(qtype.getCode());
+  }
+};
 }
 
 inline std::ostream& operator<<(std::ostream& stream, const QType& qtype)
@@ -171,24 +186,28 @@ inline std::ostream& operator<<(std::ostream& stream, const QType& qtype)
 }
 
 // Used by e.g. boost multi-index
-inline size_t hash_value(const QType qtype) {
+inline size_t hash_value(const QType qtype)
+{
   return qtype.getCode();
 }
 
 struct QClass
 {
-  constexpr QClass(uint16_t code = 0) : qclass(code) {}
+  constexpr QClass(uint16_t code = 0) :
+    qclass(code) {}
+  explicit QClass(const std::string& code);
 
-  constexpr operator uint16_t() const {
-    return qclass;
-  }
-  constexpr uint16_t getCode() const
+  constexpr operator uint16_t() const
   {
     return qclass;
   }
-  const std::string toString() const;
+  [[nodiscard]] constexpr uint16_t getCode() const
+  {
+    return qclass;
+  }
+  [[nodiscard]] std::string toString() const;
 
-  static const QClass IN;
+  static const QClass IN; // NOLINT(readability-identifier-length)
   static const QClass CHAOS;
   static const QClass NONE;
   static const QClass ANY;
@@ -197,12 +216,12 @@ private:
   uint16_t qclass;
 };
 
-constexpr QClass QClass::IN(1);
+constexpr QClass QClass::IN(1); // NOLINT(readability-identifier-length)
 constexpr QClass QClass::CHAOS(3);
 constexpr QClass QClass::NONE(254);
 constexpr QClass QClass::ANY(255);
 
-inline std::ostream& operator<<(std::ostream& s, QClass qclass)
+inline std::ostream& operator<<(std::ostream& str, QClass qclass)
 {
-  return s << qclass.toString();
+  return str << qclass.toString();
 }

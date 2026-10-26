@@ -32,7 +32,7 @@
 class CoWrapper
 {
 public:
-  CoWrapper(const string& command, int timeout, int abiVersion);
+  CoWrapper(Logr::log_t log, const string& command, int timeout, int abiVersion);
   ~CoWrapper();
   void send(const string& line);
   void receive(string& line);
@@ -43,6 +43,7 @@ private:
   void launch();
   int d_timeout;
   int d_abiVersion;
+  std::shared_ptr<Logr::Logger> d_slog;
 };
 
 class PipeBackend : public DNSBackend
@@ -50,15 +51,18 @@ class PipeBackend : public DNSBackend
 public:
   PipeBackend(const string& suffix = "");
   ~PipeBackend() override;
-  void lookup(const QType&, const DNSName& qdomain, int zoneId, DNSPacket* p = nullptr) override;
-  bool list(const DNSName& target, int domain_id, bool include_disabled = false) override;
+
+  unsigned int getCapabilities() override { return CAP_DIRECT | CAP_LIST; }
+  void lookup(const QType& qtype, const DNSName& qname, domainid_t zoneId, DNSPacket* pkt_p = nullptr) override;
+  bool list(const ZoneName& target, domainid_t domain_id, bool include_disabled = false) override;
   bool get(DNSResourceRecord& r) override;
   string directBackendCmd(const string& query) override;
-  static DNSBackend* maker();
 
 private:
   void launch();
   void cleanup();
+  void throwTooShortDataError(const std::string& what);
+
   std::unique_ptr<CoWrapper> d_coproc;
   std::unique_ptr<Regex> d_regex;
   DNSName d_qname;

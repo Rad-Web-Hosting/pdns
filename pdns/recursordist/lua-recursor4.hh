@@ -21,20 +21,16 @@
  */
 #pragma once
 
-#ifdef HAVE_CONFIG_H
 #include "config.h"
-#endif
 
 #include "iputils.hh"
 #include "dnsname.hh"
 #include "namespaces.hh"
-#include "dnsrecords.hh"
 #include "filterpo.hh"
 #include "ednsoptions.hh"
 #include "validate.hh"
 #include "lua-base4.hh"
 #include "proxy-protocol.hh"
-#include "noinitvector.hh"
 #include "rec-eventtrace.hh"
 
 #include <unordered_map>
@@ -110,7 +106,7 @@ public:
     const std::vector<ProxyProtocolValue>* proxyProtocolValues{nullptr};
     std::unordered_map<std::string, bool>* discardedPolicies{nullptr};
     std::string* extendedErrorExtra{nullptr};
-    boost::optional<uint16_t>* extendedErrorCode{nullptr};
+    std::optional<uint16_t>* extendedErrorCode{nullptr};
     std::string requestorId;
     std::string deviceId;
     std::string deviceName;
@@ -137,16 +133,17 @@ public:
     unsigned int tag{0};
     int rcode{0};
     const uint16_t qtype;
-    const bool isTcp;
+    bool isTcp;
     vState validationState{vState::Indeterminate};
 
-    void addAnswer(uint16_t type, const std::string& content, boost::optional<int> ttl, boost::optional<string> name);
-    void addRecord(uint16_t type, const std::string& content, DNSResourceRecord::Place place, boost::optional<int> ttl, boost::optional<string> name);
+    using OptDNSNameOrString = std::optional<boost::variant<std::string, DNSName>>;
+    void addAnswer(uint16_t type, const std::string& content, std::optional<int> ttl, OptDNSNameOrString name);
+    void addRecord(uint16_t type, const std::string& content, DNSResourceRecord::Place place, std::optional<int> ttl, OptDNSNameOrString name);
     [[nodiscard]] vector<pair<int, DNSRecord>> getRecords() const;
-    [[nodiscard]] boost::optional<dnsheader> getDH() const;
+    [[nodiscard]] std::optional<dnsheader> getDH() const;
     [[nodiscard]] vector<pair<uint16_t, string>> getEDNSOptions() const;
-    [[nodiscard]] boost::optional<string> getEDNSOption(uint16_t code) const;
-    [[nodiscard]] boost::optional<Netmask> getEDNSSubnet() const;
+    [[nodiscard]] std::optional<string> getEDNSOption(uint16_t code) const;
+    [[nodiscard]] std::optional<Netmask> getEDNSSubnet() const;
     [[nodiscard]] std::vector<std::pair<int, ProxyProtocolValue>> getProxyProtocolValues() const;
     [[nodiscard]] vector<string> getEDNSFlags() const;
     [[nodiscard]] bool getEDNSFlag(const string& flag) const;
@@ -172,7 +169,7 @@ public:
   {
   public:
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-    FFIParams(const DNSName& qname_, uint16_t qtype_, const ComboAddress& plocal_, const ComboAddress& premote_, const ComboAddress& local_, const ComboAddress& remote_, const Netmask& ednssubnet_, LuaContext::LuaObject& data_, std::unordered_set<std::string>& policyTags_, std::vector<DNSRecord>& records_, const EDNSOptionViewMap& ednsOptions_, const std::vector<ProxyProtocolValue>& proxyProtocolValues_, std::string& requestorId_, std::string& deviceId_, std::string& deviceName_, std::string& routingTag_, boost::optional<int>& rcode_, uint32_t& ttlCap_, bool& variable_, bool tcp_, bool& logQuery_, bool& logResponse_, bool& followCNAMERecords_, boost::optional<uint16_t>& extendedErrorCode_, std::string& extendedErrorExtra_, bool& disablePadding_, std::map<std::string, MetaValue>& meta_) :
+    FFIParams(const DNSName& qname_, uint16_t qtype_, const ComboAddress& plocal_, const ComboAddress& premote_, const ComboAddress& local_, const ComboAddress& remote_, const Netmask& ednssubnet_, LuaContext::LuaObject& data_, std::unordered_set<std::string>& policyTags_, std::vector<DNSRecord>& records_, const EDNSOptionViewMap& ednsOptions_, const std::vector<ProxyProtocolValue>& proxyProtocolValues_, std::string& requestorId_, std::string& deviceId_, std::string& deviceName_, std::string& routingTag_, std::optional<int>& rcode_, uint32_t& ttlCap_, bool& variable_, bool tcp_, bool& logQuery_, bool& logResponse_, bool& followCNAMERecords_, std::optional<uint16_t>& extendedErrorCode_, std::string& extendedErrorExtra_, bool& disablePadding_, std::map<std::string, MetaValue>& meta_) :
       data(data_), qname(qname_), interface_local(plocal_), interface_remote(premote_), local(local_), remote(remote_), ednssubnet(ednssubnet_), policyTags(policyTags_), records(records_), ednsOptions(ednsOptions_), proxyProtocolValues(proxyProtocolValues_), requestorId(requestorId_), deviceId(deviceId_), deviceName(deviceName_), routingTag(routingTag_), extendedErrorExtra(extendedErrorExtra_), rcode(rcode_), extendedErrorCode(extendedErrorCode_), ttlCap(ttlCap_), variable(variable_), logQuery(logQuery_), logResponse(logResponse_), followCNAMERecords(followCNAMERecords_), disablePadding(disablePadding_), qtype(qtype_), tcp(tcp_), meta(meta_)
     {
     }
@@ -193,8 +190,8 @@ public:
     std::string& deviceName;
     std::string& routingTag;
     std::string& extendedErrorExtra;
-    boost::optional<int>& rcode;
-    boost::optional<uint16_t>& extendedErrorCode;
+    std::optional<int>& rcode;
+    std::optional<uint16_t>& extendedErrorCode;
     uint32_t& ttlCap;
     bool& variable;
     bool& logQuery;
@@ -219,10 +216,12 @@ public:
   bool nodata(DNSQuestion& dnsQuestion, int& ret, RecEventTrace&) const;
   bool postresolve(DNSQuestion& dnsQuestion, int& ret, RecEventTrace&) const;
 
-  bool preoutquery(const ComboAddress& nameserver, const ComboAddress& requestor, const DNSName& query, const QType& qtype, bool isTcp, vector<DNSRecord>& res, int& ret, RecEventTrace& eventTrace, const struct timeval& theTime) const;
+  bool preoutquery(const ComboAddress& nameserver, const ComboAddress& requestor, const DNSName& query, const QType& qtype, bool& isTcp, vector<DNSRecord>& res, int& ret, RecEventTrace& eventTrace, const struct timeval& theTime) const;
   bool ipfilter(const ComboAddress& remote, const ComboAddress& local, const struct dnsheader&, RecEventTrace&) const;
 
   bool policyHitEventFilter(const ComboAddress& remote, const DNSName& qname, const QType& qtype, bool tcp, DNSFilterEngine::Policy& policy, std::unordered_set<std::string>& tags, std::unordered_map<std::string, bool>& discardedPolicies) const;
+
+  void runStartStopFunction(const std::string& script, bool start, Logr::log_t log);
 
   [[nodiscard]] bool needDQ() const
   {
@@ -259,10 +258,10 @@ protected:
   void getFeatures(Features& features) override;
 
 private:
-  using gettag_t = std::function<std::tuple<unsigned int, boost::optional<std::unordered_map<int, string>>, boost::optional<LuaContext::LuaObject>, boost::optional<std::string>, boost::optional<std::string>, boost::optional<std::string>, boost::optional<string>>(ComboAddress, Netmask, ComboAddress, DNSName, uint16_t, const EDNSOptionViewMap&, bool, const std::vector<std::pair<int, const ProxyProtocolValue*>>&)>;
+  using gettag_t = std::function<std::tuple<unsigned int, std::optional<std::unordered_map<int, string>>, std::optional<LuaContext::LuaObject>, std::optional<std::string>, std::optional<std::string>, std::optional<std::string>, std::optional<string>>(ComboAddress, Netmask, ComboAddress, DNSName, uint16_t, const EDNSOptionViewMap&, bool, const std::vector<std::pair<int, const ProxyProtocolValue*>>&)>;
   gettag_t d_gettag; // public so you can query if we have this hooked
 
-  using gettag_ffi_t = std::function<boost::optional<LuaContext::LuaObject>(pdns_ffi_param_t*)>;
+  using gettag_ffi_t = std::function<std::optional<LuaContext::LuaObject>(pdns_ffi_param_t*)>;
   gettag_ffi_t d_gettag_ffi;
 
   using postresolve_ffi_t = std::function<bool(pdns_postresolve_ffi_handle_t*)>;

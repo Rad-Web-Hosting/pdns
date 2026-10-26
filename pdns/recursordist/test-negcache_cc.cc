@@ -56,8 +56,8 @@ BOOST_AUTO_TEST_CASE(test_get_entry)
   DNSName qname("www2.powerdns.com");
   DNSName auth("powerdns.com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   cache.add(genNegCacheEntry(qname, auth, now));
@@ -71,6 +71,39 @@ BOOST_AUTO_TEST_CASE(test_get_entry)
   BOOST_CHECK_EQUAL(ne.d_name, qname);
   BOOST_CHECK_EQUAL(ne.d_qtype.toString(), QType(0).toString());
   BOOST_CHECK_EQUAL(ne.d_auth, auth);
+}
+
+BOOST_AUTO_TEST_CASE(test_get_verybig_entry)
+{
+  /* Try adddd a full name negative entry to the cache that's to big and attempt to get an entry for
+   * the A record. Should not yield the full name not exist entry
+   */
+  DNSName qname("www2.powerdns.com");
+  DNSName auth("powerdns.com");
+
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
+
+  NegCache cache;
+
+  auto entry = genNegCacheEntry(qname, auth, now);
+  for (auto i = 0; i < 100; i++) {
+    DNSRecord rec;
+    rec.d_name = qname;
+    rec.d_type = QType::RRSIG;
+    rec.d_ttl = 600;
+    rec.d_place = DNSResourceRecord::AUTHORITY;
+    rec.setContent(std::make_shared<RRSIGRecordContent>(QType(QType::A).toString() + " 5 3 600 2037010100000000 2037010100000000 24567 dummy data"));
+    entry.DNSSECRecords.signatures.emplace_back(std::move(rec));
+  }
+  cache.add(entry);
+
+  BOOST_CHECK_EQUAL(cache.size(), 0U);
+
+  NegCache::NegCacheEntry ne;
+  bool ret = cache.get(qname, QType(1), now, ne);
+
+  BOOST_CHECK(!ret);
 }
 
 BOOST_AUTO_TEST_CASE(test_get_entry2038)
@@ -105,8 +138,8 @@ BOOST_AUTO_TEST_CASE(test_get_entry_exact_type)
   DNSName qname("www2.powerdns.com");
   DNSName auth("powerdns.com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   cache.add(genNegCacheEntry(qname, auth, now));
@@ -124,8 +157,8 @@ BOOST_AUTO_TEST_CASE(test_get_NODATA_entry)
   DNSName qname("www2.powerdns.com");
   DNSName auth("powerdns.com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   cache.add(genNegCacheEntry(qname, auth, now, 1));
@@ -150,8 +183,8 @@ BOOST_AUTO_TEST_CASE(test_getRootNXTrust_entry)
   DNSName qname("com");
   DNSName auth(".");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   cache.add(genNegCacheEntry(qname, auth, now));
@@ -172,8 +205,8 @@ BOOST_AUTO_TEST_CASE(test_add_and_get_expired_entry)
   DNSName qname("www2.powerdns.com");
   DNSName auth("powerdns.com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
   now.tv_sec -= 1000;
 
   NegCache cache;
@@ -194,8 +227,8 @@ BOOST_AUTO_TEST_CASE(test_getRootNXTrust_expired_entry)
   DNSName qname("com");
   DNSName auth(".");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
   now.tv_sec -= 1000;
 
   NegCache cache;
@@ -217,8 +250,8 @@ BOOST_AUTO_TEST_CASE(test_add_updated_entry)
   DNSName auth("powerdns.com");
   DNSName auth2("com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   cache.add(genNegCacheEntry(qname, auth, now));
@@ -242,8 +275,8 @@ BOOST_AUTO_TEST_CASE(test_getRootNXTrust)
   DNSName qname2("com");
   DNSName auth2(".");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   cache.add(genNegCacheEntry(qname, auth, now));
@@ -264,8 +297,8 @@ BOOST_AUTO_TEST_CASE(test_getRootNXTrust_full_domain_only)
   DNSName qname2("com");
   DNSName auth2(".");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   cache.add(genNegCacheEntry(qname, auth, now));
@@ -282,8 +315,8 @@ BOOST_AUTO_TEST_CASE(test_prune)
   string qname(".powerdns.com");
   DNSName auth("powerdns.com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache(1);
   NegCache::NegCacheEntry ne;
@@ -304,8 +337,8 @@ BOOST_AUTO_TEST_CASE(test_prune_many_shards)
   string qname(".powerdns.com");
   DNSName auth("powerdns.com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   NegCache::NegCacheEntry ne;
@@ -327,8 +360,8 @@ BOOST_AUTO_TEST_CASE(test_prune_valid_entries)
   DNSName power2("powerdns-1.com.");
   DNSName auth("com.");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   NegCache::NegCacheEntry ne;
@@ -380,8 +413,8 @@ BOOST_AUTO_TEST_CASE(test_wipe_single)
   string qname(".powerdns.com");
   DNSName auth("powerdns.com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   NegCache::NegCacheEntry ne;
@@ -419,8 +452,8 @@ BOOST_AUTO_TEST_CASE(test_wipe_subtree)
   string qname2("powerdns.org");
   DNSName auth("powerdns.com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   NegCache::NegCacheEntry ne;
@@ -446,8 +479,8 @@ BOOST_AUTO_TEST_CASE(test_wipe_typed)
   string qname(".powerdns.com");
   DNSName auth("powerdns.com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   NegCache::NegCacheEntry ne;
@@ -484,8 +517,8 @@ BOOST_AUTO_TEST_CASE(test_clear)
   string qname(".powerdns.com");
   DNSName auth("powerdns.com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   NegCache::NegCacheEntry ne;
@@ -519,8 +552,8 @@ BOOST_AUTO_TEST_CASE(test_dumpToFile)
     "powerdns.com. 600 IN RRSIG NSEC 5 3 600 20370101000000 20370101000000 24567 dummy. data ;\n",
     "; negcache size: 2/0 shards: 1 min/max shard size: 2/2\n"};
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   cache.add(genNegCacheEntry(DNSName("www1.powerdns.com"), DNSName("powerdns.com"), now));
   cache.add(genNegCacheEntry(DNSName("www2.powerdns.com"), DNSName("powerdns.com"), now));
@@ -557,8 +590,8 @@ BOOST_AUTO_TEST_CASE(test_count)
   string qname2("powerdns.org");
   DNSName auth("powerdns.com");
 
-  struct timeval now;
-  Utility::gettimeofday(&now, 0);
+  struct timeval now{};
+  gettimeofday(&now, nullptr);
 
   NegCache cache;
   NegCache::NegCacheEntry ne;

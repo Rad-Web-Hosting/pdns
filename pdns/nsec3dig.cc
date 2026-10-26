@@ -22,6 +22,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+#include "arguments.hh"
 #include "dnsparser.hh"
 #include "sstuff.hh"
 #include "misc.hh"
@@ -31,6 +32,13 @@
 #include "base32.hh"
 #include "dnssecinfra.hh"
 
+bool g_slogStructured{false};
+
+ArgvMap &arg()
+{
+  static ArgvMap theArg;
+  return theArg;
+}
 
 StatBag S;
 
@@ -253,7 +261,7 @@ try
     }
     prev=shorter;
   }
-  if(encloser.countLabels() && nextcloser.countLabels())
+  if(encloser.hasLabels() && nextcloser.hasLabels())
   {
     if(denied.count(nextcloser))
     {

@@ -4,10 +4,10 @@ Allows for modifying DNSSEC key material via the API.
 
 Endpoints
 ---------
-.. openapi:: swagger/authoritative-api-swagger.yaml
+.. openapi:: openapi/authoritative-api-openapi.yaml
   :paths: /servers/{server_id}/zones/{zone_id}/cryptokeys /servers/{server_id}/zones/{zone_id}/cryptokeys/{cryptokey_id}
+  :examples:
 
 Objects
 -------
-.. openapi:: swagger/authoritative-api-swagger.yaml
-  :definitions: Cryptokey
+.. json:schema:: Cryptokey

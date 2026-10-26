@@ -25,7 +25,6 @@
 #endif
 #include "utility.hh"
 #include "dnsbackend.hh"
-#include "arguments.hh"
 #include "ueberbackend.hh"
 #include "logger.hh"
 
@@ -42,9 +41,9 @@ extern StatBag S;
 // this is so the geoipbackend can set this pointer if loaded for lua-record.cc
 std::function<std::string(const std::string&, int)> g_getGeo;
 
-bool DNSBackend::getAuth(const DNSName& target, SOAData* soaData)
+bool DNSBackend::getAuth(const ZoneName& target, SOAData* soaData)
 {
-  return this->getSOA(target, *soaData);
+  return this->getSOA(target, UnknownDomainID, *soaData);
 }
 
 void DNSBackend::setArgPrefix(const string& prefix)
@@ -62,9 +61,82 @@ const string& DNSBackend::getArg(const string& key)
   return arg()[d_prefix + "-" + key];
 }
 
-int DNSBackend::getArgAsNum(const string& key)
+// Default API lookup has no support for disabled records and simply wraps lookup()
+void DNSBackend::APILookup(const QType& qtype, const DNSName& qdomain, domainid_t zoneId, bool /* include_disabled */)
 {
-  return arg().asNum(d_prefix + "-" + key);
+  lookup(qtype, qdomain, zoneId, nullptr);
+}
+
+// Default search logic, for backends which can enumerate their records.
+bool DNSBackend::searchRecords(const string& pattern, size_t maxResults, vector<DNSResourceRecord>& result)
+{
+  // We depend upon working list(), but also getAllDomains(), which is why we
+  // are checking explicitly for CAP_SEARCH in addition to CAP_LIST - the
+  // default getAllDomains() implementation below is not safe to use here.
+  if ((getCapabilities() & (CAP_LIST | CAP_SEARCH)) != (CAP_LIST | CAP_SEARCH)) {
+    return false;
+  }
+
+  SimpleMatch simpleMatch(pattern, true);
+  std::vector<DomainInfo> domains;
+  getAllDomains(&domains, false, true);
+  for (const auto& info : domains) {
+    if (!list(info.zone, info.id, true)) {
+      return false;
+    }
+    DNSResourceRecord rec;
+    while (get(rec)) {
+      if (maxResults == 0) {
+        // No need to look any further
+        lookupEnd();
+        break;
+      }
+      if (simpleMatch.match(rec.qname) || simpleMatch.match(rec.content)) {
+        result.emplace_back(rec);
+        --maxResults;
+      }
+    }
+    if (maxResults == 0) {
+      break;
+    }
+  }
+  return true;
+}
+
+// Default search logic, for backends which can enumerate their comments.
+bool DNSBackend::searchComments(const string& pattern, size_t maxResults, vector<Comment>& result)
+{
+  // We depend upon working list(), but also getAllDomains(), which is why we
+  // are checking explicitly for CAP_SEARCH in addition to CAP_LIST - the
+  // default getAllDomains() implementation below is not safe to use here.
+  if ((getCapabilities() & (CAP_LIST | CAP_SEARCH)) != (CAP_LIST | CAP_SEARCH)) {
+    return false;
+  }
+
+  SimpleMatch simpleMatch(pattern, true);
+  std::vector<DomainInfo> domains;
+  getAllDomains(&domains, false, true);
+  for (const auto& info : domains) {
+    if (!listComments(info.id)) {
+      return false;
+    }
+    Comment comment;
+    while (getComment(comment)) {
+      if (maxResults == 0) {
+        // No need to look any further
+        lookupEnd();
+        break;
+      }
+      if (simpleMatch.match(comment.qname) || simpleMatch.match(comment.content)) {
+        result.emplace_back(comment);
+        --maxResults;
+      }
+    }
+    if (maxResults == 0) {
+      break;
+    }
+  }
+  return true;
 }
 
 void BackendFactory::declare(const string& suffix, const string& param, const string& explanation, const string& value)
@@ -79,9 +151,18 @@ const string& BackendFactory::getName() const
   return d_name;
 }
 
-BackendMakerClass& BackendMakers()
+std::shared_ptr<Logr::Logger> BackendMakerClass::s_slog;
+
+BackendMakerClass::BackendMakerClass(Logr::log_t slog)
 {
-  static BackendMakerClass bmc;
+  if (s_slog == nullptr && slog != nullptr) {
+    s_slog = slog;
+  }
+}
+
+BackendMakerClass& BackendMakers(Logr::log_t slog)
+{
+  static BackendMakerClass bmc(slog);
   return bmc;
 }
 
@@ -109,14 +190,16 @@ vector<string> BackendMakerClass::getModules()
 
 void BackendMakerClass::load_all()
 {
-  auto directoryError = pdns::visit_directory(arg()["module-dir"], []([[maybe_unused]] ino_t inodeNumber, const std::string_view& name) {
+  const auto& directory = arg()["module-dir"];
+  auto directoryError = pdns::visit_directory(directory, []([[maybe_unused]] ino_t inodeNumber, const std::string_view& name) {
     if (boost::starts_with(name, "lib") && name.size() > 13 && boost::ends_with(name, "backend.so")) {
       load(std::string(name));
     }
     return true;
   });
   if (directoryError) {
-    g_log << Logger::Error << "Unable to open module directory '" << arg()["module-dir"] << "': " << *directoryError << endl;
+    SLOG(g_log << Logger::Error << "Unable to open module directory '" << directory << "': " << *directoryError << endl,
+         s_slog->error(Logr::Error, *directoryError, "Unable to open module directory", "directory", Logging::Loggable(directory)));
   }
 }
 
@@ -124,26 +207,32 @@ void BackendMakerClass::load(const string& module)
 {
   bool res = false;
 
-  g_log << Logger::Debug << "BackendMakerClass: module = " << module << endl;
-  g_log << Logger::Debug << "BackendMakerClass: module-dir = " << arg()["module-dir"] << endl;
+  const auto& moduleDir = arg()["module-dir"];
+  SLOG(g_log << Logger::Debug << "BackendMakerClass: module = " << module << endl
+             << Logger::Debug << "BackendMakerClass: module-dir = " << moduleDir << endl,
+       s_slog->info(Logr::Debug, "BackendMakerClass", "module-dir", Logging::Loggable(moduleDir), "module", Logging::Loggable(module)));
   if (module.find('.') == string::npos) {
-    auto modulePath = arg()["module-dir"] + "/lib" + module + "backend.so";
-    g_log << Logger::Debug << "BackendMakerClass: Loading '" << modulePath << "'" << endl;
+    auto modulePath = moduleDir + "/lib" + module + "backend.so";
+    SLOG(g_log << Logger::Debug << "BackendMakerClass: Loading '" << modulePath << "'" << endl,
+         s_slog->info(Logr::Debug, "BackendMakerClass: loading", "file", Logging::Loggable(modulePath)));
     res = UeberBackend::loadmodule(modulePath);
   }
   else if (module[0] == '/' || (module[0] == '.' && module[1] == '/') || (module[0] == '.' && module[1] == '.')) {
     // Absolute path, Current path or Parent path
-    g_log << Logger::Debug << "BackendMakerClass: Loading '" << module << "'" << endl;
+    SLOG(g_log << Logger::Debug << "BackendMakerClass: Loading '" << module << "'" << endl,
+         s_slog->info(Logr::Debug, "BackendMakerClass: loading", "file", Logging::Loggable(module)));
     res = UeberBackend::loadmodule(module);
   }
   else {
-    auto modulePath = arg()["module-dir"] + "/" + module;
-    g_log << Logger::Debug << "BackendMakerClass: Loading '" << modulePath << "'" << endl;
+    auto modulePath = moduleDir + "/" + module;
+    SLOG(g_log << Logger::Debug << "BackendMakerClass: Loading '" << modulePath << "'" << endl,
+         s_slog->info(Logr::Debug, "BackendMakerClass: loading", "file", Logging::Loggable(module)));
     res = UeberBackend::loadmodule(modulePath);
   }
 
   if (!res) {
-    g_log << Logger::Error << "DNSBackend unable to load module in " << module << endl;
+    SLOG(g_log << Logger::Error << "DNSBackend unable to load module in " << module << endl,
+         s_slog->info(Logr::Error, "DNSBackend unable to load module", "module", Logging::Loggable(module)));
     exit(1);
   }
 }
@@ -212,14 +301,16 @@ vector<std::unique_ptr<DNSBackend>> BackendMakerClass::all(bool metadataOnly)
     }
   }
   catch (const PDNSException& ae) {
-    g_log << Logger::Error << "Caught an exception instantiating a backend (" << current << "): " << ae.reason << endl;
-    g_log << Logger::Error << "Cleaning up" << endl;
+    SLOG(g_log << Logger::Error << "Caught an exception instantiating a backend (" << current << "): " << ae.reason << endl
+               << Logger::Error << "Cleaning up" << endl,
+         s_slog->error(Logr::Error, ae.reason, "Caught an exception instantiating a backend, cleaning up", "backend", Logging::Loggable(current)));
     ret.clear();
     throw;
   }
   catch (...) {
     // and cleanup
-    g_log << Logger::Error << "Caught an exception instantiating a backend (" << current << "), cleaning up" << endl;
+    SLOG(g_log << Logger::Error << "Caught an exception instantiating a backend (" << current << "), cleaning up" << endl,
+         s_slog->info(Logr::Error, "Caught an exception instantiating a backend, cleaning up", "backend", Logging::Loggable(current)));
     ret.clear();
     throw;
   }
@@ -239,18 +330,27 @@ vector<std::unique_ptr<DNSBackend>> BackendMakerClass::all(bool metadataOnly)
     answer, in which case you need to perform a getDomainInfo call!
 
     \param domain Domain we want to get the SOA details of
-    \param sd SOAData which is filled with the SOA details
+    \param zoneId Domain id, if known
+    \param soaData SOAData which is filled with the SOA details
     \param unmodifiedSerial bool if set, serial will be returned as stored in the backend (maybe 0)
 */
-bool DNSBackend::getSOA(const DNSName& domain, SOAData& soaData)
+bool DNSBackend::getSOA(const ZoneName& domain, domainid_t zoneId, SOAData& soaData)
 {
-  this->lookup(QType(QType::SOA), domain, -1);
+  soaData.db = nullptr;
+
+  if (domain.hasVariant() && zoneId == UnknownDomainID) {
+    DomainInfo domaininfo;
+    if (!this->getDomainInfo(domain, domaininfo, false)) {
+      return false;
+    }
+    zoneId = domaininfo.id;
+  }
+  // Safe for zoneId to be UnknownDomainID here - it won't be the case for variants, see above
+  this->lookup(QType(QType::SOA), domain.operator const DNSName&(), zoneId);
   S.inc("backend-queries");
 
   DNSResourceRecord resourceRecord;
   int hits = 0;
-
-  soaData.db = nullptr;
 
   try {
     while (this->get(resourceRecord)) {
@@ -258,7 +358,7 @@ bool DNSBackend::getSOA(const DNSName& domain, SOAData& soaData)
         throw PDNSException("Got non-SOA record when asking for SOA, zone: '" + domain.toLogString() + "'");
       }
       hits++;
-      soaData.qname = domain;
+      soaData.zonename = domain.makeLowerCase();
       soaData.ttl = resourceRecord.ttl;
       soaData.db = this;
       soaData.domain_id = resourceRecord.domain_id;
@@ -266,9 +366,7 @@ bool DNSBackend::getSOA(const DNSName& domain, SOAData& soaData)
     }
   }
   catch (...) {
-    while (this->get(resourceRecord)) {
-      ;
-    }
+    this->lookupEnd();
     throw;
   }
 
@@ -300,11 +398,23 @@ bool DNSBackend::get(DNSZoneRecord& zoneRecord)
   return true;
 }
 
-bool DNSBackend::getBeforeAndAfterNames(uint32_t id, const DNSName& zonename, const DNSName& qname, DNSName& before, DNSName& after)
+// This is a naive implementation which invokes get() until there are no more
+// records available and the backend closes any database handle it might have
+// allocated. Backends which can do better shall override this with smarter
+// code.
+void DNSBackend::lookupEnd()
+{
+  DNSZoneRecord zoneRecord;
+  while (get(zoneRecord)) {
+    // do nothing
+  }
+}
+
+bool DNSBackend::getBeforeAndAfterNames(domainid_t domainId, const ZoneName& zonename, const DNSName& qname, DNSName& before, DNSName& after)
 {
   DNSName unhashed;
-  bool ret = this->getBeforeAndAfterNamesAbsolute(id, qname.makeRelative(zonename).makeLowerCase(), unhashed, before, after);
-  DNSName lczonename = zonename.makeLowerCase();
+  bool ret = this->getBeforeAndAfterNamesAbsolute(domainId, qname.makeRelative(zonename).makeLowerCase(), unhashed, before, after);
+  DNSName lczonename = zonename.makeLowerCase().operator const DNSName&();
   before += lczonename;
   after += lczonename;
   return ret;
@@ -313,7 +423,8 @@ bool DNSBackend::getBeforeAndAfterNames(uint32_t id, const DNSName& zonename, co
 void DNSBackend::getAllDomains(vector<DomainInfo>* /* domains */, bool /* getSerial */, bool /* include_disabled */)
 {
   if (g_zoneCache.isEnabled()) {
-    g_log << Logger::Error << "One of the backends does not support zone caching. Put zone-cache-refresh-interval=0 in the config file to disable this cache." << endl;
+    SLOG(g_log << Logger::Error << "One of the backends does not support zone caching. Put zone-cache-refresh-interval=0 in the config file to disable this cache." << endl,
+         d_slog->info(Logr::Error, "One of the backends does not support zone caching. Put zone-cache-refresh-interval=0 in the configuration file to disable this cache."));
     exit(1);
   }
 }
@@ -335,8 +446,7 @@ void fillSOAData(const DNSZoneRecord& inZoneRecord, SOAData& soaData)
 
 std::shared_ptr<DNSRecordContent> makeSOAContent(const SOAData& soaData)
 {
-  struct soatimes soaTimes
-  {
+  struct soatimes soaTimes{
     .serial = soaData.serial,
     .refresh = soaData.refresh,
     .retry = soaData.retry,
@@ -361,7 +471,7 @@ void fillSOAData(const string& content, SOAData& soaData)
     pdns::checked_stoi_into(soaData.expire, parts.at(5));
     pdns::checked_stoi_into(soaData.minimum, parts.at(6));
   }
-  catch (const std::out_of_range& oor) {
-    throw PDNSException("Out of range exception parsing '" + content + "'");
+  catch (const std::logic_error& exc) {
+    throw PDNSException("exception parsing '" + content + "': " + exc.what());
   }
 }

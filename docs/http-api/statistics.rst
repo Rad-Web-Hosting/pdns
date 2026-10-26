@@ -4,24 +4,19 @@ Statistics
 Endpoints
 ---------
 
-.. openapi:: swagger/authoritative-api-swagger.yaml
+.. openapi:: openapi/authoritative-api-openapi.yaml
   :paths: /servers/{server_id}/statistics
+  :examples:
 
 Objects
 -------
 
 The Statistics endpoint returns an array of objects that can be StatisticItem, MapStatisticItem or RingStatisticItem :
 
-.. openapi:: swagger/authoritative-api-swagger.yaml
-  :definitions: StatisticItem
-
-.. openapi:: swagger/authoritative-api-swagger.yaml
-  :definitions: MapStatisticItem
-
-.. openapi:: swagger/authoritative-api-swagger.yaml
-  :definitions: RingStatisticItem
+.. json:schema:: StatisticItem
+.. json:schema:: MapStatisticItem
+.. json:schema:: RingStatisticItem
 
 Both MapStatisticItem and RingStatisticItem objects contains an array of SimpleStatisticItem
 
-.. openapi:: swagger/authoritative-api-swagger.yaml
-  :definitions: SimpleStatisticItem
+.. json:schema:: SimpleStatisticItem

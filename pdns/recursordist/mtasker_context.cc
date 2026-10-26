@@ -95,7 +95,7 @@ using boost::context::detail::jump_fcontext;
 using boost::context::detail::transfer_t;
 #endif /* BOOST_VERSION < 106100 */
 
-static_assert(std::is_pointer<fcontext_t>::value,
+static_assert(std::is_pointer_v<fcontext_t>,
               "Boost Context has changed the fcontext_t type again :-(");
 #endif
 
@@ -118,6 +118,11 @@ extern "C"
   threadWrapper(intptr_t const xargs)
   {
 #else
+  // If you see asan trouble in this function, run with
+  // ASAN_OPTIONS=detect_stack_use_after_return=0 or completely disable it by compiling with
+  // -fsanitize-address-use-after-return=never.  On debian clang versions up and including 14 do
+  // not seem to trigger a problem here, but starting from version 15 they do.
+  // Attempts at using function attributes to silence the error did not work.
   threadWrapper(transfer_t const theThread)
   {
 #endif
@@ -155,12 +160,13 @@ extern "C"
       *ptr = res.fctx;
     }
 #endif
+    auto start = std::move(*work);
     notifyStackSwitchDone();
     args = nullptr;
 
     try {
-      auto start = std::move(*work);
-      start();
+      auto localstart = std::move(start);
+      localstart();
     }
     catch (...) {
       ctx->exception = std::current_exception();
@@ -218,7 +224,7 @@ void pdns_swapcontext(pdns_ucontext_t& __restrict octx, pdns_ucontext_t const& _
   if (origctx && origctx->exception)
     std::rethrow_exception(origctx->exception);
 #else
-  transfer_t res = jump_fcontext(static_cast<fcontext_t>(ctx.uc_mcontext), &octx.uc_mcontext);
+  transfer_t res = jump_fcontext(static_cast<fcontext_t>(ctx.uc_mcontext), static_cast<void*>(&octx.uc_mcontext));
   CET_ENDBR;
   if (res.data != nullptr) {
     /* if res.data is not a nullptr, it holds a pointer to the context

@@ -1,0 +1,9 @@
+# To generate requirements.txt, install pip-tools and run:
+#  pip-compile --allow-unsafe --generate-hashes-U requirements.in
+
+invoke
+requests>=2.33.0
+pulp-cli
+pulp-cli-deb
+cython>=3.0.0
+setuptools<82

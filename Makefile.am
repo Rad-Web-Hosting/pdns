@@ -7,12 +7,17 @@ EXTRA_DIST = \
 	COPYING \
 	codedocs/doxygen.conf \
 	contrib/powerdns.solaris.init.d \
+	meson \
+	meson.build \
+	meson_options.txt \
 	pdns/named.conf.parsertest \
 	regression-tests/zones/unit.test \
 	regression-tests/zones/unit2.test \
 	regression-tests/zones/zonemd-allunsup.zone \
 	regression-tests/zones/zonemd-duplicate.zone \
 	regression-tests/zones/zonemd-invalid.zone \
+	regression-tests/zones/zonemd-invalidscheme.zone \
+	regression-tests/zones/zonemd-scheme0.zone \
 	regression-tests/zones/zonemd-nozonemd.zone \
 	regression-tests/zones/zonemd-serialmismatch.zone \
 	regression-tests/zones/zonemd-sha512.zone \

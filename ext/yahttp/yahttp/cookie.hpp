@@ -74,7 +74,7 @@ namespace YaHTTP {
 
     void keyValuePair(const std::string &keyvalue, std::string &key, std::string &value) {
       size_t pos;
-      pos = keyvalue.find("=");
+      pos = keyvalue.find('=');
       if (pos == std::string::npos) throw ParseError("Not a Key-Value pair (cookie)");
       key = std::string(keyvalue.begin(), keyvalue.begin()+pos);
       value = std::string(keyvalue.begin()+pos+1, keyvalue.end());
@@ -115,7 +115,7 @@ namespace YaHTTP {
         if ((npos = cookiestr.find("; ", pos)) == std::string::npos)
           npos = cookiestr.size();
         std::string s = cookiestr.substr(pos, npos-pos);
-        if (s.find("=") != std::string::npos)
+        if (s.find('=') != std::string::npos)
           keyValuePair(s, k, v);
         else
           k = std::move(s);

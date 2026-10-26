@@ -20,11 +20,31 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #pragma once
-#include "namespaces.hh"
+#include <map>
+#include <string>
+#include <vector>
+
+#include "noinitvector.hh"
 
 struct EDNSOptionCode
 {
-  enum EDNSOptionCodeEnum {NSID=3, DAU=5, DHU=6, N3U=7, ECS=8, EXPIRE=9, COOKIE=10, TCPKEEPALIVE=11, PADDING=12, CHAIN=13, KEYTAG=14, EXTENDEDERROR=15};
+  // Temporary code assigned for OpenTelemetry TraceID and SpanID
+  enum EDNSOptionCodeEnum : uint16_t
+  {
+    NSID = 3,
+    DAU = 5,
+    DHU = 6,
+    N3U = 7,
+    ECS = 8,
+    EXPIRE = 9,
+    COOKIE = 10,
+    TCPKEEPALIVE = 11,
+    PADDING = 12,
+    CHAIN = 13,
+    KEYTAG = 14,
+    EXTENDEDERROR = 15,
+    TRACEPARENT = 65500
+  };
 };
 
 /* extract the position (relative to the optRR pointer!) and size of a specific EDNS0 option from a pointer on the beginning rdLen of the OPT RR */
@@ -41,6 +61,11 @@ struct EDNSOptionView
   std::vector<EDNSOptionViewValue> values;
 };
 
+struct EDNSOptionValues
+{
+  std::vector<std::string> values;
+};
+
 static constexpr size_t EDNSOptionCodeSize = 2;
 static constexpr size_t EDNSOptionLengthSize = 2;
 
@@ -54,3 +79,8 @@ bool getEDNSOptionsFromContent(const std::string& content, std::vector<std::pair
 bool getNextEDNSOption(const char* data, size_t dataLen, uint16_t& optionCode, uint16_t& optionLen);
 
 void generateEDNSOption(uint16_t optionCode, const std::string& payload, std::string& res);
+bool slowParseEDNSOptions(const PacketBuffer& packet, EDNSOptionViewMap& options);
+
+// called with std::vector<uint8_t> and PacketBuffer
+template <typename T>
+int locateEDNSOptRR(const T& packet, uint16_t* optStart, size_t* optLen, bool* last);

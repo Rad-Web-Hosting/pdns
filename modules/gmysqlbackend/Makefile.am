@@ -4,7 +4,8 @@ pkglib_LTLIBRARIES = libgmysqlbackend.la
 
 EXTRA_DIST = \
 	OBJECTFILES \
-	OBJECTLIBS
+	OBJECTLIBS \
+	meson.build
 
 dist_doc_DATA = \
 	dnssec-3.x_to_3.4.0_schema.mysql.sql \
@@ -20,5 +21,9 @@ libgmysqlbackend_la_SOURCES = \
 	gmysqlbackend.cc gmysqlbackend.hh \
 	smysql.cc smysql.hh
 
+if GMYSQLBACKEND_DYNMODULE
 libgmysqlbackend_la_LDFLAGS = -module -avoid-version $(LIBCRYPTO_LDFLAGS) $(LIBSSL_LDFLAGS)
+else
+libgmysqlbackend_la_LDFLAGS = -static -avoid-version $(LIBCRYPTO_LDFLAGS) $(LIBSSL_LDFLAGS)
+endif
 libgmysqlbackend_la_LIBADD = $(MYSQL_LIBS)

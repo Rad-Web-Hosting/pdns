@@ -27,11 +27,12 @@
 #include <iostream>
 #include <cstdio>
 #include <functional>
-#include <bitset>
 #include "pdnsexception.hh"
 #include "misc.hh"
 #include <netdb.h>
 #include <sstream>
+#include <sys/un.h>
+#include "expected.hh"
 
 #include "namespaces.hh"
 
@@ -52,6 +53,11 @@
 #define htole64(x) OSSwapHostToLittleInt64(x)
 #define be64toh(x) OSSwapBigToHostInt64(x)
 #define le64toh(x) OSSwapLittleToHostInt64(x)
+
+#if defined(CONNECT_DATA_IDEMPOTENT) && defined(CONNECT_RESUME_ON_READ_WRITE)
+#define CONNECTX_FASTOPEN 1
+#endif
+
 #endif
 
 #ifdef __sun
@@ -284,6 +290,14 @@ union ComboAddress
     return true;
   }
 
+  [[nodiscard]] bool isUnspecified() const
+  {
+    static const ComboAddress unspecifiedV4("0.0.0.0:0");
+    static const ComboAddress unspecifiedV6("[::]:0");
+    const auto compare = ComboAddress::addressOnlyEqual();
+    return compare(*this, unspecifiedV4) || compare(*this, unspecifiedV6);
+  }
+
   [[nodiscard]] ComboAddress mapToIPv4() const
   {
     if (!isMappedIPv4()) {
@@ -329,6 +343,9 @@ union ComboAddress
       if (ret != nullptr) {
         return host.data();
       }
+    }
+    else {
+      return "invalid";
     }
     return "invalid " + stringerror();
   }
@@ -413,7 +430,6 @@ union ComboAddress
 
   void reset()
   {
-    memset(&sin4, 0, sizeof(sin4));
     memset(&sin6, 0, sizeof(sin6));
   }
 
@@ -490,6 +506,136 @@ union ComboAddress
   };
 };
 
+union SockaddrWrapper
+{
+  sockaddr_in sin4{};
+  sockaddr_in6 sin6;
+  sockaddr_un sinun;
+
+  [[nodiscard]] socklen_t getSocklen() const
+  {
+    if (sin4.sin_family == AF_INET) {
+      return sizeof(sin4);
+    }
+    if (sin6.sin6_family == AF_INET6) {
+      return sizeof(sin6);
+    }
+    if (sinun.sun_family == AF_UNIX) {
+      return sizeof(sinun);
+    }
+    return 0;
+  }
+
+  SockaddrWrapper()
+  {
+    sin4.sin_family = AF_INET;
+    sin4.sin_addr.s_addr = 0;
+    sin4.sin_port = 0;
+  }
+
+  SockaddrWrapper(const struct sockaddr* socketAddress, socklen_t salen)
+  {
+    setSockaddr(socketAddress, salen);
+  };
+
+  SockaddrWrapper(const struct sockaddr_in6* socketAddress)
+  {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    setSockaddr(reinterpret_cast<const struct sockaddr*>(socketAddress), sizeof(struct sockaddr_in6));
+  };
+
+  SockaddrWrapper(const struct sockaddr_in* socketAddress)
+  {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    setSockaddr(reinterpret_cast<const struct sockaddr*>(socketAddress), sizeof(struct sockaddr_in));
+  };
+
+  SockaddrWrapper(const struct sockaddr_un* socketAddress)
+  {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    setSockaddr(reinterpret_cast<const struct sockaddr*>(socketAddress), sizeof(struct sockaddr_un));
+  };
+
+  void setSockaddr(const struct sockaddr* socketAddress, socklen_t salen)
+  {
+    if (salen > sizeof(struct sockaddr_un)) {
+      throw PDNSException("ComboAddress can't handle other than sockaddr_in, sockaddr_in6 or sockaddr_un");
+    }
+    memcpy(this, socketAddress, salen);
+  }
+
+  explicit SockaddrWrapper(const string& str, uint16_t port = 0)
+  {
+    memset(&sinun, 0, sizeof(sinun));
+    sin4.sin_family = AF_INET;
+    sin4.sin_port = 0;
+    if (str == "\"\"" || str == "''") {
+      throw PDNSException("Stray quotation marks in address.");
+    }
+    if (makeIPv4sockaddr(str, &sin4) != 0) {
+      sin6.sin6_family = AF_INET6;
+      if (makeIPv6sockaddr(str, &sin6) < 0) {
+        sinun.sun_family = AF_UNIX;
+        // only attempt Unix socket address if address candidate does not contain a port
+        if (str.find(':') != string::npos || makeUNsockaddr(str, &sinun) < 0) {
+          throw PDNSException("Unable to convert presentation address '" + str + "'");
+        }
+      }
+    }
+    if (sinun.sun_family != AF_UNIX && sin4.sin_port == 0) { // 'str' overrides port!
+      sin4.sin_port = htons(port);
+    }
+  }
+
+  [[nodiscard]] bool isIPv6() const
+  {
+    return sin4.sin_family == AF_INET6;
+  }
+  [[nodiscard]] bool isIPv4() const
+  {
+    return sin4.sin_family == AF_INET;
+  }
+  [[nodiscard]] bool isUnixSocket() const
+  {
+    return sin4.sin_family == AF_UNIX;
+  }
+
+  [[nodiscard]] string toString() const
+  {
+    if (sinun.sun_family == AF_UNIX) {
+      return static_cast<const char*>(sinun.sun_path);
+    }
+    std::array<char, 1024> host{};
+    if (sin4.sin_family != 0) {
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+      int retval = getnameinfo(reinterpret_cast<const struct sockaddr*>(this), getSocklen(), host.data(), host.size(), nullptr, 0, NI_NUMERICHOST);
+      if (retval == 0) {
+        return host.data();
+      }
+      return "invalid " + string(gai_strerror(retval));
+    }
+    return "invalid";
+  }
+
+  [[nodiscard]] string toStringWithPort() const
+  {
+    if (sinun.sun_family == AF_UNIX) {
+      return toString();
+    }
+    if (sin4.sin_family == AF_INET) {
+      return toString() + ":" + std::to_string(ntohs(sin4.sin_port));
+    }
+    return "[" + toString() + "]:" + std::to_string(ntohs(sin4.sin_port));
+  }
+
+  void reset()
+  {
+    memset(&sinun, 0, sizeof(sinun));
+  }
+
+  void tightenSocketPermissions(Logr::log_t slog, const std::string& gid) const;
+};
+
 /** This exception is thrown by the Netmask class and by extension by the NetmaskGroup class */
 class NetmaskException : public PDNSException
 {
@@ -502,7 +648,7 @@ inline ComboAddress makeComboAddress(const string& str)
 {
   ComboAddress address;
   address.sin4.sin_family = AF_INET;
-  if (inet_pton(AF_INET, str.c_str(), &address.sin4.sin_addr) <= 0) {
+  if (makeIPv4sockaddr(str, &address.sin4) < 0) {
     address.sin4.sin_family = AF_INET6;
     if (makeIPv6sockaddr(str, &address.sin6) < 0) {
       throw NetmaskException("Unable to convert '" + str + "' to a netmask");
@@ -602,20 +748,36 @@ public:
     }
   }
 
-  //! Constructor supplies the mask, which cannot be changed
-  Netmask(const string& mask)
+  enum stringType : uint8_t
   {
-    pair<string, string> split = splitField(mask, '/');
-    d_network = makeComboAddress(split.first);
+    humanString,
+    byteString,
+  };
+  //! Constructor supplies the mask, which cannot be changed
+  Netmask(const string& mask, stringType type = humanString)
+  {
+    if (type == byteString) {
+      uint8_t afi = mask.at(0);
+      size_t len = afi == 4 ? 4 : 16;
+      uint8_t bits = mask.at(len + 1);
 
-    if (!split.second.empty()) {
-      setBits(pdns::checked_stoi<uint8_t>(split.second));
-    }
-    else if (d_network.sin4.sin_family == AF_INET) {
-      setBits(32);
+      d_network = makeComboAddressFromRaw(afi, mask.substr(1, len));
+
+      setBits(bits);
     }
     else {
-      setBits(128);
+      pair<string, string> split = splitField(mask, '/');
+      d_network = makeComboAddress(split.first);
+
+      if (!split.second.empty()) {
+        setBits(pdns::checked_stoi<uint8_t>(split.second));
+      }
+      else if (d_network.sin4.sin_family == AF_INET) {
+        setBits(32);
+      }
+      else {
+        setBits(128);
+      }
     }
   }
 
@@ -649,6 +811,11 @@ public:
       }
       // still here, now match remaining bits
       uint8_t bits = d_bits % 8;
+      if (bits == 0) {
+        // no partial byte left to match, and lhs[index] would be one past the
+        // address for a /128
+        return true;
+      }
       auto mask = static_cast<uint8_t>(~(0xFF >> bits));
 
       return ((lhs[index]) == (rhs[index] & mask));
@@ -678,6 +845,17 @@ public:
   [[nodiscard]] string toStringNoMask() const
   {
     return d_network.toStringNoInterface();
+  }
+
+  [[nodiscard]] string toByteString() const
+  {
+    ostringstream tmp;
+
+    tmp << (d_network.isIPv4() ? "\x04" : "\x06")
+        << d_network.toByteString()
+        << getBits();
+
+    return tmp.str();
   }
 
   [[nodiscard]] const ComboAddress& getNetwork() const
@@ -731,6 +909,11 @@ public:
   bool operator==(const Netmask& rhs) const
   {
     return std::tie(d_network, d_bits) == std::tie(rhs.d_network, rhs.d_bits);
+  }
+
+  bool operator!=(const Netmask& rhs) const
+  {
+    return !operator==(rhs);
   }
 
   [[nodiscard]] bool empty() const
@@ -808,7 +991,7 @@ struct hash<Netmask>
 
 /** Binary tree map implementation with <Netmask,T> pair.
  *
- * This is an binary tree implementation for storing attributes for IPv4 and IPv6 prefixes.
+ * This is a binary tree implementation for storing attributes for IPv4 and IPv6 prefixes.
  * The most simple use case is simple NetmaskTree<bool> used by NetmaskGroup, which only
  * wants to know if given IP address is matched in the prefixes stored.
  *
@@ -1130,11 +1313,11 @@ public:
       return &d_node->node;
     }
 
-    bool operator==(const Iterator& rhs)
+    bool operator==(const Iterator& rhs) const
     {
       return (d_tree == rhs.d_tree && d_node == rhs.d_node);
     }
-    bool operator!=(const Iterator& rhs)
+    bool operator!=(const Iterator& rhs) const
     {
       return !(*this == rhs);
     }
@@ -1336,6 +1519,9 @@ public:
   //<! Returns "best match" for key_type, which might not be value
   [[nodiscard]] node_type* lookup(const key_type& value) const
   {
+    if (empty()) {
+      return nullptr;
+    }
     uint8_t max_bits = value.getBits();
     return lookupImpl(value, max_bits);
   }
@@ -1343,6 +1529,9 @@ public:
   //<! Perform best match lookup for value, using at most max_bits
   [[nodiscard]] node_type* lookup(const ComboAddress& value, int max_bits = 128) const
   {
+    if (empty()) {
+      return nullptr;
+    }
     uint8_t addr_bits = value.getBits();
     if (max_bits < 0 || max_bits > addr_bits) {
       max_bits = addr_bits;
@@ -1582,7 +1771,7 @@ public:
     tree.insert(netmask).second = positive;
   }
 
-  void addMasks(const NetmaskGroup& group, boost::optional<bool> positive)
+  void addMasks(const NetmaskGroup& group, std::optional<bool> positive)
   {
     for (const auto& entry : group.tree) {
       addMask(entry.first, positive ? *positive : entry.second);
@@ -1871,12 +2060,12 @@ private:
 };
 
 int SSocket(int family, int type, int flags);
-int SConnect(int sockfd, const ComboAddress& remote);
+int SConnect(int sockfd, bool fastopen, const ComboAddress& remote);
 /* tries to connect to remote for a maximum of timeout seconds.
    sockfd should be set to non-blocking beforehand.
    returns 0 on success (the socket is writable), throw a
    runtime_error otherwise */
-int SConnectWithTimeout(int sockfd, const ComboAddress& remote, const struct timeval& timeout);
+int SConnectWithTimeout(int sockfd, bool fastopen, const ComboAddress& remote, const struct timeval& timeout);
 int SBind(int sockfd, const ComboAddress& local);
 int SAccept(int sockfd, ComboAddress& remote);
 int SListen(int sockfd, int limit);
@@ -1896,7 +2085,7 @@ bool HarvestDestinationAddress(const struct msghdr* msgh, ComboAddress* destinat
 bool HarvestTimestamp(struct msghdr* msgh, struct timeval* timeval);
 void fillMSGHdr(struct msghdr* msgh, struct iovec* iov, cmsgbuf_aligned* cbuf, size_t cbufsize, char* data, size_t datalen, ComboAddress* addr);
 int sendOnNBSocket(int fileDesc, const struct msghdr* msgh);
-size_t sendMsgWithOptions(int socketDesc, const void* buffer, size_t len, const ComboAddress* dest, const ComboAddress* local, unsigned int localItf, int flags);
+[[nodiscard]] pdns::expected<size_t, int> sendMsgWithOptions(int socketDesc, const void* buffer, size_t len, const ComboAddress* dest, const ComboAddress* local, unsigned int localItf, int flags);
 
 /* requires a non-blocking, connected TCP socket */
 bool isTCPSocketUsable(int sock);

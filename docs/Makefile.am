@@ -49,7 +49,9 @@ endif
 
 man_MANS = $(MANPAGES_INSTALL)
 
-EXTRA_DIST = $(MANPAGES_DIST)
+EXTRA_DIST = \
+	$(MANPAGES_DIST) \
+	http-api/openapi/authoritative-api-openapi.yaml
 
 if HAVE_VENV
 if !HAVE_MANPAGES
@@ -66,7 +68,7 @@ mans/.complete: .venv
 
 .venv: requirements.txt
 	$(PYTHON) -m venv .venv
-	.venv/bin/pip install -U pip setuptools setuptools-git wheel
+	.venv/bin/pip install -U pip "setuptools<82"
 	.venv/bin/pip install -r ${srcdir}/requirements.txt
 
 .NOTPARALLEL: \
@@ -86,10 +88,13 @@ if !HAVE_MANPAGES
 endif
 	rm -rf mans
 
-html-docs: common/** manpages/** .venv *.rst
+http-api/openapi/authoritative-api-schema.yaml: .venv generate-jsonschema.py http-api/openapi/authoritative-api-openapi.yaml
+	.venv/bin/python ./generate-jsonschema.py http-api/openapi/authoritative-api-openapi.yaml $@
+
+html-docs: common/** manpages/** .venv *.rst http-api/openapi/authoritative-api-schema.yaml
 	.venv/bin/python -msphinx -b html . html-docs
 
-latex/PowerDNS-Authoritative.pdf: common/** manpages/** .venv *.rst
+latex/PowerDNS-Authoritative.pdf: common/** manpages/** .venv *.rst http-api/openapi/authoritative-api-schema.yaml
 	.venv/bin/python -msphinx -M latexpdf . .
 
 PowerDNS-Authoritative.pdf: latex/PowerDNS-Authoritative.pdf

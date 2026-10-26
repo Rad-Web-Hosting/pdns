@@ -37,25 +37,23 @@ typedef unsigned long long uint64_t;
 #include <csignal>
 #include <pthread.h>
 #include <semaphore.h>
-#include <csignal>
 #include <cerrno>
 #include <unistd.h>
-#include <string>
 
-#include "namespaces.hh"
+#include <memory>
 
 //! A semaphore class.
 class Semaphore
 {
 private:
-  typedef int sem_value_t;
+  using sem_value_t = int;
 
 #if defined(_AIX) || defined(__APPLE__)
-  uint32_t       m_magic;
+  uint32_t m_magic;
   pthread_mutex_t m_lock;
-  pthread_cond_t  m_gtzero;
-  sem_value_t     m_count;
-  uint32_t       m_nwaiters;
+  pthread_cond_t m_gtzero;
+  sem_value_t m_count;
+  uint32_t m_nwaiters;
 #else
   std::unique_ptr<sem_t> m_pSemaphore;
 #endif
@@ -65,7 +63,10 @@ public:
   Semaphore(const Semaphore&) = delete;
   void operator=(const Semaphore&) = delete;
   //! Default constructor.
-  Semaphore( unsigned int value = 0 );
+  Semaphore(unsigned int value = 0);
+
+  Semaphore(Semaphore&&) = delete;
+  Semaphore& operator=(Semaphore&&) = delete;
 
   //! Destructor.
   ~Semaphore();
@@ -80,62 +81,38 @@ public:
   int tryWait();
 
   //! Retrieves the semaphore value.
-  int getValue( Semaphore::sem_value_t *sval );
+  int getValue(Semaphore::sem_value_t* sval);
 };
 
 //! This is a utility class used for platform independent abstraction.
 class Utility
 {
 public:
-  typedef ::iovec iovec;
-  typedef ::pid_t pid_t;
-  typedef int sock_t;
-  typedef ::socklen_t socklen_t;
-
   //! Connect with timeout
   // Returns:
   //    > 0 on success
   //    -1 on error
   //    0 on timeout
-  static int timed_connect(sock_t sock,
-    const sockaddr *addr,
-    socklen_t sockaddr_size,
-    int timeout_sec,
-    int timeout_usec);
-
-  //! Returns the process id of the current process.
-  static pid_t getpid();
-
-  //! Gets the current time.
-  static int gettimeofday( struct timeval *tv, void *tz = NULL );
-
-  //! Converts an address from dot and numbers format to binary data.
-  static int inet_aton( const char *cp, struct in_addr *inp );
-
-  //! Converts an address from presentation format to network format.
-  static int inet_pton( int af, const char *src, void *dst );
-
-  //! The inet_ntop() function converts an address from network format (usually a struct in_addr or some other binary form, in network byte order) to presentation format.
-  static const char *inet_ntop( int af, const char *src, char *dst, size_t size );
-
-  //! Writes a vector.
-  static int writev( Utility::sock_t socket, const iovec *vector, size_t count );
+  static int timed_connect(int sock,
+                           const sockaddr* addr,
+                           socklen_t sockaddr_size,
+                           int timeout_sec,
+                           int timeout_usec);
 
   //! Drops the program's group privileges.
-  static void dropGroupPrivs( uid_t uid, gid_t gid );
+  static void dropGroupPrivs(uid_t uid, gid_t gid);
 
   //! Drops the program's user privileges.
-  static void dropUserPrivs( uid_t uid );
-  
-  //! Sets the socket into Bind-any mode
-  static void setBindAny ( int af, Utility::sock_t socket );
-  
-  //! Sleeps for a number of seconds.
-  static unsigned int sleep( unsigned int seconds );
-  
-  //! Sleeps for a number of microseconds.
-  static void usleep( unsigned long usec );
+  static void dropUserPrivs(uid_t uid);
 
-  static time_t timegm(struct tm *tm);
-  
+  //! Sets the socket into Bind-any mode
+  static void setBindAny(int family, int socket);
+
+  //! Sleeps for a number of seconds.
+  static void sleep(unsigned int seconds);
+
+  //! Sleeps for a number of microseconds.
+  static void usleep(unsigned long usec);
+
+  static time_t timegm(struct tm* time);
 };

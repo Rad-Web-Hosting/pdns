@@ -26,8 +26,8 @@ at least the following information (if they are relevant):
 **Note:** if you're planning to file a security bug, look at our
 [Security Policy](https://github.com/PowerDNS/pdns/security/policy) first.
 
-When filing an issue or bug report, make the title of the issue a very short
-summary (e.g. "Recursor crash when some-setting is set to 'crash'"). In the
+When filing an issue or bug report, write a very short summary (e.g.
+"Recursor crashes when some-setting is set to 'crash'") for the title. In the
 content of the issue, be as detailed as possible. Supply at least the following
 information:
 
@@ -59,6 +59,7 @@ A pull request, at the least, should have:
 And must:
 * Be filed against the master branch before any release branch
 * Pass all tests in our CI (currently GitHub Actions and CircleCI)
+* Align with the [AI Policy](AI_POLICY.md)
 
 Information on the tests can be found in the repository at
 [/regression-tests/README.md](https://github.com/PowerDNS/pdns/blob/master/regression-tests/README.md)
@@ -69,9 +70,27 @@ plus various other directories with `regression-tests.*` names.
 ## Commit Guidelines
 * Tell why the change does what it does, not how it does it.
 * The first line should be short (preferably less than 50 characters)
-* The rest of the commit body should be wrapped at 72 characters (see [this](http://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html) for more info)
+* The rest of the commit body should be wrapped at 72 characters (see [this](https://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html) for more info)
 * If this commit fixes an issue, put "Closes #XXXX" in the message
 * Do not put whitespace fixes/cleanup and functionality changes in the same commit
+* Include a valid "Signed-off-by" line as a [Developer Certificate of Origin](https://en.wikipedia.org/wiki/Developer_Certificate_of_Origin). See the [PowerDNS DCO](https://github.com/PowerDNS/pdns/blob/master/DCO)
+
+# Developer Certificate of Origin
+
+We require a "Signed-off-by" on all commits contributed to the PowerDNS codebase, as a [Developer Certificate of Origin](https://en.wikipedia.org/wiki/Developer_Certificate_of_Origin). See the [PowerDNS DCO](https://github.com/PowerDNS/pdns/blob/master/DCO).
+
+If you have properly configured `user.name` and `user.email` in your `Git` configuration, `Git` includes a `-s` command line option to append this line automatically to your commit message:
+
+```sh
+git commit -s -m 'Commit message'
+```
+
+If you already committed your changes, and you have only one commit on your branch, you can use `git commit --amend --signoff` to add a sign-off to the latest commit.
+If you have more than one commit on your branch, you can instead use `git rebase` to add a sign-off to existing commits. For example, if your branch is based on the `master` one:
+
+```sh
+git rebase --signoff master
+```
 
 # Formatting and Coding Guidelines
 

@@ -32,7 +32,7 @@
 #include "credentials.hh"
 #include "namespaces.hh"
 #include "rec_channel.hh"
-#include "settings/cxxsettings.hh"
+#include "rec-rust-lib/cxxsettings.hh"
 #include "logger.hh"
 #include "logging.hh"
 
@@ -57,14 +57,14 @@ static void initArguments(int argc, char** argv, Logr::log_t log)
   arg().laxParse(argc, argv);
   if (arg().mustDo("version")) {
     cout << "rec_control version " << VERSION << endl;
-    exit(0);
+    exit(0); // NOLINT(concurrency-mt-unsafe)
   }
   if (arg().mustDo("help") || arg().getCommands().empty()) {
     cout << "syntax: rec_control [options] command, options as below: " << endl
          << endl;
     cout << arg().helpstring(arg()["help"]) << endl;
     cout << "In addition, 'rec_control help' can be used to retrieve a list\nof available commands from PowerDNS" << endl;
-    exit(arg().mustDo("help") ? 0 : 99);
+    exit(arg().mustDo("help") ? 0 : 99); // NOLINT(concurrency-mt-unsafe)
   }
 
   string configname = ::arg()["config-dir"] + "/recursor";
@@ -247,6 +247,10 @@ static RecursorControlChannel::Answer showYAML(const std::string& path)
   try {
     std::string msg;
     auto converted = pdns::settings::rec::oldStyleSettingsFileToYaml(configName, true);
+    if (converted == "{}\n") {
+      msg += "There seems to be no YAML config in " + configName;
+      return {1, std::move(msg)};
+    }
     msg += "# Start of converted recursor.yml based on " + configName + "\n";
     msg += converted;
     msg += "# Validation result: ";
@@ -295,11 +299,11 @@ static void recControlLoggerBackend(const Logging::Entry& entry)
   buf.str("");
   buf << "msg=" << std::quoted(entry.message);
   if (entry.error) {
-    buf << " error=" << std::quoted(entry.error.get());
+    buf << " error=" << std::quoted(entry.error.value());
   }
 
   if (entry.name) {
-    buf << " subsystem=" << std::quoted(entry.name.get());
+    buf << " subsystem=" << std::quoted(entry.name.value());
   }
   buf << " level=" << std::quoted(std::to_string(entry.level));
   if (entry.d_priority != 0) {
@@ -325,6 +329,7 @@ int main(int argc, char** argv)
 
   const set<string> fileCommands = {
     "dump-cache",
+    "dump-cookies",
     "dump-edns",
     "dump-ednsstatus",
     "dump-nsspeeds",
@@ -337,15 +342,17 @@ int main(int argc, char** argv)
     "trace-regex",
   };
   try {
+    // needed to be able to parse (and convert to YAML) custom RPZ entries
+    reportAllTypes();
     initArguments(argc, argv, log);
     string sockname = "pdns_recursor";
 
-    if (arg()["config-name"] != "")
+    if (!empty(arg()["config-name"])) {
       sockname += "-" + arg()["config-name"];
-
-    if (!arg()["process"].empty())
+    }
+    if (!arg()["process"].empty()) {
       sockname += "." + arg()["process"];
-
+    }
     sockname.append(".controlsocket");
 
     const vector<string>& commands = arg().getCommands();
@@ -381,39 +388,39 @@ int main(int argc, char** argv)
     }
 
     string command;
-    int fd = -1;
-    unsigned int i = 0;
-    while (i < commands.size()) {
-      if (i > 0) {
+    int fileDesc = -1;
+    unsigned int iteration = 0;
+    while (iteration < commands.size()) {
+      if (iteration > 0) {
         command += " ";
       }
-      command += commands[i];
+      command += commands[iteration];
 
       // special case: trace-regex with no arguments is clear regex
       auto traceregexClear = command == "trace-regex" && commands.size() == 1;
 
-      if (fileCommands.count(commands[i]) > 0 && !traceregexClear) {
-        if (i + 1 < commands.size()) {
+      if (fileCommands.count(commands[iteration]) > 0 && !traceregexClear) {
+        if (iteration + 1 < commands.size()) {
           // dump-rpz is different, it also has a zonename as argument
           // trace-regex is different, it also has a regexp as argument
-          if (commands[i] == "dump-rpz" || commands[i] == "trace-regex") {
-            if (i + 2 < commands.size()) {
-              ++i;
+          if (commands[iteration] == "dump-rpz" || commands[iteration] == "trace-regex") {
+            if (iteration + 2 < commands.size()) {
+              ++iteration;
               command += " ";
-              command += commands[i]; // add rpzname/regex and continue with filename
+              command += commands[iteration]; // add rpzname/regex and continue with filename
             }
             else {
               throw PDNSException("Command needs two arguments");
             }
           }
-          ++i;
-          if (commands[i] == "-") {
-            fd = STDOUT_FILENO;
+          ++iteration;
+          if (commands[iteration] == "-") {
+            fileDesc = STDOUT_FILENO;
           }
           else {
-            fd = open(commands[i].c_str(), O_CREAT | O_EXCL | O_WRONLY, 0660);
+            fileDesc = open(commands[iteration].c_str(), O_CREAT | O_EXCL | O_WRONLY, 0660);
           }
-          if (fd == -1) {
+          if (fileDesc == -1) {
             int err = errno;
             throw PDNSException("Error opening dump file for writing: " + stringerror(err));
           }
@@ -422,15 +429,15 @@ int main(int argc, char** argv)
           throw PDNSException("Command needs a file argument");
         }
       }
-      ++i;
+      ++iteration;
     }
 
-    auto timeout = arg().asNum("timeout");
+    auto timeout = arg().asNum<time_t>("timeout");
     RecursorControlChannel rccS;
     rccS.connect(arg()["socket-dir"], sockname);
-    rccS.send(rccS.d_fd, {0, std::move(command)}, timeout, fd);
+    RecursorControlChannel::send(rccS.getDescriptor(), {0, std::move(command)}, timeout, fileDesc);
 
-    auto receive = rccS.recv(rccS.d_fd, timeout);
+    auto receive = RecursorControlChannel::recv(rccS.getDescriptor(), timeout);
     if (receive.d_ret != 0) {
       cerr << receive.d_str;
     }
@@ -444,3 +451,4 @@ int main(int argc, char** argv)
     return 1;
   }
 }
+#include "rec-web-stubs.hh"

@@ -9,15 +9,16 @@ queries for which the lookup should be done.
 
 The first step is to get a :class:`KeyValueStore` object via one of the following functions:
 
- * :func:`newCDBKVStore` for a CDB database ;
- * :func:`newLMDBKVStore` for a LMDB one.
+* :func:`newCDBKVStore` for a CDB database ;
+* :func:`newLMDBKVStore` for a LMDB one.
+* :func:`newMMDBKVStore` for a MMDB one.
 
 Then the key used for the lookup can be selected via one of the following functions:
 
- * the exact qname with :func:`KeyValueLookupKeyQName` ;
- * a suffix match via :func:`KeyValueLookupKeySuffix`, meaning that several lookups will be done, removing one label from the qname at a time, until a match has been found or there is no label left ;
- * the source IP, in network byte order, with :func:`KeyValueLookupKeySourceIP` ;
- * the value of an existing tag with :func:`KeyValueLookupKeyTag`.
+* the exact qname with :func:`KeyValueLookupKeyQName` ;
+* a suffix match via :func:`KeyValueLookupKeySuffix`, meaning that several lookups will be done, removing one label from the qname at a time, until a match has been found or there is no label left ;
+* the source IP, in network byte order, with :func:`KeyValueLookupKeySourceIP` ;
+* the value of an existing tag with :func:`KeyValueLookupKeyTag`.
 
 For example, to do a suffix-based lookup into a LMDB KVS database, the following rule can be used:
 
@@ -29,9 +30,9 @@ For example, to do a suffix-based lookup into a LMDB KVS database, the following
 For a query whose qname is "sub.domain.powerdns.com.", and for which only the "\\8powerdns\\3com\\0" key exists in the database,
 this would result in the following lookups:
 
- * \\3sub\\6domain\\8powerdns\\3com\\0
- * \\6domain\\8powerdns\\3com\\0
- * \\8powerdns\\3com\\0
+* ``\\3sub\\6domain\\8powerdns\\3com\\0``
+* ``\\6domain\\8powerdns\\3com\\0``
+* ``\\8powerdns\\3com\\0``
 
 Then a match is found for the last key, and the corresponding value is stored into the 'kvs-suffix-result' tag. This tag can now be used in subsequent rules to take an action based on the result of the lookup.
 Note that the tag is also created when the key has not been found, but the content of the tag is empty.
@@ -45,11 +46,9 @@ If the value found in the LMDB database for the key '\\8powerdns\\3com\\0' was '
 
 .. class:: KeyValueStore
 
-  .. versionadded:: 1.4.0
-
   Represents a Key Value Store
 
-  .. method:: KeyValueStore:lookup(key [, wireFormat])
+  .. method:: lookup(key [, wireFormat])
 
     Does a lookup into the corresponding key value store, and return the result as a string.
     The key can be a :class:`ComboAddress` obtained via the :func:`newCA`, a :class:`DNSName` obtained via the :func:`newDNSName` function, or a raw string.
@@ -57,7 +56,7 @@ If the value found in the LMDB database for the key '\\8powerdns\\3com\\0' was '
     :param ComboAddress, DNSName or string key: The key to look up
     :param bool wireFormat: If the key is DNSName, whether to use to do the lookup in wire format (default) or in plain text
 
-  .. method:: KeyValueStore:lookupSuffix(key [, minLabels [, wireFormat]])
+  .. method:: lookupSuffix(key [, minLabels [, wireFormat]])
 
     Does a suffix-based lookup into the corresponding key value store, and return the result as a string.
     The key should be a :class:`DNSName` object obtained via the :func:`newDNSName` function, and several lookups will be done, removing one label from the name at a time until a match has been found or there is no label left.
@@ -67,14 +66,12 @@ If the value found in the LMDB database for the key '\\8powerdns\\3com\\0' was '
     :param int minLabels: The minimum number of labels to do a lookup for. Default is 0 which means unlimited
     :param bool wireFormat: Whether to do the lookup in wire format (default) or in plain text
 
-  .. method:: KeyValueStore:reload()
+  .. method:: reload()
 
     Reload the database if this is supported by the underlying store. As of 1.4.0, only CDB stores can be reloaded, and this method is a no-op for LMDB stores.
 
 
 .. function:: KeyValueLookupKeyQName([wireFormat]) -> KeyValueLookupKey
-
-  .. versionadded:: 1.4.0
 
   Return a new KeyValueLookupKey object that, when passed to :func:`KeyValueStoreLookupAction` or :func:`KeyValueStoreLookupRule`, will return the qname of the query in DNS wire format.
 
@@ -82,53 +79,39 @@ If the value found in the LMDB database for the key '\\8powerdns\\3com\\0' was '
 
 .. function:: KeyValueLookupKeySourceIP([v4mask [, v6mask]]) -> KeyValueLookupKey
 
-  .. versionadded:: 1.4.0
-
-  .. versionchanged:: 1.5.0
-    Optional parameters ``v4mask`` and ``v6mask`` added.
-
-  .. versionchanged:: 1.7.0
-    Optional parameter ``includePort`` added.
-
   Return a new KeyValueLookupKey object that, when passed to :func:`KeyValueStoreLookupAction` or :func:`KeyValueStoreLookupRule`, will return the source IP of the client in network byte-order.
 
   :param int v4mask: Mask applied to IPv4 addresses. Default is 32 (the whole address)
   :param int v6mask: Mask applied to IPv6 addresses. Default is 128 (the whole address)
-  :param int includePort: Whether to append the port (in network byte-order) after the address. Default is false
+  :param int includePort: Whether to append the port (in network byte-order) after the address. Default is false. Note that this option is NOT compatible with MMDB databases.
 
 .. function:: KeyValueLookupKeySuffix([minLabels [, wireFormat]]) -> KeyValueLookupKey
-
-  .. versionadded:: 1.4.0
 
   Return a new KeyValueLookupKey object that, when passed to :func:`KeyValueStoreLookupAction` or :func:`KeyValueStoreLookupRule`, will return a vector of keys based on the labels of the qname in DNS wire format or plain text.
   For example if the qname is sub.domain.powerdns.com. the following keys will be returned:
 
-   * \\3sub\\6domain\\8powerdns\\3com\\0
-   * \\6domain\\8powerdns\\3com\\0
-   * \\8powerdns\\3com\\0
-   * \\3com\\0
-   * \\0
+  * ``\\3sub\\6domain\\8powerdns\\3com\\0``
+  * ``\\6domain\\8powerdns\\3com\\0``
+  * ``\\8powerdns\\3com\\0``
+  * ``\\3com\\0``
+  * ``\\0``
 
   If ``minLabels`` is set to a value larger than 0 the lookup will only be done as long as there is at least ``minLabels`` remaining. Taking back our previous example, it means only the following keys will be returned if ``minLabels`` is set to 2;
 
-   * \\3sub\\6domain\\8powerdns\\3com\\0
-   * \\6domain\\8powerdns\\3com\\0
-   * \\8powerdns\\3com\\0
+  * ``\\3sub\\6domain\\8powerdns\\3com\\0``
+  * ``\\6domain\\8powerdns\\3com\\0``
+  * ``\\8powerdns\\3com\\0``
 
   :param int minLabels: The minimum number of labels to do a lookup for. Default is 0 which means unlimited
   :param bool wireFormat: Whether to do the lookup in wire format (default) or in plain text
 
 .. function:: KeyValueLookupKeyTag(tagName) -> KeyValueLookupKey
 
-  .. versionadded:: 1.4.0
-
   Return a new KeyValueLookupKey object that, when passed to :func:`KeyValueStoreLookupAction`, will return the value of the corresponding tag for this query, if it exists.
 
   :param str tagName: The name of the tag.
 
 .. function:: newCDBKVStore(filename, refreshDelay) -> KeyValueStore
-
-  .. versionadded:: 1.4.0
 
   Return a new KeyValueStore object associated to the corresponding CDB database. The modification time
   of the CDB file will be checked every 'refreshDelay' second and the database re-opened if needed.
@@ -138,14 +121,18 @@ If the value found in the LMDB database for the key '\\8powerdns\\3com\\0' was '
 
 .. function:: newLMDBKVStore(filename, dbName [, noLock]) -> KeyValueStore
 
-  .. versionadded:: 1.4.0
-
-  .. versionchanged:: 1.7.0
-    Added the optional parameter ``noLock``.
-
   Return a new KeyValueStore object associated to the corresponding LMDB database. The database must have been created
   with the ``MDB_NOSUBDIR`` flag. Since 1.7.0, the database is opened with the ``MDB_READONLY`` flag, and optionally with ``MDB_NOLOCK`` if ``noLock`` is set to true.
 
   :param string filename: The path to an existing LMDB database created with ``MDB_NOSUBDIR``
   :param string dbName: The name of the database to use
   :param bool noLock: Whether to open the database with the ``MDB_NOLOCK`` flag. Default is false
+
+.. function:: newMMDBKVStore(mmdb, queryParams) -> KeyValueStore
+
+  .. versionadded:: 2.2.0
+
+  Return a new KeyValueStore object associated to the corresponding MMDB database. The database can be created using :func:`openMMDB`.
+
+  :param MMDB mmdb: The reference to an existing MMDB database created with :func:`openMMDB`.
+  :param str-or-list queryParams: Key or list of keys to fetch from the retrieved object from the MMDB database. Use empty list to retrieve the whole object.

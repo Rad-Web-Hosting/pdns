@@ -1,0 +1,907 @@
+Changelogs for 5.4.X
+====================
+
+Before upgrading, it is advised to read the :doc:`../upgrade`.
+
+.. changelog::
+  :version: 5.4.8
+  :released: 21st of October 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18197
+
+    Fix PowerDNS Security Advisory 2026-12 for PowerDNS Recursor: Multiple Issues
+
+.. changelog::
+   :version: 5.4.7
+   :released: 1st of October 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18029
+
+    Rec: Fix Lua to YAML conversion of custom RPZ policies
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18035
+
+    Rec: retrieve DNSSEC data with RPZ processing disabled
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18068
+
+    Rec: Catch exception thrown by parsing system resolver result
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18070
+
+    Fix(rec): Wipe caches when wiping all NTA's
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18084
+
+    Rec and auth: fix axfr failure to invalidate fd on close in all cases.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 18085
+
+    Rec: rpz transfer limits are megabytes, not bytes
+
+.. changelog::
+  :version: 5.4.6
+  :released: 3rd of September 2026
+
+  .. change::
+     :tags: Improvements
+     :pullreq: 17967
+     :tickets: 17869
+
+     Skip unexpected tags when deserializing protobuf messages
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17968, 17983
+    :tickets: 17897
+
+    Store scope zero replies in packetcache and modify on retrieval.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17969
+    :tickets: 17696
+
+    Update our Rust deps.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17996
+    :tickets: 17973
+
+    Make getOpenFileDescriptors fast under Linux.
+
+.. changelog::
+  :version: 5.4.5
+  :released: 6th of August 2026
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17836
+    :tickets: 16986
+
+    Add ubuntu-resolute build target.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17840
+    :tickets: 17786
+
+    Fix disabling algo 8 also disables DS digest 2.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17847
+    :tickets: 17797, 17790
+
+    Account for the existing content when parsing labels.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17850
+    :tickets: 17835
+
+    Do not index past the address for byte-aligned prefixes.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17853
+    :tickets: 17157
+
+    Fix DNAME interaction with aggressive use of NSEC3
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17854
+    :tickets: 17156
+
+    Fix DNSSEC validation of wildcard-expanded proof.
+
+.. changelog::
+  :version: 5.4.4
+  :released: 22nd of July 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17755
+
+    Fix PowerDNS Security Advisory 2026-10 for PowerDNS Recursor: Multiple Issues
+
+.. changelog::
+  :version: 5.4.3
+  :released: 25th of June 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17593
+
+    Fix PowerDNS Security Advisory 2026-08 for PowerDNS Recursor: Multiple Issues
+
+.. changelog::
+  :version: 5.4.2
+  :released: 3rd of June 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17301
+    :tickets: 16993
+
+    Fix serialization of cached authority records.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17312
+    :tickets: 17005
+
+    Continue processing response Policies if a discarded policy is hit.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17313
+    :tickets: 16936
+
+    Drop QR=0 responses from auths.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17314
+    :tickets: 17161
+
+    Skip ZONEMD records in RPZs.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17315
+    :tickets: 17240
+
+    Widen types passed to xfr*BitInt to reject too large values.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17316
+    :tickets: 17252
+
+    Increase entry count in unit test so we hit the 8192 byte limit on 32 bit systems too.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17319
+    :tickets: 17238
+
+    build(deps): bump rustls-webpki from 0.103.10 to 0.103.13.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17486
+    :tickets: 17396
+
+    snmp-agent: Fix a memory leak.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17489
+    :tickets: 17398
+
+    Minor libssl fixes.
+
+.. changelog::
+  :version: 5.4.1
+  :released: 22nd of April 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17194,17197,17199,17201,17202,17203,17205
+
+    Fix PowerDNS Security Advisory 2026-03 for PowerDNS Recursor: Multiple Issues
+
+.. changelog::
+  :version: 5.4.0
+  :released: 9th of March 2026 with no changes since 5.4.0-rc1 except the version.
+
+.. changelog::
+  :version: 5.4.0-rc1
+  :released: 17th of February 2026
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16756
+
+    Harmonize with dnsdist PR #16741 with respect to OpenTelemetry instance name.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16784
+
+    Coverity 1644498 Variable copied when it could be moved.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16786
+
+    Opentelemetry: add flags field in TRACEPARENT EDNS option.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16790
+    :tickets: 16785
+
+    No longer allow passing the api-key as a query argument.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16817
+    :tickets: 16805
+
+    Base64 tidy and unit test fix.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16810
+
+    Correctly compute DNSSEC public key exponent lengths when larger than 255.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16826
+
+    Drop usage of libboost-system library (Chris Hofstaedtler).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16836
+
+    Allowed names should not include names from CNAMEs that cannot be reached (SA 2026-01).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16837
+
+    Limit amount of work done for a single client query in new ways (SA 2026-01).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16838
+
+    Limit packet and record cache entry size (SA 2026-01).
+
+.. changelog::
+  :version: 5.4.0-beta1
+  :released: 27th of January 2026
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16651
+
+    Print irrelevant entries in cookie dump more nicely.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16655
+
+    Make code boost 1.66 compatible again.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16662,16736
+
+    Add acquire/release in broadcast pipes to fix TSAN issues seen on trixie.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16709
+    :tickets: 16673
+
+    Handle applicable dynamic parts of YAML-only config when reloading Lua config.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16710
+
+    Harden SVCB record parsing.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16711
+    :tickets: 14983
+
+    dnsrecords: Add RESINFO DNS Record (RFC 9606).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16727
+
+    Add REST interface for manipulating Open Telemetry Trace Conditions.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16730
+
+    EDNS cookies: fix timestamp handling.
+
+.. changelog::
+  :version: 5.4.0-alpha1
+  :released: 16th of December 2025
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16627
+
+    Format rust IOErrors in a nicer way instead of using the default formatter.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16624
+    :tickets: 16606
+
+    Move away from rustls-pemfile including update of Rust dependencies.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16615
+
+    Do proper validation of TCP notifies.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16614
+
+    Ensure authRecords is empty, as handleHit checks that.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16587
+
+    Coverity 20251203.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16588
+
+    Kill a handful of clang++ warnings, mostly comparing unsigned to a signed constant.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16487
+
+    Switch trivial usage of boost::optional to std::optional.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16580
+    :tickets: 16572
+
+    Move g_logRPZChanges to proper spot.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16553
+
+    Always do ANY queries using TCP.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16570
+
+    Rewrite all unwrap calls in web.rs.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16565
+    :tickets: 16557
+
+    Run clippy when CARGO_USE_DEV and CARGO_USE_CLIPPY are set.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16546
+    :tickets: 16544
+
+    Build our Rust lib in dev profile when CARGO_USE_DEV is set.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16447
+
+    Remove first set of unused imports (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16496
+
+    Tidy tcounter related code.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16531
+
+    Spelling (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16530
+
+    Fix mixed implicit and explicit returns (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16526
+
+    Remove unused assignment (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16515
+
+    Remove redundant assignment (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16516
+
+    Remove unused assignment (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16523
+    :tickets: 16483
+
+    Update to coverallsapp github-action v2.3.7 (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16495
+
+    Remove horrible unused argument with default value (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16502
+
+    Use immediate class parent for super (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16509
+    :tickets: 16500
+
+    Fix `with open(...) as f:` (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16484
+
+    Improve reading of operator expression (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16500
+
+    Use `with open(...) as f:` to ensure file is always closed (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16501
+
+    Stop mixing implicit and explicit returns (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16494
+
+    Codeql unused loop iterator name (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16497
+
+    Fix coverity 1635199, 1643012, 1643013.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16498
+
+    Codeql use identifiers (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16490
+
+    Do not mutate default values (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16491
+
+    Only import doqclient once (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16493
+
+    Drop unused format argument (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16492
+
+    Use assertNotEqual (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16489
+
+    Do not catch `KeyboardInterrupt` or `SystemExit` (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16488
+
+    Do not call `sys.exit` with a void return (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16479
+
+    Convert metrics_table.py to a module (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16480
+
+    Switch TestRuleMetricsDefault to pass (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16481
+
+    Codeql imprecise assert (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16483
+
+    Drop useless lambda (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16478
+
+    Fix duplicate key in dict literal (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16476
+
+    Contrib/ProtobufLogger.py: Fix syntax error that crept in with 16458.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16077
+    :tickets: 14734
+
+    Prep, but do not actually move to C++20.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16362
+
+    Implement new feature to only generate OpenTelemetry Traces on certain conditions.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16427
+
+    rec_control get-parameter: print runtime settings in YAML format if YAML config is active.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16454
+
+    Chore: Clean up unused variables (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16457
+
+    Clean up unreachable code (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16459
+    :tickets: 15336
+
+    Fix try/except/as notation (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16460
+    :tickets: 16458
+
+    Avoid warning about mixed explicit/implicit returns (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16440
+    :tickets: 16091
+
+    Cleanup endianness determining code.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16458
+
+    Use map for getAppliedPolicyTypeAsString (Josh Soref).
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16461
+    :tickets: 16455
+
+    fix parsing of webserver loglevel "none".
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16438
+
+    Remove options that were deprecated a long time ago.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16384
+
+    Remember if an answer was received over TCP in record cache.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16426
+
+    rec-lua-conf.* tidy.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16394
+
+    Don't use a vector of string for internal public suffix list.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16392
+
+    Make version number in rust lib confirm to Rust specifics.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16338
+
+    Tighten delegation accept.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16307
+
+    Explicit disabling/enabling of tls-gnutls for full and least configs and packages.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16259
+
+    Allow selecting a specific version of Lua with meson.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16308
+
+    Fix a few Coverity found issues, all low severity move optimizations.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16288
+
+    Prevent a potential race condition in cache cleaning.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16190
+
+    OT tracing: define more Spans with actual duration and add more attributes.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16232
+
+    Allow ability to validate certificates (and more) for outgoing DoT connections.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16220
+
+    Move test-protozero-trace.cc to toplevel and add it in the autotools build where it was missing.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16219
+
+    ProtobufLogger: print OpenTelemetry IDs in hex, add proper command arg parser.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16251
+
+    Silence rust warning.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16236
+
+    Docs: Indent list (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16237
+
+    Docs: Add trailing period (Josh Soref).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16227
+
+    Do not include dnsseckeeper.hh and ueberbackend.hh  in rec.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16204
+
+    We need a usable cargo for sdist so do not download (and install) rust but use package.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16200
+
+    Fix a few issues reported by coverity, all minor.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16194
+
+    Rework command dispatcher to be table based.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16188
+    :tickets: 16180
+
+    Fix release builds by updating the locked Rust lib version.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16175
+
+    Move help text to a table so it's easier to maintain.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16167
+
+    Update the Rust library version when generating a tarball.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16138
+
+    Add a few fields in protobuf logs: ede, edeText and OpenTelemetryTraceID.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16104
+
+    Better error message when reload-yaml fails.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 15412,16131
+
+    Implement DNS cookie support for outgoing requests.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16106
+    :tickets: 16101
+
+    Update cargos for rec and dnsdist.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16103
+
+    Warn on passwordless webserver startup and extends docs.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16098
+
+    Do not hash (or compare) OpenTelemetry Trace EDNS value for packetcache.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16094
+
+    Some error paths do no create thread 0 so don't join it.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 15945
+
+    pubsuffix: tidy and use C++ strings.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 15943
+
+    Add tc flag in answer log (zhaojs).
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 15997
+
+    Remove SLOG macro usage in rec specific code.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 15991
+    :tickets: 15972
+
+    Fix Boost system lib req: it is no longer a lib for boost >= 1.89.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 15949
+
+    Assorted tidy.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 15950
+
+    Reorder fields of record cache entry by size (saves 8 bytes per entry on 64-bit systems).
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 15915
+    :tickets: 15896
+
+    Rec and dnsdist: properly set up env vars for rust build.
+

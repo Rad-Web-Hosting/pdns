@@ -19,18 +19,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
-#include "dns.hh"
-#include <iostream>
-#include <string>
-#include <vector>
-#include <utility>
-#include <sstream>
+
 #include "qtype.hh"
 #include "misc.hh"
 
 static_assert(sizeof(QType) == 2, "QType is not 2 bytes in size, something is wrong!");
 
-const map<const string, uint16_t> QType::names = {
+const std::map<const std::string, uint16_t> QType::names = {
   {"A", 1},
   {"NS", 2},
   {"CNAME", 5},
@@ -76,6 +71,8 @@ const map<const string, uint16_t> QType::names = {
   {"ZONEMD", 63},
   {"SVCB", 64},
   {"HTTPS", 65},
+  {"HHIT", 67},
+  {"BRID", 68},
   {"SPF", 99},
   {"NID", 104},
   {"L32", 105},
@@ -92,6 +89,8 @@ const map<const string, uint16_t> QType::names = {
   {"ANY", 255},
   {"URI", 256},
   {"CAA", 257},
+  {"RESINFO", 261},
+  {"WALLET", 262},
   {"DLV", 32769},
   {"ADDR", 65400},
 #if !defined(RECURSOR)
@@ -100,17 +99,17 @@ const map<const string, uint16_t> QType::names = {
 #endif
 };
 
-static map<uint16_t, const string> swapElements(const map<const string, uint16_t>& names) {
-  map<uint16_t, const string> ret;
+static std::map<uint16_t, const std::string> swapElements(const std::map<const std::string, uint16_t>& names)
+{
+  std::map<uint16_t, const std::string> ret;
 
-  for (const auto& n : names) {
-    ret.emplace(n.second, n.first);
+  for (const auto& name : names) {
+    ret.emplace(name.second, name.first);
   }
   return ret;
 }
 
-const map<uint16_t, const string> QType::numbers = swapElements(names);
-
+const std::map<uint16_t, const std::string> QType::numbers = swapElements(names);
 
 bool QType::isSupportedType() const
 {
@@ -120,13 +119,10 @@ bool QType::isSupportedType() const
 bool QType::isMetadataType() const
 {
   // rfc6895 section 3.1, note ANY is 255 and falls outside the range
-  if (code == QType::OPT || (code >= rfc6895MetaLowerBound && code <= rfc6895MetaUpperBound)) {
-    return true;
-  }
-  return false;
+  return code == QType::OPT || (code >= rfc6895MetaLowerBound && code <= rfc6895MetaUpperBound);
 }
 
-const string QType::toString() const
+std::string QType::toString() const
 {
   const auto& name = numbers.find(code);
   if (name != numbers.cend()) {
@@ -135,38 +131,64 @@ const string QType::toString() const
   return "TYPE" + std::to_string(code);
 }
 
-uint16_t QType::chartocode(const char *p)
+uint16_t QType::chartocode(const char* ptr)
 {
-  string P = toUpper(p);
+  std::string upper = toUpper(ptr);
 
-  const auto& num = names.find(P);
+  const auto& num = names.find(upper);
   if (num != names.cend()) {
     return num->second;
   }
-  if (*p == '#') {
-    return static_cast<uint16_t>(atoi(p + 1));
-  }
 
-  if (boost::starts_with(P, "TYPE")) {
-    return static_cast<uint16_t>(atoi(p + 4));
+  const char* digits{nullptr};
+  if (*ptr == '#') {
+    digits = ptr + 1; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   }
-
+  else if (boost::starts_with(upper, "TYPE")) {
+    digits = ptr + 4; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  }
+  if (digits != nullptr) {
+    // We would ideally return pdns::checked_stoi<uint16_t>(digits) here, but
+    // not all callers are ready to handle exceptions arising here.
+    char* end{nullptr};
+    unsigned long typeno = strtoul(digits, &end, 10);
+    if (typeno <= std::numeric_limits<uint16_t>::max() && end != digits && (*end == '\0' || isspace(static_cast<unsigned char>(*end)) != 0)) {
+      return typeno;
+    }
+  }
+  // Similarly, we would ideally throw std::invalid_argument here, but won't yet.
   return 0;
 }
 
-QType &QType::operator=(const char *p)
+QType& QType::operator=(const char* ptr)
 {
-  code = chartocode(p);
+  code = chartocode(ptr);
   return *this;
 }
 
-QType &QType::operator=(const string &s)
+QType& QType::operator=(const string& str)
 {
-  code = chartocode(s.c_str());
+  code = chartocode(str.c_str());
   return *this;
 }
 
-const std::string QClass::toString() const
+static const std::map<const std::string, uint16_t> s_classMap = {
+  {"IN", QClass::IN},
+  {"CHAOS", QClass::CHAOS},
+  {"NONE", QClass::NONE},
+  {"ANY", QClass::ANY},
+};
+
+QClass::QClass(const std::string& code)
+{
+  auto mapIt = s_classMap.find(code);
+  if (mapIt == s_classMap.end()) {
+    throw std::runtime_error("Invalid QClass '" + code + "'");
+  }
+  qclass = mapIt->second;
+}
+
+std::string QClass::toString() const
 {
   switch (qclass) {
   case IN:
@@ -177,7 +199,10 @@ const std::string QClass::toString() const
     return "NONE";
   case ANY:
     return "ANY";
-  default :
+  default:
     return "CLASS" + std::to_string(qclass);
   }
 }
+
+const std::set<uint16_t> QType::exclusiveEntryTypes = {
+  QType::CNAME};

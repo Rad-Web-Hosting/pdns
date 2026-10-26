@@ -26,14 +26,13 @@
 
 #include <boost/uuid/uuid.hpp>
 #include <boost/optional.hpp>
-#include <functional>
 
 #include "dnsname.hh"
 
 struct ResolveContext
 {
-  ResolveContext(const boost::optional<const boost::uuids::uuid&>& uuid, DNSName name) :
-    d_initialRequestId(uuid), d_nsName(std::move(name))
+  ResolveContext(const boost::optional<const boost::uuids::uuid&>& uuid, DNSName name, const DNSName& auth) :
+    d_initialRequestId(uuid), d_nsName(std::move(name)), d_auth(auth)
   {}
   ~ResolveContext() = default;
 
@@ -44,7 +43,5 @@ struct ResolveContext
 
   boost::optional<const boost::uuids::uuid&> d_initialRequestId;
   DNSName d_nsName;
-#ifdef HAVE_FSTRM
-  boost::optional<const DNSName&> d_auth;
-#endif
+  DNSName d_auth;
 };

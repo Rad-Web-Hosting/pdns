@@ -38,10 +38,11 @@ uint32_t localtime_format_YYYYMMDDSS(time_t t, uint32_t seq)
     + seq;
 }
 
-uint32_t calculateEditSOA(uint32_t old_serial, const string& kind, const DNSName& zonename)
+uint32_t calculateEditSOA(uint32_t old_serial, const string& kind, const ZoneName& zonename, Logr::log_t slog)
 {
   if(pdns_iequals(kind,"INCEPTION-INCREMENT")) {
-    time_t inception = getStartOfWeek();
+    auto [inception, secondsSince] = getStartOfWeek();
+    if (weekSpreadDelay(zonename) > secondsSince) { inception -= 7*86400; }
     uint32_t inception_serial = localtime_format_YYYYMMDDSS(inception, 1);
     uint32_t dont_increment_after = localtime_format_YYYYMMDDSS(inception + 2*86400, 99);
 
@@ -55,7 +56,8 @@ uint32_t calculateEditSOA(uint32_t old_serial, const string& kind, const DNSName
     }
   }
   else if(pdns_iequals(kind,"INCREMENT-WEEKS")) {
-    time_t inception = getStartOfWeek();
+    auto [inception, secondsSince] = getStartOfWeek();
+    if (weekSpreadDelay(zonename) > secondsSince) { inception -= 7*86400; }
     return (old_serial + (inception / (7*86400)));
   }
   else if(pdns_iequals(kind,"EPOCH")) {
@@ -63,7 +65,8 @@ uint32_t calculateEditSOA(uint32_t old_serial, const string& kind, const DNSName
     return time(nullptr);
   }
   else if(pdns_iequals(kind,"INCEPTION-EPOCH")) {
-    uint32_t inception = getStartOfWeek();
+    auto [inception, secondsSince] = getStartOfWeek();
+    if (weekSpreadDelay(zonename) > secondsSince) { inception -= 7*86400; }
     if (old_serial < inception)
       return inception;
   }
@@ -71,7 +74,8 @@ uint32_t calculateEditSOA(uint32_t old_serial, const string& kind, const DNSName
     // do nothing to serial. needed because a metadata of "" will use the default-soa-edit setting instead.
   }
   else if(!kind.empty()) {
-    g_log<<Logger::Warning<<"SOA-EDIT type '"<<kind<<"' for zone "<<zonename<<" is unknown."<<endl;
+    SLOG(g_log<<Logger::Warning<<"SOA-EDIT type '"<<kind<<"' for zone "<<zonename<<" is unknown."<<endl,
+         slog->info(Logr::Warning, "Unknown SOA-EDIT value", "zone", Logging::Loggable(zonename), "value", Logging::Loggable(kind)));
   }
   // Seen strictly, this is a broken config: we can only come here if
   // both SOA-EDIT and default-soa-edit are set to "", but the latter
@@ -79,21 +83,23 @@ uint32_t calculateEditSOA(uint32_t old_serial, const string& kind, const DNSName
   return old_serial;
 }
 
-uint32_t calculateEditSOA(uint32_t old_serial, DNSSECKeeper& dk, const DNSName& zonename) {
+uint32_t calculateEditSOA(uint32_t old_serial, DNSSECKeeper& dsk, const ZoneName& zonename, Logr::log_t slog)
+{
   string kind;
-  dk.getSoaEdit(zonename, kind);
-  return calculateEditSOA(old_serial, kind, zonename);
+  dsk.getSoaEdit(zonename, kind);
+  return calculateEditSOA(old_serial, kind, zonename, slog);
 }
 
 /** Used for SOA-EDIT-DNSUPDATE and SOA-EDIT-API. */
-static uint32_t calculateIncreaseSOA(uint32_t old_serial, const string& increaseKind, const string& editKind, const DNSName& zonename) {
+static uint32_t calculateIncreaseSOA(uint32_t old_serial, const string& increaseKind, const string& editKind, const ZoneName& zonename, Logr::log_t slog)
+{
   if (pdns_iequals(increaseKind, "SOA-EDIT-INCREASE")) {
     uint32_t new_serial = old_serial;
     if (!editKind.empty()) {
       if (pdns_iequals(editKind, "INCEPTION-EPOCH")) {
-        new_serial = calculateEditSOA(old_serial, "EPOCH", zonename);
+        new_serial = calculateEditSOA(old_serial, "EPOCH", zonename, slog);
       } else {
-        new_serial = calculateEditSOA(old_serial, editKind, zonename);
+        new_serial = calculateEditSOA(old_serial, editKind, zonename, slog);
       }
     }
     if (new_serial <= old_serial) {
@@ -102,7 +108,7 @@ static uint32_t calculateIncreaseSOA(uint32_t old_serial, const string& increase
     return new_serial;
   }
   else if (pdns_iequals(increaseKind, "SOA-EDIT")) {
-    return calculateEditSOA(old_serial, editKind, zonename);
+    return calculateEditSOA(old_serial, editKind, zonename, slog);
   }
   else if (pdns_iequals(increaseKind, "INCREASE")) {
     return old_serial + 1;
@@ -119,7 +125,8 @@ static uint32_t calculateIncreaseSOA(uint32_t old_serial, const string& increase
     }
     return new_serial;
   } else if(!increaseKind.empty()) {
-    g_log<<Logger::Warning<<"SOA-EDIT-API/DNSUPDATE type '"<<increaseKind<<"' for zone "<<zonename<<" is unknown."<<endl;
+    SLOG(g_log<<Logger::Warning<<"SOA-EDIT-API/DNSUPDATE type '"<<increaseKind<<"' for zone "<<zonename<<" is unknown."<<endl,
+         slog->info(Logr::Warning, "Unknown SOA-EDIT-API/DNSUPATE value", "zone", Logging::Loggable(zonename), "value", Logging::Loggable(increaseKind)));
   }
   return old_serial;
 }
@@ -130,14 +137,16 @@ static uint32_t calculateIncreaseSOA(uint32_t old_serial, const string& increase
  *
  * @return true if changes may have been made
  */
-bool increaseSOARecord(DNSResourceRecord& rr, const string& increaseKind, const string& editKind) {
+bool increaseSOARecord(DNSResourceRecord& rr, const string& increaseKind, const string& editKind, const ZoneName& zonename, Logr::log_t slog) // NOLINT(readability-identifier-length)
+{
   if (increaseKind.empty())
     return false;
 
   SOAData sd;
+  sd.zonename = zonename;
   fillSOAData(rr.content, sd);
 
-  sd.serial = calculateIncreaseSOA(sd.serial, increaseKind, editKind, rr.qname);
+  sd.serial = calculateIncreaseSOA(sd.serial, increaseKind, editKind, zonename, slog);
   rr.content = makeSOAContent(sd)->getZoneRepresentation(true);
   return true;
 }
@@ -148,12 +157,12 @@ bool increaseSOARecord(DNSResourceRecord& rr, const string& increaseKind, const 
  *
  * @return true if rrout is now valid
  */
-bool makeIncreasedSOARecord(SOAData& sd, const string& increaseKind, const string& editKind, DNSResourceRecord& rrout) {
+bool makeIncreasedSOARecord(SOAData& sd, const string& increaseKind, const string& editKind, DNSResourceRecord& rrout, Logr::log_t slog) {
   if (increaseKind.empty())
     return false;
 
-  sd.serial = calculateIncreaseSOA(sd.serial, increaseKind, editKind, sd.qname);
-  rrout.qname = sd.qname;
+  sd.serial = calculateIncreaseSOA(sd.serial, increaseKind, editKind, sd.zonename, slog);
+  rrout.qname = sd.qname();
   rrout.content = makeSOAContent(sd)->getZoneRepresentation(true);
   rrout.qtype = QType::SOA;
   rrout.domain_id = sd.domain_id;
@@ -163,12 +172,12 @@ bool makeIncreasedSOARecord(SOAData& sd, const string& increaseKind, const strin
   return true;
 }
 
-DNSZoneRecord makeEditedDNSZRFromSOAData(DNSSECKeeper& dk, const SOAData& sd, DNSResourceRecord::Place place) {
+DNSZoneRecord makeEditedDNSZRFromSOAData(DNSSECKeeper& dk, const SOAData& sd, DNSResourceRecord::Place place, Logr::log_t slog) {
   SOAData edited = sd;
-  edited.serial = calculateEditSOA(sd.serial, dk, sd.qname);
+  edited.serial = calculateEditSOA(sd.serial, dk, sd.zonename, slog);
 
   DNSRecord soa;
-  soa.d_name = sd.qname;
+  soa.d_name = sd.qname();
   soa.d_type = QType::SOA;
   soa.d_ttl = sd.ttl;
   soa.d_place = place;
